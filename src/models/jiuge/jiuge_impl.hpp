@@ -28,6 +28,8 @@ struct DeviceResource {
     infinicclComm_t comm;
 
     std::shared_ptr<MemoryPool> memory_pool;
+    //
+    const void *weights_tensor_ptr{nullptr};
 };
 
 struct InferState {

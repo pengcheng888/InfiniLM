@@ -33,6 +33,47 @@ void InferenceContext::add(std::shared_ptr<Tensor> c,
         c->data(), a->data(), b->data(), stream));
 }
 
+void InferenceContext::mul(std::shared_ptr<Tensor> c,
+                           std::shared_ptr<Tensor> a,
+                           std::shared_ptr<Tensor> b) {
+    size_t key = CacheManager::createDescriptorKey(c, a, b);
+
+    infiniopMulDescriptor_t desc;
+    if (!cache_manager->getMulDescriptor(key, desc)) {
+        RUN_INFINI(infiniopCreateMulDescriptor(rsrc->handle, &desc, c->desc(), a->desc(), b->desc()));
+        cache_manager->putMulDescriptor(key, desc);
+    }
+
+    size_t workspace_size = 0;
+    RUN_INFINI(infiniopGetMulWorkspaceSize(desc, &workspace_size));
+    ensure_workspace(workspace_size);
+    void *workspace = workspace_storage->memory();
+
+    RUN_INFINI(infiniopMul(
+        desc, workspace, workspace_size,
+        c->data(), a->data(), b->data(), stream));
+}
+
+void InferenceContext::sigmoid(std::shared_ptr<Tensor> y,
+                               std::shared_ptr<Tensor> x) {
+    size_t key = CacheManager::createDescriptorKey(y, x);
+
+    infiniopSigmoidDescriptor_t desc;
+    if (!cache_manager->getSigmoidDescriptor(key, desc)) {
+        RUN_INFINI(infiniopCreateSigmoidDescriptor(rsrc->handle, &desc, y->desc(), x->desc()));
+        cache_manager->putSigmoidDescriptor(key, desc);
+    }
+
+    size_t workspace_size = 0;
+    RUN_INFINI(infiniopGetSigmoidWorkspaceSize(desc, &workspace_size));
+    ensure_workspace(workspace_size);
+    void *workspace = workspace_storage->memory();
+
+    RUN_INFINI(infiniopSigmoid(
+        desc, workspace, workspace_size,
+        y->data(), x->data(), stream));
+}
+
 void InferenceContext::rmsnorm(std::shared_ptr<Tensor> y,
                                std::shared_ptr<Tensor> x,
                                std::shared_ptr<Tensor> w,
@@ -230,4 +271,28 @@ void InferenceContext::linear(std::shared_ptr<Tensor> c,
         strides.push_back(bias->strides()[0]);
         add(c, c, bias->view_as(c->shape(), strides));
     }
+}
+
+void InferenceContext::topksoftmax(std::shared_ptr<Tensor> values,  // F32
+                                   std::shared_ptr<Tensor> indices, // I32
+                                   std::shared_ptr<Tensor> x,
+                                   size_t topk,
+                                   bool norm_topk_prob) {
+
+    size_t key = CacheManager::createDescriptorKey(values, indices, x);
+
+    infiniopTopksoftmaxDescriptor_t desc;
+    if (!cache_manager->getTopksoftmaxDescriptor(key, desc)) {
+        RUN_INFINI(infiniopCreateTopksoftmaxDescriptor(rsrc->handle, &desc, x->desc()));
+        cache_manager->putTopksoftmaxDescriptor(key, desc);
+    }
+
+    size_t workspace_size = 0;
+    RUN_INFINI(infiniopGetTopksoftmaxWorkspaceSize(desc, &workspace_size));
+    ensure_workspace(workspace_size);
+    void *workspace = workspace_storage->memory();
+
+    RUN_INFINI(infiniopTopksoftmax(
+        desc, workspace, workspace_size,
+        values->data(), indices->data(), x->data(), topk, norm_topk_prob, stream));
 }

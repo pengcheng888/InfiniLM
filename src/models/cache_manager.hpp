@@ -142,24 +142,31 @@ private:
     const size_t DEFAULT_CACHE_CAPACITY = 128;
 
     LRUDescriptorCache<infiniopAddDescriptor_t> add_cache;
+    LRUDescriptorCache<infiniopMulDescriptor_t> mul_cache;
+    LRUDescriptorCache<infiniopSigmoidDescriptor_t> sigmoid_cache;
     LRUDescriptorCache<infiniopRMSNormDescriptor_t> rms_norm_cache;
     LRUDescriptorCache<infiniopGemmDescriptor_t> gemm_cache;
     LRUDescriptorCache<infiniopRoPEDescriptor_t> rope_cache;
     LRUDescriptorCache<infiniopRearrangeDescriptor_t> rearrange_cache;
     LRUDescriptorCache<infiniopCausalSoftmaxDescriptor_t> causal_softmax_cache;
     LRUDescriptorCache<infiniopSwiGLUDescriptor_t> swiglu_cache;
+
     LRUDescriptorCache<infiniopRandomSampleDescriptor_t> random_sample_cache;
+    LRUDescriptorCache<infiniopTopksoftmaxDescriptor_t> topksoftmax_cache;
 
 public:
     CacheManager(size_t capacity = 100)
         : add_cache(capacity, infiniopDestroyAddDescriptor),
+          mul_cache(capacity, infiniopDestroyMulDescriptor),
+          sigmoid_cache(capacity, infiniopDestroySigmoidDescriptor),
           rms_norm_cache(capacity, infiniopDestroyRMSNormDescriptor),
           gemm_cache(capacity, infiniopDestroyGemmDescriptor),
           rope_cache(capacity, infiniopDestroyRoPEDescriptor),
           rearrange_cache(capacity, infiniopDestroyRearrangeDescriptor),
           causal_softmax_cache(capacity, infiniopDestroyCausalSoftmaxDescriptor),
           swiglu_cache(capacity, infiniopDestroySwiGLUDescriptor),
-          random_sample_cache(capacity, infiniopDestroyRandomSampleDescriptor) {}
+          random_sample_cache(capacity, infiniopDestroyRandomSampleDescriptor),
+          topksoftmax_cache(capacity, infiniopDestroyTopksoftmaxDescriptor) {}
 
     // Add operations
     bool getAddDescriptor(size_t key, infiniopAddDescriptor_t &desc) {
@@ -168,6 +175,24 @@ public:
 
     void putAddDescriptor(size_t key, const infiniopAddDescriptor_t &desc) {
         add_cache.put(key, desc);
+    }
+
+    // Mul operations
+    bool getMulDescriptor(size_t key, infiniopMulDescriptor_t &desc) {
+        return mul_cache.get(key, desc);
+    }
+
+    void putMulDescriptor(size_t key, const infiniopMulDescriptor_t &desc) {
+        mul_cache.put(key, desc);
+    }
+
+    // Sigmoid operations
+    bool getSigmoidDescriptor(size_t key, infiniopSigmoidDescriptor_t &desc) {
+        return sigmoid_cache.get(key, desc);
+    }
+
+    void putSigmoidDescriptor(size_t key, const infiniopSigmoidDescriptor_t &desc) {
+        sigmoid_cache.put(key, desc);
     }
 
     // RMSNorm operations
@@ -231,6 +256,15 @@ public:
 
     void putRandomSampleDescriptor(size_t key, const infiniopRandomSampleDescriptor_t &desc) {
         random_sample_cache.put(key, desc);
+    }
+
+    // Topksoftmax operations
+    bool getTopksoftmaxDescriptor(size_t key, infiniopTopksoftmaxDescriptor_t &desc) {
+        return topksoftmax_cache.get(key, desc);
+    }
+
+    void putTopksoftmaxDescriptor(size_t key, const infiniopTopksoftmaxDescriptor_t &desc) {
+        topksoftmax_cache.put(key, desc);
     }
 
     template <typename... Tensors>

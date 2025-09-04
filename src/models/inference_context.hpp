@@ -19,6 +19,14 @@ struct InferenceContext {
     void add(std::shared_ptr<Tensor> c,
              std::shared_ptr<Tensor> a,
              std::shared_ptr<Tensor> b);
+
+    void mul(std::shared_ptr<Tensor> c,
+             std::shared_ptr<Tensor> a,
+             std::shared_ptr<Tensor> b);
+
+    void sigmoid(std::shared_ptr<Tensor> Y,
+                 std::shared_ptr<Tensor> x);
+
     void rmsnorm(std::shared_ptr<Tensor> y,
                  std::shared_ptr<Tensor> x,
                  std::shared_ptr<Tensor> w,
@@ -49,6 +57,12 @@ struct InferenceContext {
                 float alpha, float beta,
                 std::shared_ptr<Tensor> residual,
                 std::shared_ptr<Tensor> bias);
+
+    void topksoftmax(std::shared_ptr<Tensor> values,  // F32
+                     std::shared_ptr<Tensor> indices, // I32
+                     std::shared_ptr<Tensor> x,
+                     size_t topk,
+                     bool norm_topk_prob);
 };
 
 namespace {
@@ -66,6 +80,14 @@ inline void setInferenceContext(InferenceContext *ctx) {
 
 inline void add(std::shared_ptr<Tensor> c, std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) {
     getInferenceContext().add(c, a, b);
+}
+
+inline void mul(std::shared_ptr<Tensor> c, std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) {
+    getInferenceContext().mul(c, a, b);
+}
+
+inline void sigmoid(std::shared_ptr<Tensor> y, std::shared_ptr<Tensor> x) {
+    getInferenceContext().sigmoid(y, x);
 }
 
 inline void rmsnorm(std::shared_ptr<Tensor> y, std::shared_ptr<Tensor> x,
@@ -106,4 +128,17 @@ inline void linear(std::shared_ptr<Tensor> c, std::shared_ptr<Tensor> a,
                    std::shared_ptr<Tensor> b, float alpha, float beta,
                    std::shared_ptr<Tensor> residual, std::shared_ptr<Tensor> bias) {
     getInferenceContext().linear(c, a, b, alpha, beta, residual, bias);
+}
+
+inline void topksoftmax(std::shared_ptr<Tensor> values,  // F32
+                        std::shared_ptr<Tensor> indices, // I32
+                        std::shared_ptr<Tensor> x,
+                        size_t topk,
+                        bool norm_topk_prob) {
+
+    getInferenceContext().topksoftmax(values,  // F32
+                                      indices, // I32
+                                      x,
+                                      topk,
+                                      norm_topk_prob);
 }
