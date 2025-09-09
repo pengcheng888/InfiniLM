@@ -10,8 +10,8 @@ import torch
 import transformers
 
 from libinfinicore_infer import (
-    QwenHybridModel,
-    QwenHybridMetaCStruct,
+    Qwen2Model,
+    Qwen2MetaCStruct,
     DataType,
     DeviceType,
     KVCacheCStruct,
@@ -24,14 +24,17 @@ from ctypes import POINTER, c_float, c_int, c_uint, c_void_p, byref
 torch.set_default_device("cpu")
 
 
-class QwenHybridMetaFromConfig(QwenHybridMetaCStruct):
+class Qwen2MetaFromConfig(Qwen2MetaCStruct):
     def __init__(self, config, dtype=torch.float16, max_tokens=None):
 
-        if config["torch_dtype"] == "float16":
+        if dtype is None:
+            dtype = config["torch_dtype"] 
+
+        if dtype == "float16":
             dt_ = DataType.INFINI_DTYPE_F16
-        elif config["torch_dtype"] == "float32":
+        elif dtype == "float32":
             dt_ = DataType.INFINI_DTYPE_F32
-        elif config["torch_dtype"] == "bfloat16":
+        elif dtype == "bfloat16":
             dt_ = DataType.INFINI_DTYPE_BF16
         else:
             dt_ = DataType.INFINI_DTYPE_F16
@@ -41,12 +44,13 @@ class QwenHybridMetaFromConfig(QwenHybridMetaCStruct):
             if type(config["eos_token_id"]) == list
             else config["eos_token_id"]
         )
-     
+    
         super().__init__(
             # common
             dtype=dt_,
             nlayer=config["num_hidden_layers"],
             d=config["hidden_size"],
+            di=config["intermediate_size"],
             dctx=(
                 config["max_position_embeddings"] if max_tokens is None else max_tokens
             ),
@@ -62,17 +66,12 @@ class QwenHybridMetaFromConfig(QwenHybridMetaCStruct):
             ),
             dh=config["hidden_size"] // config["num_attention_heads"],
             theta=(config["rope_theta"] if "rope_theta" in config else 100000.0),
-            # moe
-            nexperts=config.get("num_experts", 0),
-            kexperts=config.get("num_experts_per_tok", 0),
-            shared_di=config.get("shared_expert_intermediate_size", 5632),
-            moe_di=config.get("moe_intermediate_size", 0),
-            norm_topk_prob=config.get("norm_topk_prob", False),
         )
         self.torch_dtype_logits = dtype
 
 
-class QwenHybridBatchedTask:
+
+class Qwen2BatchedTask:
     def __init__(self, tasks: List[InferTask]):
         self.tasks = tasks
         self.nreq = len(tasks)
@@ -117,7 +116,7 @@ class QwenHybridBatchedTask:
         )
 
 
-class QwenHybridForCausalLM:
+class Qwen2ForCausalLM:
     def __init__(
         self, model_dir_path, device=DeviceType.DEVICE_TYPE_CPU, ndev=1, max_tokens=None
     ):
@@ -134,9 +133,9 @@ class QwenHybridForCausalLM:
         self.dev_ids = (c_int * ndev)(*[i for i in range(ndev)])
         self.ndev = ndev
         self.device = device
-        self.meta = QwenHybridMetaFromConfig(config, max_tokens=max_tokens)
+        self.meta = Qwen2MetaFromConfig(config, max_tokens=max_tokens)
 
-        self.model = QwenHybridModel()
+        self.model = Qwen2Model()
 
         self.weights = self.model.create_weights(
             byref(self.meta),
@@ -165,12 +164,45 @@ class QwenHybridForCausalLM:
 
     def load_all_safetensors_from_dir(self, dir_path_: str):
         dir_path_ = Path(dir_path_)
+
+        model_embed_tokens_weight = None
+        lm_head_weight = None
+        torch_dtype_logits =  self.meta.torch_dtype_logits
+
+        torch_dtype_logits =  self.meta.torch_dtype_logits
+
+    
+        nh =  self.meta.nh
+        dh =  self.meta.dh
+        nkvh=  self.meta.nkvh
+        
         for file in sorted(dir_path_.glob("*.safetensors")):
             with safetensors.safe_open(file, framework="pt", device="cpu") as f:
                 for key in f.keys():
                     # print(key)
                     tensor = f.get_tensor(key)
+                    tensor = tensor.to(torch_dtype_logits)
+           
+                    if key == "model.embed_tokens.weight":
+                        model_embed_tokens_weight = tensor
+                    if key == "lm_head.weight":
+                        lm_head_weight = tensor
+
+                    # if key.endswith(".self_attn.q_proj.bias"):
+                    #     tensor = tensor.reshape([nh, 2, dh // 2]).transpose(1, 2).contiguous()
+                    # if key.endswith(".self_attn.k_proj.bias"):
+                    #     tensor = tensor.reshape([nkvh, 2, dh // 2]).transpose(1, 2).contiguous()
+                    # if key.endswith(".self_attn.v_proj.bias"):
+                    #     tensor = tensor.reshape([nkvh, dh // 2, 2]).contiguous()
+     
                     self.model.load_weight(self.weights, key, tensor.data_ptr())
+        
+        # print("model_embed_tokens_weight: ", model_embed_tokens_weight)
+        # print("lm_head_weight: ", lm_head_weight)
+        if lm_head_weight is None:
+            lm_head_weight = model_embed_tokens_weight.contiguous()
+            self.model.load_weight(self.weights, "lm_head.weight", lm_head_weight.data_ptr())
+            
 
     def max_context_len(self):
         return self.meta.dctx
@@ -201,7 +233,7 @@ class QwenHybridForCausalLM:
 
     def batch_infer_one_round(self, tasks: List[InferTask]):
         output = (c_uint * len(tasks))()
-        batch_inputs = QwenHybridBatchedTask(tasks)
+        batch_inputs = Qwen2BatchedTask(tasks)
         self.model.infer_batch(
             self.model_instance,
             *(batch_inputs.input_args()),
@@ -218,7 +250,7 @@ class QwenHybridForCausalLM:
         print(input_content, end="", flush=True)
         tokens = self.tokenizer.encode(input_content)
         print("tokens: ", tokens)
-        tokens =[4340,  525,  498,   11]
+        # tokens =[4340,  525,  498,   11]
 
         infer_task = InferTask(
             0,
@@ -252,7 +284,7 @@ class QwenHybridForCausalLM:
             if step_i > 0:
                 total_time += end_time - start_time
             
-
+ 
 
         print("\n")
         avg_time = total_time * 1000 / (steps - 1 + 1e-6)
@@ -288,7 +320,7 @@ class QwenHybridForCausalLM:
                 tasks[batch_id].bind_kvcache(kv_caches[batch_id])
                 batch_id += 1
 
-            batch_inputs = QwenHybridBatchedTask(tasks[:batch_id])
+            batch_inputs = Qwen2BatchedTask(tasks[:batch_id])
             logits = torch.zeros(
                 (batch_inputs.ntok, self.meta.dvoc), dtype=self.meta.torch_dtype_logits
             )
@@ -329,7 +361,7 @@ class QwenHybridForCausalLM:
 def test():
     if len(sys.argv) < 3:
         print(
-            "Usage: python qwen_hybrid.py [--cpu | --nvidia| --cambricon | --ascend | --metax | --moore] <path/to/model_dir> [n_device]"
+            "Usage: python qwen2.py [--cpu | --nvidia| --cambricon | --ascend | --metax | --moore] <path/to/model_dir> [n_device]"
         )
         sys.exit(1)
     model_path = sys.argv[2]
@@ -350,13 +382,14 @@ def test():
         device_type = DeviceType.DEVICE_TYPE_ILUVATAR
     else:
         print(
-            "Usage: python qwen_hybrid.py [--cpu | --nvidia| --cambricon | --ascend | --metax | --moore] <path/to/model_dir> [n_device]"
+            "Usage: python qwen2.py [--cpu | --nvidia| --cambricon | --ascend | --metax | --moore] <path/to/model_dir> [n_device]"
         )
         sys.exit(1)
 
     ndev = int(sys.argv[3]) if len(sys.argv) > 3 else 1
-    model = QwenHybridForCausalLM(model_path, device_type, ndev)
-    model.generate("山东最高的山是？", 500)
+    model = Qwen2ForCausalLM(model_path, device_type, ndev)
+    model.generate("山东最高的山是？", 50)
+    # model.generate("how are you,", 50)
     model.destroy_model_instance()
 
 def test1():
@@ -372,13 +405,11 @@ def test1():
         print("Usage: python qwen2_moe.py --nvidia <path/to/model_dir> [n_device]")
         sys.exit(1)
 
-    model_path = r"/home/ubuntu/workspace_aisys/tensorRT_quantization-main/Qwen/Qwen1.5-MoE-A2.7B_small"
-    # model_path = r"/home/ubuntu/workspace_aisys/tensorRT_quantization-main/Qwen/Qwen1.5-MoE-A2.7B"
-    # model_path = r"/home/ubuntu/workspace_aisys/tensorRT_quantization-main/9G4B"
+    model_path = r"/home/ubuntu/workspace_aisys/tensorRT_quantization-main/Qwen/Qwen2-0.5B"
     
     ndev = int(sys.argv[3]) if len(sys.argv) > 3 else 1
-    model = QwenHybridForCausalLM(model_path, device_type, ndev)
-    model.generate("山东最高的山是？", 20)
+    model = Qwen2ForCausalLM(model_path, device_type, ndev)
+    model.generate("山东最高的山是？", 50)
     model.destroy_model_instance()
 
 

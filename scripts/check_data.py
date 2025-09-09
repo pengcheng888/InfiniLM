@@ -94,7 +94,7 @@ if __name__ == '__main__':
 
     # ---------------- c++ 数据 ------------------ #
 
-    file_path = f"/home/ubuntu/Downloads/InfiniLM-qwen2moe-test/layer_ffn_out.bin"
+    file_path = f"/home/ubuntu/Downloads/InfiniLM/data.bin"
     data_array = read_data_torch(file_path)
     data_array = data_array.reshape(-1)
 

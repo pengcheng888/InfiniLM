@@ -1,0 +1,170 @@
+#include "qwen2.hpp"
+
+#include <cmath>
+
+inline std::shared_ptr<Tensor> getSinTable(size_t dctx, size_t dh, float theta, infiniDtype_t dtype) {
+    auto half_dh = dh / 2;
+    auto unit = dsize(dtype);
+    void *table = std::malloc(dctx * half_dh * unit);
+
+    for (size_t i = 0; i < dctx; i++) {
+        for (size_t j = 0; j < half_dh; j++) {
+            float _sin = std::sin(
+                static_cast<float>(i) / std::pow(theta, static_cast<float>(j) / half_dh));
+
+            if (dtype == INFINI_DTYPE_F16) {
+                ((uint16_t *)table)[i * half_dh + j] = f32_to_f16(_sin);
+            } else if (dtype == INFINI_DTYPE_BF16) {
+                ((uint16_t *)table)[i * half_dh + j] = f32_to_bf16(_sin);
+            } else if (dtype == INFINI_DTYPE_F32) {
+                ((float *)table)[i * half_dh + j] = _sin;
+            } else {
+                std::cout << "Sin table unsupported dtype" << std::endl;
+                std::abort();
+            }
+        }
+    }
+    auto shape = std::vector<size_t>({dctx, half_dh});
+    auto tensor = Tensor::weight(table, dtype, shape);
+    std::free(table);
+    return tensor;
+}
+
+inline std::shared_ptr<Tensor> getCosTable(size_t dctx, size_t dh, float theta, infiniDtype_t dtype) {
+    auto half_dh = dh / 2;
+    auto unit = dsize(dtype);
+    void *table = std::malloc(dctx * half_dh * unit);
+
+    for (size_t i = 0; i < dctx; i++) {
+        for (size_t j = 0; j < half_dh; j++) {
+            float _cos = std::cos(
+                static_cast<float>(i) / std::pow(theta, static_cast<float>(j) / half_dh));
+
+            if (dtype == INFINI_DTYPE_F16) {
+                ((uint16_t *)table)[i * half_dh + j] = f32_to_f16(_cos);
+            } else if (dtype == INFINI_DTYPE_BF16) {
+                ((uint16_t *)table)[i * half_dh + j] = f32_to_bf16(_cos);
+            } else if (dtype == INFINI_DTYPE_F32) {
+                ((float *)table)[i * half_dh + j] = _cos;
+            } else {
+                std::cout << "Cos table unsupported dtype" << std::endl;
+                std::abort();
+            }
+        }
+    }
+    auto shape = std::vector<size_t>({dctx, half_dh});
+    auto tensor = Tensor::weight(table, dtype, shape);
+    std::free(table);
+    return tensor;
+}
+
+namespace {
+
+void print_info(const Qwen2Meta &meta) {
+    printf("Qwen2Meta: \n");
+
+    // common
+    printf(" dt_logits : %d\n", meta.dtype);
+    printf(" nlayer : %ld\n", meta.nlayer);
+    printf(" d : %ld\n", meta.d);
+    printf(" dctx : %ld\n", meta.dctx);
+    printf(" dvoc : %ld\n", meta.dvoc);
+    printf(" epsilon : %f\n", meta.epsilon);
+    printf(" end_token : %d\n", meta.end_token);
+
+    // mha
+    printf(" nh : %ld\n", meta.nh);
+    printf(" nkvh : %ld\n", meta.nkvh);
+    printf(" dh : %ld\n", meta.dh);
+    printf(" theta : %f\n", meta.theta);
+
+    printf("\n");
+}
+}; // namespace
+
+Qwen2Weights::Qwen2Weights(
+    const Qwen2Meta *meta,
+    infiniDevice_t device,
+    const std::vector<int> &dev_ids) : infinicore::weights::Loader(device, dev_ids) {
+    auto ndev = dev_ids.size();
+    _device_weights.resize(ndev);
+    infiniDtype_t dt_logits = meta->dtype;
+    infiniDtype_t dt_norm_w = meta->dtype;
+    size_t nlayer = meta->nlayer;
+    size_t d = meta->d;
+    size_t nh = meta->nh / ndev;
+    size_t nkvh = meta->nkvh / ndev;
+    size_t dh = meta->dh;
+    size_t di = meta->di / ndev;
+    size_t dctx = meta->dctx;
+    size_t dvoc = meta->dvoc;
+
+    printf("Qwen2Weights::Qwen2Weights: \n");
+    print_info(*meta);
+
+    for (size_t i = 0; i < ndev; i++) {
+        RUN_INFINI(infinirtSetDevice(device, dev_ids[i]));
+
+        auto weight = std::make_shared<Qwen2DeviceWeight>();
+        _device_weights[i] = weight;
+
+        auto w_in_embd = Tensor::weight(nullptr, dt_logits, {dvoc, d});
+        this->register_weight("model.embed_tokens.weight", w_in_embd, i);
+        weight->w_in_embd = w_in_embd;
+
+        auto w_out_norm = Tensor::weight(nullptr, dt_norm_w, {d});
+        this->register_weight("model.norm.weight", w_out_norm, i);
+        weight->w_out_norm = w_out_norm;
+
+        auto w_out_embd = Tensor::weight(nullptr, dt_logits, {dvoc, d})->permute({1, 0});
+        this->register_weight("lm_head.weight", w_out_embd, i);
+        weight->w_out_embd = w_out_embd;
+
+        weight->sin_table = getSinTable(dctx, dh, meta->theta, dt_logits);
+        weight->cos_table = getCosTable(dctx, dh, meta->theta, dt_logits);
+
+        for (size_t layer = 0; layer < nlayer; layer++) {
+
+#define REGISTER_LAYER_WEIGHT_1D(W_NAME, W_VAR, W_DIM, W_DTYPE, W_DIST_TYPE)                     \
+    auto W_VAR = Tensor::weight(nullptr, W_DTYPE, {W_DIM});                                      \
+    this->register_weight(W_NAME, W_VAR, i, infinicore::weights::DistributionType::W_DIST_TYPE); \
+    weight->W_VAR.push_back(W_VAR);
+
+#define REGISTER_LAYER_WEIGHT_2D(W_NAME, W_VAR, W_DIM_1, W_DIM_2, W_DTYPE, W_DIST_TYPE)          \
+    auto W_VAR = Tensor::weight(nullptr, W_DTYPE, {W_DIM_2, W_DIM_1})->permute({1, 0});          \
+    this->register_weight(W_NAME, W_VAR, i, infinicore::weights::DistributionType::W_DIST_TYPE); \
+    weight->W_VAR.push_back(W_VAR);
+
+            REGISTER_LAYER_WEIGHT_1D("model.layers." + std::to_string(layer) + ".input_layernorm.weight", w_attn_norm, d, dt_norm_w, FULL);
+
+            REGISTER_LAYER_WEIGHT_2D("model.layers." + std::to_string(layer) + ".self_attn.q_proj.weight", w_attn_q, d, nh * dh, dt_logits, ROW);
+            REGISTER_LAYER_WEIGHT_2D("model.layers." + std::to_string(layer) + ".self_attn.k_proj.weight", w_attn_k, d, nkvh * dh, dt_logits, ROW);
+            REGISTER_LAYER_WEIGHT_2D("model.layers." + std::to_string(layer) + ".self_attn.v_proj.weight", w_attn_v, d, nkvh * dh, dt_logits, ROW);
+            REGISTER_LAYER_WEIGHT_2D("model.layers." + std::to_string(layer) + ".self_attn.o_proj.weight", w_attn_out, nh * dh, d, dt_logits, COLUMN);
+
+            // b_attn_q, b_attn_k, b_attn_k
+            REGISTER_LAYER_WEIGHT_1D("model.layers." + std::to_string(layer) + ".self_attn.q_proj.bias", b_attn_q, nh * dh, dt_logits, FULL);
+            REGISTER_LAYER_WEIGHT_1D("model.layers." + std::to_string(layer) + ".self_attn.k_proj.bias", b_attn_k, nkvh * dh, dt_logits, FULL);
+            REGISTER_LAYER_WEIGHT_1D("model.layers." + std::to_string(layer) + ".self_attn.v_proj.bias", b_attn_v, nkvh * dh, dt_logits, FULL);
+
+            // MLP
+            REGISTER_LAYER_WEIGHT_1D("model.layers." + std::to_string(layer) + ".post_attention_layernorm.weight", w_ffn_norm, d, dt_norm_w, FULL);
+            REGISTER_LAYER_WEIGHT_2D("model.layers." + std::to_string(layer) + ".mlp.gate_proj.weight", w_ffn_gate, d, di, dt_logits, ROW);
+            REGISTER_LAYER_WEIGHT_2D("model.layers." + std::to_string(layer) + ".mlp.up_proj.weight", w_ffn_up, d, di, dt_logits, ROW);
+            REGISTER_LAYER_WEIGHT_2D("model.layers." + std::to_string(layer) + ".mlp.down_proj.weight", w_ffn_down, di, d, dt_logits, COLUMN);
+        }
+    }
+
+    printf("----------> 33  \n");
+#undef REGISTER_LAYER_WEIGHT_1D
+#undef REGISTER_LAYER_WEIGHT_2D
+}
+
+__C struct ModelWeights *
+createQwen2Weights(const Qwen2Meta *meta,
+                   infiniDevice_t device,
+                   int ndev,
+                   const int *dev_ids) {
+    Qwen2Weights *weights = new Qwen2Weights(meta, device, std::vector<int>(dev_ids, dev_ids + ndev));
+    return (struct ModelWeights *)weights;
+}
