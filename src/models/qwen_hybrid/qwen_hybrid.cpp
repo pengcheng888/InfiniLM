@@ -125,6 +125,10 @@ void inferDeviceBatch(const QwenHybridMeta *meta, DeviceResource &rsrc,
 
     // Compute
     for (uint32_t layer = 0; layer < nlayer; layer++) {
+
+        //printf(" ilayer %d   nlayer %ld\n",layer, nlayer);
+        
+
         // 1. Attention
         // rms norm
         rmsnorm(logits_out, logits_in, weight->w_attn_norm[layer], meta->epsilon);
@@ -179,6 +183,7 @@ void inferDeviceBatch(const QwenHybridMeta *meta, DeviceResource &rsrc,
         // o_proj
         linear(logits_in, o_buf, weight->w_attn_out[layer],
                1.0, 0.0, idev == 0 ? logits_in : nullptr, nullptr); // only rank 0 adds residual
+
         // All_reduce if distributed
         if (rsrc.comm != nullptr) {
             RUN_INFINI(infinicclAllReduce(
@@ -186,8 +191,15 @@ void inferDeviceBatch(const QwenHybridMeta *meta, DeviceResource &rsrc,
                 INFINICCL_SUM, rsrc.comm, stream));
             RUN_INFINI(infinirtStreamSynchronize(stream));
         }
+
+  
+
+       // printf(" \t FFN \n");
+      
         // 2. FFN
         rmsnorm(logits_out, logits_in, weight->w_ffn_norm[layer], meta->epsilon);
+    
+    
 
         // MLP
         {
@@ -205,12 +217,11 @@ void inferDeviceBatch(const QwenHybridMeta *meta, DeviceResource &rsrc,
             std::shared_ptr<Tensor> hidden_states = logits_out; // logits_out 是整个 MoE的输入，重新起名字为 hidden_states
 
             // 需要提前申请的缓存
-            size_t moe_intermediate_size = meta->moe_di;
-
+            size_t moe_intermediate_size = meta->moe_di / ndev;;
             auto router_gate_buf = Tensor::buffer(dt_logits, {1, 1 * moe_intermediate_size}, rsrc.memory_pool);
             auto router_up_buf = Tensor::buffer(dt_logits, {1, 1 * moe_intermediate_size}, rsrc.memory_pool);
 
-            size_t shared_expert_intermediate_size = meta->shared_di;
+            size_t shared_expert_intermediate_size = meta->shared_di / ndev;
             auto shared_gate_buf = Tensor::buffer(dt_logits, {ntok, 1 * shared_expert_intermediate_size}, rsrc.memory_pool);
             auto shared_up_buf = Tensor::buffer(dt_logits, {ntok, 1 * shared_expert_intermediate_size}, rsrc.memory_pool);
 
@@ -244,12 +255,19 @@ void inferDeviceBatch(const QwenHybridMeta *meta, DeviceResource &rsrc,
                 linear(shared_gate_buf, hidden_states, w_gate, 1.0, 0.0, nullptr, nullptr);
                 linear(shared_up_buf, hidden_states, w_up, 1.0, 0.0, nullptr, nullptr);
                 swiglu(shared_gate_buf, shared_up_buf, shared_gate_buf);
-                linear(shared_states, shared_gate_buf, w_down, 1.0, 0.0, nullptr, nullptr); // only rank 0 adds residual
+                linear(shared_states, shared_gate_buf, w_down, 1.0, 0.0, nullptr, nullptr); // only rank 0 adds residual  // 通信后是ok 
+
+                if (rsrc.comm != nullptr) { // 通信1
+                    RUN_INFINI(infinicclAllReduce(
+                        shared_states->data(), shared_states->data(), ntok * d, dt_logits,
+                        INFINICCL_SUM, rsrc.comm, stream));
+                    RUN_INFINI(infinirtStreamSynchronize(stream));
+                }
 
                 // gate
                 w_gate = weight->w_shared_expert_gate[layer];
                 linear(shared_gate_output, hidden_states, w_gate, 1.0, 0.0, nullptr, nullptr); // N,1
-                sigmoid(shared_gate_output, shared_gate_output);
+                sigmoid(shared_gate_output, shared_gate_output); // 两个卡上的结果一模一样
 
                 // mul
                 shared_gate_output = shared_gate_output->view_as(shared_states->shape(), {1, 0});
@@ -273,11 +291,10 @@ void inferDeviceBatch(const QwenHybridMeta *meta, DeviceResource &rsrc,
             {
                 // 输入: hidden_states, values_cpu，indices_cpu
                 // 输出: 每个token的router专家加权和
-
+             
                 for (size_t itok = 0; itok < ntok; ++itok) {
                     std::shared_ptr<Tensor> hidden_states_i = hidden_states->slice(0, itok, 1);
                     std::shared_ptr<Tensor> router_states_sum_i = router_states_sum->slice(0, itok, 1);
-
                     // 经过第一个专家 : C = alpha * AB
                     {
                         int index = indices_cpu[itok * topk + 0];
@@ -308,24 +325,34 @@ void inferDeviceBatch(const QwenHybridMeta *meta, DeviceResource &rsrc,
                         swiglu(router_gate_buf, router_up_buf, router_gate_buf);
                         linear(router_states_sum_i, router_gate_buf, w_down, alpha, 0.0, router_states_sum_i, nullptr); // only rank 0 adds residual
                     }
+                 }
+
+                if (rsrc.comm != nullptr) { // 通信2
+                    RUN_INFINI(infinicclAllReduce(
+                        router_states_sum->data(), router_states_sum->data(), ntok * d, dt_logits,
+                        INFINICCL_SUM, rsrc.comm, stream));
+                    RUN_INFINI(infinirtStreamSynchronize(stream));
                 }
+
             }
 
             // (4) 两类专家相加
-            add(router_states_sum, router_states_sum, shared_states); // 输出 ok
+             add(router_states_sum, router_states_sum, shared_states); // 输出 ok
 
             // (5) 最后的残差连接
             add(logits_in, router_states_sum, logits_in);
+
         }
 
         // All_reduce if distributed
-        if (rsrc.comm != nullptr) {
-            RUN_INFINI(infinicclAllReduce(
-                logits_in->data(), logits_in->data(), ntok * d, dt_logits,
-                INFINICCL_SUM, rsrc.comm, stream));
-            RUN_INFINI(infinirtStreamSynchronize(stream));
-        }
+        // if (rsrc.comm != nullptr) {
+        //     RUN_INFINI(infinicclAllReduce(
+        //         logits_in->data(), logits_in->data(), ntok * d, dt_logits,
+        //         INFINICCL_SUM, rsrc.comm, stream));
+        //     RUN_INFINI(infinirtStreamSynchronize(stream));
+        // }
     }
+
     // Sample and Output
     if (idev == 0) {
         if (last_logits != nullptr) {
@@ -346,6 +373,7 @@ void inferDeviceBatch(const QwenHybridMeta *meta, DeviceResource &rsrc,
                         meta->epsilon);
             }
             linear(prob_buf, logits_out->slice(0, 0, nreq), weight->w_out_embd, 1.0, 0.0, nullptr, nullptr);
+
             std::random_device _rd;
             std::mt19937 gen(_rd());
             token_offset = 0;

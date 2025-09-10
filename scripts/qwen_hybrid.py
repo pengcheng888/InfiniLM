@@ -223,6 +223,7 @@ class QwenHybridForCausalLM:
         )
         print(input_content, end="", flush=True)
         tokens = self.tokenizer.encode(input_content)
+
         infer_task = InferTask(
             0,
             tokens,
@@ -241,7 +242,8 @@ class QwenHybridForCausalLM:
         for step_i in range(max_steps):
             start_time = time.time()
             output_tokens = self.batch_infer_one_round([infer_task])
-            end_time = time.time()
+            end_time = time.time() 
+            
             steps += 1
             output_str = self.tokenizer.decode(output_tokens[0])
             output_content += output_str
@@ -254,7 +256,7 @@ class QwenHybridForCausalLM:
                 total_time += end_time - start_time
 
         print("\n")
-        avg_time = total_time * 1000 / (steps - 1)
+        avg_time = total_time * 1000 / (steps - 1 + 1e-9)
         print(f"Time per step: {avg_time:.3f}ms")
 
         infer_task._kv_cache.drop(self)
