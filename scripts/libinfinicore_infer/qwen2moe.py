@@ -21,7 +21,7 @@ from ctypes import (
 )
 
 
-class QwenHybridMetaCStruct(Structure):
+class Qwen2moeMetaCStruct(Structure):
     _fields_ = [
         # common
         ("dtype", DataType),
@@ -45,30 +45,30 @@ class QwenHybridMetaCStruct(Structure):
     ]
 
 
-class QwenHybridModelCStruct(Structure):
+class Qwen2moeModelCStruct(Structure):
     pass
 
 
 @register_model
-class QwenHybridModel(BaseModel):
+class Qwen2moeModel(BaseModel):
     @classmethod
     def register_lib(cls, lib):
-        """Register QwenHybrid model functions with the library"""
-        lib.createQwenHybridWeights.restype = POINTER(ModelWeightsCStruct)
-        lib.createQwenHybridWeights.argtypes = [
-            POINTER(QwenHybridMetaCStruct),
+        """Register Qwen2moe model functions with the library"""
+        lib.createQwen2moeWeights.restype = POINTER(ModelWeightsCStruct)
+        lib.createQwen2moeWeights.argtypes = [
+            POINTER(Qwen2moeMetaCStruct),
             DeviceType,
             c_int,
             POINTER(c_int),
         ]
 
-        lib.createQwenHybridModel.restype = POINTER(QwenHybridModelCStruct)
-        lib.createQwenHybridModel.argtypes = [
-            POINTER(QwenHybridMetaCStruct),
+        lib.createQwen2moeModel.restype = POINTER(Qwen2moeModelCStruct)
+        lib.createQwen2moeModel.argtypes = [
+            POINTER(Qwen2moeMetaCStruct),
             POINTER(ModelWeightsCStruct),
         ]
 
-        lib.destroyQwenHybridModel.argtypes = [POINTER(QwenHybridModelCStruct)]
+        lib.destroyQwen2moeModel.argtypes = [POINTER(Qwen2moeModelCStruct)]
 
         lib.createKVCache.argtypes = [
             c_size_t,
@@ -96,8 +96,8 @@ class QwenHybridModel(BaseModel):
 
         lib.dropMambaCache.argtypes = [POINTER(MambaCacheCStruct)]
 
-        lib.inferBatchQwenHybrid.argtypes = [
-            POINTER(QwenHybridModelCStruct),
+        lib.inferBatchQwen2moe.argtypes = [
+            POINTER(Qwen2moeModelCStruct),
             POINTER(c_uint),
             c_uint,
             POINTER(c_uint),
@@ -118,13 +118,13 @@ class QwenHybridModel(BaseModel):
         ]
 
     def create_weights(self, meta, device_type, ndev, dev_ids):
-        return self.lib.createQwenHybridWeights(meta, device_type, ndev, dev_ids)
+        return self.lib.createQwen2moeWeights(meta, device_type, ndev, dev_ids)
 
     def create_model(self, meta, weights):
-        return self.lib.createQwenHybridModel(meta, weights)
+        return self.lib.createQwen2moeModel(meta, weights)
 
     def destroy_model(self, model):
-        self.lib.destroyQwenHybridModel(model)
+        self.lib.destroyQwen2moeModel(model)
 
     def create_kv_cache(
         self, nlayer, max_len, nkvh, dk, dv, dtype, device, dev_ids, ndev
@@ -160,7 +160,7 @@ class QwenHybridModel(BaseModel):
         topp,
         output,
     ):
-        self.lib.inferBatchQwenHybrid(
+        self.lib.inferBatchQwen2moe(
             model,
             tokens,
             ntok,
@@ -178,6 +178,6 @@ class QwenHybridModel(BaseModel):
     def forward_batch(
         self, model, tokens, ntok, req_lens, nreq, req_pos, kv_caches, logits
     ):
-        self.lib.forwardBatchQwenHybrid(
+        self.lib.forwardBatchQwen2moe(
             model, tokens, ntok, req_lens, nreq, req_pos, kv_caches, logits
         )

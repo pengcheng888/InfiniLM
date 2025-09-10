@@ -1,4 +1,4 @@
-#include "qwen_hybrid.hpp"
+#include "qwen2moe.hpp"
 
 #include "../../tensor.hpp"
 #include "../../utils.hpp"
@@ -8,8 +8,8 @@
 #include <thread>
 #include <vector>
 
-inline void createDeviceResource(DeviceResource *rsrc, const QwenHybridMeta *meta,
-                                 std::shared_ptr<QwenHybridDeviceWeight> weights,
+inline void createDeviceResource(DeviceResource *rsrc, const Qwen2moeMeta *meta,
+                                 std::shared_ptr<Qwen2moeDeviceWeight> weights,
                                  infiniDevice_t device, int idev,
                                  int ndev, int dev_id,
                                  infinicclComm_t comm) {
@@ -45,7 +45,7 @@ inline void releaseDeviceResource(DeviceResource &res) {
     res.comm = nullptr;
 }
 
-void inferDeviceBatch(const QwenHybridMeta *meta, DeviceResource &rsrc,
+void inferDeviceBatch(const Qwen2moeMeta *meta, DeviceResource &rsrc,
                       uint32_t idev, uint32_t ndev,
                       const uint32_t *tokens, uint32_t ntok,
                       const uint32_t *req_lens, uint32_t nreq, const uint32_t *req_pos,
@@ -61,7 +61,7 @@ void inferDeviceBatch(const QwenHybridMeta *meta, DeviceResource &rsrc,
     auto dh = meta->dh;
     auto d = meta->d;
     auto dt_logits = meta->dtype;
-    auto di = meta->shared_di / ndev;
+    // auto di = meta->shared_di / ndev;
     auto dvoc = meta->dvoc;
     auto stream = rsrc.stream;
     auto weight = rsrc.weights;
@@ -73,8 +73,8 @@ void inferDeviceBatch(const QwenHybridMeta *meta, DeviceResource &rsrc,
     auto k_buf = Tensor::buffer(dt_logits, {ntok, nkvh * dh}, rsrc.memory_pool);
     auto v_buf = Tensor::buffer(dt_logits, {ntok, nkvh * dh}, rsrc.memory_pool);
 
-    auto gate_buf = Tensor::buffer(dt_logits, {ntok, di}, rsrc.memory_pool);
-    auto up_buf = Tensor::buffer(dt_logits, {ntok, di}, rsrc.memory_pool);
+    // auto gate_buf = Tensor::buffer(dt_logits, {ntok, di}, rsrc.memory_pool);
+    // auto up_buf = Tensor::buffer(dt_logits, {ntok, di}, rsrc.memory_pool);
 
     auto o_buf = Tensor::buffer(dt_logits, {ntok, nh * dh}, rsrc.memory_pool);
     auto prob_buf = Tensor::buffer(dt_logits, {nreq, dvoc}, rsrc.memory_pool);
@@ -104,11 +104,11 @@ void inferDeviceBatch(const QwenHybridMeta *meta, DeviceResource &rsrc,
                                        weight->w_in_embd->data(tokens[i] * d),
                                        dsize(dt_logits) * d, INFINIRT_MEMCPY_D2D, stream));
     }
+
     // Attention
     // attention inner
     size_t max_qk_size = 0;
     size_t max_seq_len = 0;
-
     for (uint32_t req = 0; req < nreq; req++) {
         auto past_len = req_pos[req];
         auto seq_len = req_lens[req];
@@ -127,13 +127,18 @@ void inferDeviceBatch(const QwenHybridMeta *meta, DeviceResource &rsrc,
     for (uint32_t layer = 0; layer < nlayer; layer++) {
         // 1. Attention
         // rms norm
-
         rmsnorm(logits_out, logits_in, weight->w_attn_norm[layer], meta->epsilon);
-        // qkv_proj
 
-        auto b_attn_q = weight->b_attn_q[layer];
-        auto b_attn_k = weight->b_attn_k[layer];
-        auto b_attn_v = weight->b_attn_v[layer];
+        // qkv_proj
+        std::shared_ptr<Tensor> b_attn_q;
+        std::shared_ptr<Tensor> b_attn_k;
+        std::shared_ptr<Tensor> b_attn_v;
+        if (weight->b_attn_q.size() > 0) {
+            b_attn_q = weight->b_attn_q[layer];
+            b_attn_k = weight->b_attn_k[layer];
+            b_attn_v = weight->b_attn_v[layer];
+        }
+
         linear(q_buf, logits_out, weight->w_attn_q[layer], 1.0, 0.0, nullptr, b_attn_q ? b_attn_q : nullptr);
         linear(k_buf, logits_out, weight->w_attn_k[layer], 1.0, 0.0, nullptr, b_attn_k ? b_attn_k : nullptr);
         linear(v_buf, logits_out, weight->w_attn_v[layer], 1.0, 0.0, nullptr, b_attn_v ? b_attn_v : nullptr);
@@ -174,6 +179,7 @@ void inferDeviceBatch(const QwenHybridMeta *meta, DeviceResource &rsrc,
         // o_proj
         linear(logits_in, o_buf, weight->w_attn_out[layer],
                1.0, 0.0, idev == 0 ? logits_in : nullptr, nullptr); // only rank 0 adds residual
+
         // All_reduce if distributed
         if (rsrc.comm != nullptr) {
             RUN_INFINI(infinicclAllReduce(
@@ -183,21 +189,7 @@ void inferDeviceBatch(const QwenHybridMeta *meta, DeviceResource &rsrc,
         }
 
         // 2. FFN
-
         rmsnorm(logits_out, logits_in, weight->w_ffn_norm[layer], meta->epsilon);
-
-        if (0) {
-            linear(gate_buf, logits_out,
-                   weight->w_ffn_gate[layer],
-                   1.0, 0.0, nullptr, nullptr);
-            linear(up_buf, logits_out,
-                   weight->w_ffn_up[layer],
-                   1.0, 0.0, nullptr, nullptr);
-            swiglu(gate_buf, up_buf, gate_buf);
-            linear(logits_in, gate_buf,
-                   weight->w_ffn_down[layer],
-                   1.0, 0.0, idev == 0 ? logits_in : nullptr, nullptr); // only rank 0 adds residual
-        }
 
         // ------------------------------------------------------------------------ //
         //                          SparseMLP                                       //
@@ -208,14 +200,12 @@ void inferDeviceBatch(const QwenHybridMeta *meta, DeviceResource &rsrc,
 
             // 需要提前申请的缓存
             size_t moe_intermediate_size = meta->moe_di;
-            auto router_gate_up_buf = Tensor::buffer(dt_logits, {1, 2 * moe_intermediate_size}, rsrc.memory_pool);
-            auto router_gate_buf = router_gate_up_buf->slice(1, 0, moe_intermediate_size);
-            auto router_up_buf = router_gate_up_buf->slice(1, moe_intermediate_size, moe_intermediate_size);
+            auto router_gate_buf = Tensor::buffer(dt_logits, {1, moe_intermediate_size}, rsrc.memory_pool);
+            auto router_up_buf = Tensor::buffer(dt_logits, {1, moe_intermediate_size}, rsrc.memory_pool);
 
             size_t shared_expert_intermediate_size = meta->shared_di;
-            auto shared_gate_up_buf = Tensor::buffer(dt_logits, {ntok, 2 * shared_expert_intermediate_size}, rsrc.memory_pool);
-            auto shared_gate_buf = shared_gate_up_buf->slice(1, 0, shared_expert_intermediate_size);
-            auto shared_up_buf = shared_gate_up_buf->slice(1, shared_expert_intermediate_size, shared_expert_intermediate_size);
+            auto shared_gate_buf = Tensor::buffer(dt_logits, {ntok, 1 * shared_expert_intermediate_size}, rsrc.memory_pool);
+            auto shared_up_buf = Tensor::buffer(dt_logits, {ntok, 1 * shared_expert_intermediate_size}, rsrc.memory_pool);
 
             std::shared_ptr<Tensor> shared_gate_output = Tensor::buffer(dt_logits, {ntok, 1}, rsrc.memory_pool); // 共享专家的 gate 权重
 
@@ -271,17 +261,12 @@ void inferDeviceBatch(const QwenHybridMeta *meta, DeviceResource &rsrc,
                 RUN_INFINI(infinirtMemcpy((void *)values_cpu.data(), values_gpu->data(), values_cpu.size() * sizeof(float), INFINIRT_MEMCPY_D2H));
                 RUN_INFINI(infinirtMemcpy((void *)indices_cpu.data(), indices_gpu->data(), indices_cpu.size() * sizeof(int), INFINIRT_MEMCPY_D2H));
                 RUN_INFINI(infinirtStreamSynchronize(rsrc.stream));
-
-                // for (size_t i = 0; i < values_cpu.size(); ++i) {
-                //     printf("---> %ld  value %f    indices %d \n", i, values_cpu[i], indices_cpu[i]);
-                // }
             }
 
             // (3) MoE操作：  每个 token 经过 4个 路由专家
             {
                 // 输入: hidden_states, values_cpu，indices_cpu
                 // 输出: 每个token的router专家加权和
-
                 for (size_t itok = 0; itok < ntok; ++itok) {
                     std::shared_ptr<Tensor> hidden_states_i = hidden_states->slice(0, itok, 1);
                     std::shared_ptr<Tensor> router_states_sum_i = router_states_sum->slice(0, itok, 1);
@@ -320,7 +305,7 @@ void inferDeviceBatch(const QwenHybridMeta *meta, DeviceResource &rsrc,
             }
 
             // (4) 两类专家相加
-            add(router_states_sum, router_states_sum, shared_states); // 输出 ok
+            add(router_states_sum, router_states_sum, shared_states);
 
             // (5) 最后的残差连接
             add(logits_in, router_states_sum, logits_in);
@@ -356,6 +341,7 @@ void inferDeviceBatch(const QwenHybridMeta *meta, DeviceResource &rsrc,
             }
             linear(prob_buf, logits_out->slice(0, 0, nreq), weight->w_out_embd, 1.0, 0.0, nullptr, nullptr);
 
+            prob_buf->debug();
             std::random_device _rd;
             std::mt19937 gen(_rd());
             token_offset = 0;
@@ -378,13 +364,13 @@ void inferDeviceBatch(const QwenHybridMeta *meta, DeviceResource &rsrc,
 }
 
 __C void
-inferBatchQwenHybrid(struct QwenHybridModel *model,
-                     const uint32_t *tokens, uint32_t ntok,
-                     const uint32_t *req_lens, uint32_t nreq, const uint32_t *req_pos,
-                     struct KVCache **kv_caches,
-                     struct MambaCache **mamba_caches,
-                     const float *temperature, const uint32_t *topk, const float *topp,
-                     uint32_t *output) {
+inferBatchQwen2moe(struct Qwen2moeModel *model,
+                   const uint32_t *tokens, uint32_t ntok,
+                   const uint32_t *req_lens, uint32_t nreq, const uint32_t *req_pos,
+                   struct KVCache **kv_caches,
+                   struct MambaCache **mamba_caches,
+                   const float *temperature, const uint32_t *topk, const float *topp,
+                   uint32_t *output) {
     model->req.tokens = tokens;
     model->req.ntok = ntok;
     model->req.req_lens = req_lens;
@@ -412,7 +398,7 @@ inferBatchQwenHybrid(struct QwenHybridModel *model,
     }
 }
 
-void launchDevice(const QwenHybridMeta *meta, std::shared_ptr<QwenHybridDeviceWeight> weights, DeviceResource *rsrc, InferState &state, InferRequest &req,
+void launchDevice(const Qwen2moeMeta *meta, std::shared_ptr<Qwen2moeDeviceWeight> weights, DeviceResource *rsrc, InferState &state, InferRequest &req,
                   infiniDevice_t device, int idev, int ndev, int dev_id, infinicclComm_t comm) {
     // Create Device Resource
     createDeviceResource(rsrc, meta, weights, device, idev, ndev, dev_id, comm);
@@ -453,8 +439,8 @@ void launchDevice(const QwenHybridMeta *meta, std::shared_ptr<QwenHybridDeviceWe
     setInferenceContext(nullptr); // Clear the context when done
 }
 
-QwenHybridModel::QwenHybridModel(const QwenHybridMeta *meta, const ModelWeights *weights_) {
-    auto weights = (QwenHybridWeights *)(weights_);
+Qwen2moeModel::Qwen2moeModel(const Qwen2moeMeta *meta, const ModelWeights *weights_) {
+    auto weights = (Qwen2moeWeights *)(weights_);
     device = weights->device();
     dev_ids = weights->devIds();
     int ndev = int(dev_ids.size());
@@ -477,14 +463,14 @@ QwenHybridModel::QwenHybridModel(const QwenHybridMeta *meta, const ModelWeights 
     }
 }
 
-__C struct QwenHybridModel *
-createQwenHybridModel(const QwenHybridMeta *meta,
-                      const ModelWeights *weights) {
-    QwenHybridModel *model = new QwenHybridModel(meta, weights);
+__C struct Qwen2moeModel *
+createQwen2moeModel(const Qwen2moeMeta *meta,
+                    const ModelWeights *weights) {
+    Qwen2moeModel *model = new Qwen2moeModel(meta, weights);
     return model;
 }
 
-__C void destroyQwenHybridModel(struct QwenHybridModel *model) {
+__C void destroyQwen2moeModel(struct Qwen2moeModel *model) {
     auto ndev = model->dev_resources.size();
 
     for (size_t idev = 0; idev < ndev; idev++) {

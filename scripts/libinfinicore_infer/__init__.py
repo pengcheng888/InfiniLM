@@ -7,7 +7,7 @@ from .base import (
 )
 from .jiuge import JiugeModel, JiugeMetaCStruct, JiugeWeightsCStruct
 from .jiuge_awq import JiugeAWQModel, JiugeAWQMetaCStruct
-from .qwen_hybrid import QwenHybridModel, QwenHybridMetaCStruct
+from .qwen2moe import Qwen2moeModel, Qwen2moeMetaCStruct
 from .qwen2_infer import Qwen2Model, Qwen2MetaCStruct
 
 from .deepseek_v3 import (
@@ -33,8 +33,8 @@ __all__ = [
     "DeepSeekV3MetaCStruct",
     "DeepSeekV3WeightsCStruct",
     "DeepSeekV3WeightLoaderCStruct",
-    "QwenHybridModel",
-    "QwenHybridMetaCStruct",
+    "Qwen2moeModel",
+    "Qwen2moeMetaCStruct",
     "Qwen2Model",
     "Qwen2MetaCStruct",
     "ModelRegister",

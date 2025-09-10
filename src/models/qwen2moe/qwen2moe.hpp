@@ -1,5 +1,5 @@
 #pragma once
-#include "infinicore_infer/models/qwen_hybrid.h"
+#include "infinicore_infer/models/qwen2moe.h"
 
 #include "../../cache.hpp"
 #include "../../dataloader/weights_loader.hpp"
@@ -8,7 +8,7 @@
 #include <mutex>
 #include <thread>
 
-struct QwenHybridDeviceWeight {
+struct Qwen2moeDeviceWeight {
     std::shared_ptr<Tensor> w_in_embd, w_out_norm, w_out_embd, sin_table,
         cos_table;
     std::vector<std::shared_ptr<Tensor>> w_attn_norm, b_attn_q, b_attn_k, b_attn_v, w_ffn_norm;
@@ -29,15 +29,15 @@ struct QwenHybridDeviceWeight {
     std::vector<std::vector<std::shared_ptr<Tensor>>> w_router_expert_ffn_down; // 路由专家的权重
 };
 
-class QwenHybridWeights : public infinicore::weights::Loader {
+class Qwen2moeWeights : public infinicore::weights::Loader {
 private:
-    std::vector<std::shared_ptr<QwenHybridDeviceWeight>> _device_weights;
+    std::vector<std::shared_ptr<Qwen2moeDeviceWeight>> _device_weights;
 
 public:
-    QwenHybridWeights(const QwenHybridMeta *meta,
-                      infiniDevice_t device,
-                      const std::vector<int> &dev_ids);
-    std::vector<std::shared_ptr<QwenHybridDeviceWeight>> &device_weights() {
+    Qwen2moeWeights(const Qwen2moeMeta *meta,
+                    infiniDevice_t device,
+                    const std::vector<int> &dev_ids);
+    std::vector<std::shared_ptr<Qwen2moeDeviceWeight>> &device_weights() {
         return _device_weights;
     }
 };
@@ -48,7 +48,7 @@ struct DeviceResource {
     int device_id;
     infiniopHandle_t handle;
     // Weights
-    std::shared_ptr<QwenHybridDeviceWeight> weights;
+    std::shared_ptr<Qwen2moeDeviceWeight> weights;
     // Streams
     infinirtStream_t stream;
     // Communicator
@@ -80,8 +80,8 @@ struct InferState {
     bool exit_flag = false;
 };
 
-struct QwenHybridModel {
-    QwenHybridMeta meta;
+struct Qwen2moeModel {
+    Qwen2moeMeta meta;
     infiniDevice_t device;
     std::vector<int> dev_ids;
     std::vector<DeviceResource> dev_resources;
@@ -89,5 +89,5 @@ struct QwenHybridModel {
     std::vector<std::thread> threads;
     InferRequest req;
 
-    QwenHybridModel(const QwenHybridMeta *, const ModelWeights *);
+    Qwen2moeModel(const Qwen2moeMeta *, const ModelWeights *);
 };

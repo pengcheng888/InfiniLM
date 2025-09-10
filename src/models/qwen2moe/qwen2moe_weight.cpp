@@ -1,4 +1,4 @@
-#include "qwen_hybrid.hpp"
+#include "qwen2moe.hpp"
 
 #include <cmath>
 
@@ -60,8 +60,8 @@ inline std::shared_ptr<Tensor> getCosTable(size_t dctx, size_t dh, float theta, 
 
 namespace {
 
-void print_info(const QwenHybridMeta &meta) {
-    printf("QwenHybridMeta: \n");
+void print_info(const Qwen2moeMeta &meta) {
+    printf("\nQwen2moeMeta: \n");
 
     // common
     printf(" dt_logits : %d\n", meta.dtype);
@@ -88,8 +88,8 @@ void print_info(const QwenHybridMeta &meta) {
 }
 }; // namespace
 
-QwenHybridWeights::QwenHybridWeights(
-    const QwenHybridMeta *meta,
+Qwen2moeWeights::Qwen2moeWeights(
+    const Qwen2moeMeta *meta,
     infiniDevice_t device,
     const std::vector<int> &dev_ids) : infinicore::weights::Loader(device, dev_ids) {
     auto ndev = dev_ids.size();
@@ -105,13 +105,13 @@ QwenHybridWeights::QwenHybridWeights(
     size_t dctx = meta->dctx;
     size_t dvoc = meta->dvoc;
 
-    printf("QwenHybridWeights::QwenHybridWeights: \n");
+    printf("Qwen2moeWeights::Qwen2moeWeights: \n");
     print_info(*meta);
 
     for (size_t i = 0; i < ndev; i++) {
         RUN_INFINI(infinirtSetDevice(device, dev_ids[i]));
 
-        auto weight = std::make_shared<QwenHybridDeviceWeight>();
+        auto weight = std::make_shared<Qwen2moeDeviceWeight>();
         _device_weights[i] = weight;
 
         auto w_in_embd = Tensor::weight(nullptr, dt_logits, {dvoc, d});
@@ -167,9 +167,10 @@ QwenHybridWeights::QwenHybridWeights(
             // ----------------------------------------------------------------------- //
             //                                       moe                               //
             // ----------------------------------------------------------------------- //
-            REGISTER_LAYER_WEIGHT_1D("model.layers." + std::to_string(layer) + ".post_attention_layernorm.weight", w_ffn_norm, d, dt_norm_w, FULL);
-
             std::string name;
+            name = "model.layers." + std::to_string(layer) + ".post_attention_layernorm.weight";
+            REGISTER_LAYER_WEIGHT_1D(name, w_ffn_norm, d, dt_norm_w, FULL);
+
             {
                 // gate
                 name = "model.layers." + std::to_string(layer) + ".mlp.shared_expert_gate.weight";
@@ -200,7 +201,7 @@ QwenHybridWeights::QwenHybridWeights(
 
                     name = "model.layers." + std::to_string(layer) + ".mlp.experts." + std::to_string(iexpert) + ".gate_proj.weight";
                     {
-                        // REGISTER_LAYER_WEIGHT_2D(name, w_shared_expert_ffn_gate, d, moe_di, dt_logits, COLUMN);
+                        // REGISTER_LAYER_WEIGHT_2D(name, w_shared_expert_ffn_gate, d, moe_di, dt_logits, ROW);
                         auto gate = Tensor::weight(nullptr, dt_logits, {moe_di, d})->permute({1, 0});
                         this->register_weight(name, gate, i, infinicore::weights::DistributionType::ROW);
                         weight->w_router_expert_ffn_gate[layer].push_back(gate);
@@ -208,7 +209,7 @@ QwenHybridWeights::QwenHybridWeights(
 
                     name = "model.layers." + std::to_string(layer) + ".mlp.experts." + std::to_string(iexpert) + ".up_proj.weight";
                     {
-                        // REGISTER_LAYER_WEIGHT_2D(name, w_shared_expert_ffn_up, d, moe_di, dt_logits, COLUMN);
+                        // REGISTER_LAYER_WEIGHT_2D(name, w_shared_expert_ffn_up, d, moe_di, dt_logits, ROW);
                         auto up = Tensor::weight(nullptr, dt_logits, {moe_di, d})->permute({1, 0});
                         this->register_weight(name, up, i, infinicore::weights::DistributionType::ROW);
                         weight->w_router_expert_ffn_up[layer].push_back(up);
@@ -216,7 +217,7 @@ QwenHybridWeights::QwenHybridWeights(
 
                     name = "model.layers." + std::to_string(layer) + ".mlp.experts." + std::to_string(iexpert) + ".down_proj.weight";
                     {
-                        // REGISTER_LAYER_WEIGHT_2D(name, w_shared_expert_ffn_down, moe_di, d, dt_logits, ROW);
+                        // REGISTER_LAYER_WEIGHT_2D(name, w_shared_expert_ffn_down, moe_di, d, dt_logits, COLUMN);
                         auto down = Tensor::weight(nullptr, dt_logits, {d, moe_di})->permute({1, 0});
                         this->register_weight(name, down, i, infinicore::weights::DistributionType::COLUMN);
                         weight->w_router_expert_ffn_down[layer].push_back(down);
@@ -226,16 +227,15 @@ QwenHybridWeights::QwenHybridWeights(
         }
     }
 
-    printf("----------> 33  \n");
 #undef REGISTER_LAYER_WEIGHT_1D
 #undef REGISTER_LAYER_WEIGHT_2D
 }
 
 __C struct ModelWeights *
-createQwenHybridWeights(const QwenHybridMeta *meta,
-                        infiniDevice_t device,
-                        int ndev,
-                        const int *dev_ids) {
-    QwenHybridWeights *weights = new QwenHybridWeights(meta, device, std::vector<int>(dev_ids, dev_ids + ndev));
+createQwen2moeWeights(const Qwen2moeMeta *meta,
+                      infiniDevice_t device,
+                      int ndev,
+                      const int *dev_ids) {
+    Qwen2moeWeights *weights = new Qwen2moeWeights(meta, device, std::vector<int>(dev_ids, dev_ids + ndev));
     return (struct ModelWeights *)weights;
 }

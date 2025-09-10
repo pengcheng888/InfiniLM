@@ -10,8 +10,8 @@ import torch
 import transformers
 
 from libinfinicore_infer import (
-    QwenHybridModel,
-    QwenHybridMetaCStruct,
+    Qwen2moeModel,
+    Qwen2moeMetaCStruct,
     DataType,
     DeviceType,
     KVCacheCStruct,
@@ -24,7 +24,7 @@ from ctypes import POINTER, c_float, c_int, c_uint, c_void_p, byref
 torch.set_default_device("cpu")
 
 
-class QwenHybridMetaFromConfig(QwenHybridMetaCStruct):
+class Qwen2moeMetaFromConfig(Qwen2moeMetaCStruct):
     def __init__(self, config, dtype=torch.float16, max_tokens=None):
 
         if config["torch_dtype"] == "float16":
@@ -72,7 +72,7 @@ class QwenHybridMetaFromConfig(QwenHybridMetaCStruct):
         self.torch_dtype_logits = dtype
 
 
-class QwenHybridBatchedTask:
+class Qwen2moeBatchedTask:
     def __init__(self, tasks: List[InferTask]):
         self.tasks = tasks
         self.nreq = len(tasks)
@@ -117,7 +117,7 @@ class QwenHybridBatchedTask:
         )
 
 
-class QwenHybridForCausalLM:
+class Qwen2moeForCausalLM:
     def __init__(
         self, model_dir_path, device=DeviceType.DEVICE_TYPE_CPU, ndev=1, max_tokens=None
     ):
@@ -134,9 +134,9 @@ class QwenHybridForCausalLM:
         self.dev_ids = (c_int * ndev)(*[i for i in range(ndev)])
         self.ndev = ndev
         self.device = device
-        self.meta = QwenHybridMetaFromConfig(config, max_tokens=max_tokens)
+        self.meta = Qwen2moeMetaFromConfig(config, max_tokens=max_tokens)
 
-        self.model = QwenHybridModel()
+        self.model = Qwen2moeModel()
 
         self.weights = self.model.create_weights(
             byref(self.meta),
@@ -201,7 +201,7 @@ class QwenHybridForCausalLM:
 
     def batch_infer_one_round(self, tasks: List[InferTask]):
         output = (c_uint * len(tasks))()
-        batch_inputs = QwenHybridBatchedTask(tasks)
+        batch_inputs = Qwen2moeBatchedTask(tasks)
         self.model.infer_batch(
             self.model_instance,
             *(batch_inputs.input_args()),
@@ -253,7 +253,6 @@ class QwenHybridForCausalLM:
                 total_time += end_time - start_time
             
 
-
         print("\n")
         avg_time = total_time * 1000 / (steps - 1 + 1e-6)
         print(f"Time per step: {avg_time:.3f}ms")
@@ -288,7 +287,7 @@ class QwenHybridForCausalLM:
                 tasks[batch_id].bind_kvcache(kv_caches[batch_id])
                 batch_id += 1
 
-            batch_inputs = QwenHybridBatchedTask(tasks[:batch_id])
+            batch_inputs = Qwen2moeBatchedTask(tasks[:batch_id])
             logits = torch.zeros(
                 (batch_inputs.ntok, self.meta.dvoc), dtype=self.meta.torch_dtype_logits
             )
@@ -329,7 +328,7 @@ class QwenHybridForCausalLM:
 def test():
     if len(sys.argv) < 3:
         print(
-            "Usage: python qwen_hybrid.py [--cpu | --nvidia| --cambricon | --ascend | --metax | --moore] <path/to/model_dir> [n_device]"
+            "Usage: python qwen2moe.py [--cpu | --nvidia| --cambricon | --ascend | --metax | --moore] <path/to/model_dir> [n_device]"
         )
         sys.exit(1)
     model_path = sys.argv[2]
@@ -350,12 +349,12 @@ def test():
         device_type = DeviceType.DEVICE_TYPE_ILUVATAR
     else:
         print(
-            "Usage: python qwen_hybrid.py [--cpu | --nvidia| --cambricon | --ascend | --metax | --moore] <path/to/model_dir> [n_device]"
+            "Usage: python qwen2moe.py [--cpu | --nvidia| --cambricon | --ascend | --metax | --moore] <path/to/model_dir> [n_device]"
         )
         sys.exit(1)
 
     ndev = int(sys.argv[3]) if len(sys.argv) > 3 else 1
-    model = QwenHybridForCausalLM(model_path, device_type, ndev)
+    model = Qwen2moeForCausalLM(model_path, device_type, ndev)
     model.generate("山东最高的山是？", 500)
     model.destroy_model_instance()
 
@@ -377,7 +376,7 @@ def test1():
     # model_path = r"/home/ubuntu/workspace_aisys/tensorRT_quantization-main/9G4B"
     
     ndev = int(sys.argv[3]) if len(sys.argv) > 3 else 1
-    model = QwenHybridForCausalLM(model_path, device_type, ndev)
+    model = Qwen2moeForCausalLM(model_path, device_type, ndev)
     model.generate("山东最高的山是？", 20)
     model.destroy_model_instance()
 

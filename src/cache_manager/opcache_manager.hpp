@@ -153,6 +153,7 @@ public:
 class CacheManager {
 public:
     DECLARE_OP_CACHE(Add)
+    DECLARE_OP_CACHE(Sub)
     DECLARE_OP_CACHE(RMSNorm)
     DECLARE_OP_CACHE(Gemm)
     DECLARE_OP_CACHE(RoPE)
@@ -163,13 +164,13 @@ public:
     DECLARE_OP_CACHE(SwiGLU)
     DECLARE_OP_CACHE(RandomSample)
     DECLARE_OP_CACHE(Dequantize)
-    //
     DECLARE_OP_CACHE(Mul)
     DECLARE_OP_CACHE(Sigmoid)
     DECLARE_OP_CACHE(Topksoftmax)
 
     CacheManager(size_t capacity = 100)
         : Add_cache(capacity, DESTROY_FUNC(Add)),
+          Sub_cache(capacity, DESTROY_FUNC(Sub)),
           RMSNorm_cache(capacity, DESTROY_FUNC(RMSNorm)),
           Gemm_cache(capacity, DESTROY_FUNC(Gemm)),
           RoPE_cache(capacity, DESTROY_FUNC(RoPE)),
