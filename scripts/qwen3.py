@@ -347,7 +347,7 @@ def test():
         sys.exit(1)
 
 
-    model_path = r"/workspace/wangpengcheng/Qwen3-0.6B"
+    model_path = r"/data-aisoft/wangpengcheng_data/Qwen3-0.6B"
 
     ndev = int(sys.argv[3]) if len(sys.argv) > 3 else 1
     model = Qwen3ForCauslLM(model_path, device_type, ndev)

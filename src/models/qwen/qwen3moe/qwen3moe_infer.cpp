@@ -164,9 +164,12 @@ void Qwen3MoEinferDeviceBatch(const Qwen3MoE::Meta *meta, DeviceResource &rsrc,
             std::shared_ptr<Tensor> hidden_states = logits_out; // logits_out 是整个 MoE的输入，重新起名字为 hidden_states
 
             // 需要提前申请的缓存
-            auto router_gate_up_buf = Tensor::buffer(dt_logits, {1, 2 * meta->_moe_intermediate_size}, rsrc.memory_pool);
-            auto router_gate_buf = router_gate_up_buf->slice(1, 0, meta->_moe_intermediate_size);
-            auto router_up_buf = router_gate_up_buf->slice(1, meta->_moe_intermediate_size, meta->_moe_intermediate_size);
+            size_t moe_intermediate_size = meta->_moe_intermediate_size / ndev;
+
+            // 需要提前申请的缓存
+            auto router_gate_up_buf = Tensor::buffer(dt_logits, {1, 2 * moe_intermediate_size}, rsrc.memory_pool);
+            auto router_gate_buf = router_gate_up_buf->slice(1, 0, moe_intermediate_size);
+            auto router_up_buf = router_gate_up_buf->slice(1, moe_intermediate_size,moe_intermediate_size);
 
             // 需要提前申请的缓存
             std::shared_ptr<Tensor> router_states_sum = Tensor::buffer(hidden_states->dtype(), hidden_states->shape(), rsrc.memory_pool); // 用于存储 SparseMLP的输出
@@ -225,18 +228,26 @@ void Qwen3MoEinferDeviceBatch(const Qwen3MoE::Meta *meta, DeviceResource &rsrc,
                         linear(router_states_sum_i, router_gate_buf, layer_tensor->ffn->_experts[index]->w_ffn_down, alpha, 0.0, router_states_sum_i, nullptr);
                     }
                 }
+
+                if (rsrc.comm != nullptr) {
+                    RUN_INFINI(infinicclAllReduce(
+                        router_states_sum->data(), router_states_sum->data(), ntok * d, dt_logits,
+                        INFINICCL_SUM, rsrc.comm, stream));
+                    RUN_INFINI(infinirtStreamSynchronize(stream));
+                }
             }
+
             // (3) 最后的残差连接
             add(logits_in, router_states_sum, logits_in);
         }
 
         // All_reduce if distributed
-        if (rsrc.comm != nullptr) {
-            RUN_INFINI(infinicclAllReduce(
-                logits_in->data(), logits_in->data(), ntok * d, dt_logits,
-                INFINICCL_SUM, rsrc.comm, stream));
-            RUN_INFINI(infinirtStreamSynchronize(stream));
-        }
+        // if (rsrc.comm != nullptr) {
+        //     RUN_INFINI(infinicclAllReduce(
+        //         logits_in->data(), logits_in->data(), ntok * d, dt_logits,
+        //         INFINICCL_SUM, rsrc.comm, stream));
+        //     RUN_INFINI(infinirtStreamSynchronize(stream));
+        // }
     }
 
     // Sample and Output
