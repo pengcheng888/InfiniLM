@@ -168,6 +168,30 @@ void InferenceContext::topkrouter(std::shared_ptr<Tensor> values,  // F32
                                   routed_scaling_factor, topk, stream));
 }
 
+void InferenceContext::topksoftmax(std::shared_ptr<Tensor> values,  // F32
+                                   std::shared_ptr<Tensor> indices, // I32
+                                   std::shared_ptr<Tensor> x,
+                                   size_t topk,
+                                   int norm_topk_prob) {
+
+    size_t key = CacheManager::createDescriptorKey(values, indices, x);
+
+    infiniopTopksoftmaxDescriptor_t desc;
+    if (!cache_manager->getTopksoftmaxDescriptor(key, desc)) {
+        RUN_INFINI(infiniopCreateTopksoftmaxDescriptor(op_handle, &desc, x->desc()));
+        cache_manager->putTopksoftmaxDescriptor(key, desc);
+    }
+
+    size_t workspace_size = 0;
+    RUN_INFINI(infiniopGetTopksoftmaxWorkspaceSize(desc, &workspace_size));
+    ensure_workspace(workspace_size);
+    void *workspace = workspace_storage->memory();
+
+    RUN_INFINI(infiniopTopksoftmax(
+        desc, workspace, workspace_size,
+        values->data(), indices->data(), x->data(), topk, norm_topk_prob, stream));
+}
+
 void InferenceContext::swiglu(std::shared_ptr<Tensor> out,
                               std::shared_ptr<Tensor> up,
                               std::shared_ptr<Tensor> gate) {

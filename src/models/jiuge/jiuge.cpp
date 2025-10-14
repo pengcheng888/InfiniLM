@@ -118,6 +118,7 @@ void inferDeviceBatch(const JiugeMeta &meta, JiugeDeviceResource &rsrc,
                       struct KVCache **kv_caches,
                       const float *temperature, const uint32_t *topk, const float *topp,
                       uint32_t *output, void *last_logits) {
+    return;
     auto nlayer = meta.nlayer;
     auto nkvh = meta.nkvh / ndev;
     auto nh = meta.nh / ndev;
@@ -299,11 +300,11 @@ void inferDeviceBatch(const JiugeMeta &meta, JiugeDeviceResource &rsrc,
 
 __C void
 inferBatchJiuge(struct JiugeModel *model,
-           const uint32_t *tokens, uint32_t ntok,
-           const uint32_t *req_lens, uint32_t nreq, const uint32_t *req_pos,
-           struct KVCache **kv_caches,
-           const float *temperature, const uint32_t *topk, const float *topp,
-           uint32_t *output) {
+                const uint32_t *tokens, uint32_t ntok,
+                const uint32_t *req_lens, uint32_t nreq, const uint32_t *req_pos,
+                struct KVCache **kv_caches,
+                const float *temperature, const uint32_t *topk, const float *topp,
+                uint32_t *output) {
     model->req.tokens = tokens;
     model->req.ntok = ntok;
     model->req.req_lens = req_lens;
@@ -332,10 +333,10 @@ inferBatchJiuge(struct JiugeModel *model,
 
 __C void
 forwardBatchJiuge(struct JiugeModel *model,
-             const uint32_t *tokens, uint32_t ntok,
-             const uint32_t *req_lens, uint32_t nreq, const uint32_t *req_pos,
-             struct KVCache **kv_caches,
-             void *logits) {
+                  const uint32_t *tokens, uint32_t ntok,
+                  const uint32_t *req_lens, uint32_t nreq, const uint32_t *req_pos,
+                  struct KVCache **kv_caches,
+                  void *logits) {
     model->req.tokens = tokens;
     model->req.ntok = ntok;
     model->req.req_lens = req_lens;

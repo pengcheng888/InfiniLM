@@ -62,6 +62,12 @@ struct InferenceContext {
                  std::shared_ptr<Tensor> in_w,
                  std::shared_ptr<Tensor> in_s,
                  std::shared_ptr<Tensor> in_z);
+
+    void topksoftmax(std::shared_ptr<Tensor> values,  // F32
+                     std::shared_ptr<Tensor> indices, // I32
+                     std::shared_ptr<Tensor> x,
+                     size_t topk,
+                     int norm_topk_prob);
 };
 
 namespace {
@@ -148,4 +154,17 @@ inline void dequant_linear(std::shared_ptr<Tensor> out, std::shared_ptr<Tensor> 
     auto w = Tensor::buffer(x->dtype(), {x->shape()[1], out->shape()[1]}, getInferenceContext().memory_pool);
     getInferenceContext().dequant(w, w_w, w_s, w_z);
     getInferenceContext().linear(out, x, w, alpha, beta, residual, bias);
+}
+
+inline void topksoftmax(std::shared_ptr<Tensor> values,  // F32
+                        std::shared_ptr<Tensor> indices, // I32
+                        std::shared_ptr<Tensor> x,
+                        size_t topk,
+                        int norm_topk_prob) {
+
+    getInferenceContext().topksoftmax(values,  // F32
+                                      indices, // I32
+                                      x,
+                                      topk,
+                                      norm_topk_prob);
 }
