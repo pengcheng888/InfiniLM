@@ -340,12 +340,14 @@ def test():
     device_type = DeviceType.DEVICE_TYPE_NVIDIA
     if sys.argv[1] == "--nvidia":
         device_type = DeviceType.DEVICE_TYPE_NVIDIA
+    elif sys.argv[1] == "--metax":
+        device_type = DeviceType.DEVICE_TYPE_METAX
     else:
         print("Usage: python qwen3.py --nvidia <path/to/model_dir> [n_device]")
         sys.exit(1)
 
-    model_path = r"/home/wangpengcheng/H100/Qwen3-0.6B"
-    model_path = r"/home/ubuntu/workspace_aisys/tensorRT_quantization-main/Qwen/Qwen3-0.6B"
+
+    model_path = r"/workspace/wangpengcheng/Qwen3-0.6B"
 
     ndev = int(sys.argv[3]) if len(sys.argv) > 3 else 1
     model = Qwen3ForCauslLM(model_path, device_type, ndev)
