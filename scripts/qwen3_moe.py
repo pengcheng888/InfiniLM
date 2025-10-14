@@ -1,7 +1,7 @@
 from typing import List, Sequence
 
 from sympy import true
-from libinfinicore_infer_qwen3_moe import (
+from libinfinicore_infer.qwen3_moe  import (
     MoEMetaCStruct,
     WeightsCStruct,
     DataType,
@@ -354,12 +354,15 @@ def test():
     device_type = DeviceType.DEVICE_TYPE_NVIDIA
     if sys.argv[1] == "--nvidia":
         device_type = DeviceType.DEVICE_TYPE_NVIDIA
+    elif sys.argv[1] == "--metax":
+        device_type = DeviceType.DEVICE_TYPE_METAX
     else:
         print("Usage: python qwen3_moe.py --nvidia <path/to/model_dir> [n_device]")
         sys.exit(1)
 
-    model_path = r"/home/wangpengcheng/H100/Qwen3-30B-A3B_small"
-    model_path = r"/home/wangpengcheng/H100/Qwen3-30B-A3B" 
+    # model_path = r"/home/wangpengcheng/H100/Qwen3-30B-A3B_small"
+    model_path = r"/data-aisoft/wangpengcheng_data/Qwen3-30B-A3B" 
+
     ndev = int(sys.argv[3]) if len(sys.argv) > 3 else 1
     model = Qwen3MoEForCauslLM(model_path, device_type, ndev)
     model.generate("山东最高的山是？", 20)

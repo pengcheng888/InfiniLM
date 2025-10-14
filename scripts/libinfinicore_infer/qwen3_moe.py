@@ -2,7 +2,7 @@ import ctypes
 from ctypes import c_size_t, c_uint, c_int, c_float, c_void_p,c_bool, POINTER
 import os
 import torch
-from libinfinicore_infer import DataType, DeviceType
+from .base import DataType, DeviceType
 
 
 class MoEMetaCStruct(ctypes.Structure):
@@ -27,7 +27,7 @@ class MoEMetaCStruct(ctypes.Structure):
         ("_norm_topk_prob", c_bool),
     ]
 
-from scripts.libinfinicore_infer.qwen3 import AttentionCStruct, MLPCStruct
+from libinfinicore_infer.qwen3 import AttentionCStruct, MLPCStruct
 
 
 class SparseMLPCStruct(ctypes.Structure):
