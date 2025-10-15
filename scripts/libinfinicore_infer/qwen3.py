@@ -227,15 +227,23 @@ class WeightsCStruct(ctypes.Structure):
         else:
             raise ValueError("Unsupported norm weight data type")
 
-        ###
-        input_embd = "model.embed_tokens.weight"
-        output_embd = "lm_head.weight"
+        ###        
+        input_embd = None
+        output_embd = None
+        for name in ["model.embed_tokens.weight", "embed_tokens.weight"]:
+            if name in state_dict:
+                input_embd = name
+                break
+        for name in ["lm_head.weight"]:
+            if name in state_dict:
+                output_embd = name
+                break
 
-        input_embd_naming = input_embd if input_embd in state_dict else output_embd
+        input_embd_naming = input_embd if input_embd else output_embd
         self.input_embd_tensor = state_dict[input_embd_naming].to(torch_dt_logits)
         setattr(self, "_embed_tokens_weight", self.input_embd_tensor.data_ptr())
 
-        output_embd_naming = output_embd if output_embd in state_dict else input_embd
+        output_embd_naming = output_embd if output_embd  else input_embd
         self.output_embd_tensor = state_dict[output_embd_naming].to(torch_dt_mat)
         if not transpose_weight:
             self.output_embd_tensor = self.output_embd_tensor.transpose(0, 1).contiguous()
