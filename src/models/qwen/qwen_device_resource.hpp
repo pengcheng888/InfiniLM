@@ -30,17 +30,17 @@ void createDeviceResource(DeviceResource *rsrc, const Meta *meta,
     }
 
     if (meta) {
-        meta->print_info();
+        // meta->print_info();
     }
 
     if (weights) {
-        weights->print_info();
+        // weights->print_info();
     }
 
     const void *weights_tensor_ptr = new WeightsTensor(meta, weights, idev, ndev);
     if (weights_tensor_ptr) {
-        const WeightsTensor *ptr = reinterpret_cast<const WeightsTensor *>(weights_tensor_ptr);
-        ptr->print_info();
+        // const WeightsTensor *ptr = reinterpret_cast<const WeightsTensor *>(weights_tensor_ptr);
+        // ptr->print_info();
     }
 
     *rsrc = DeviceResource{

@@ -80,6 +80,7 @@ class Qwen3MoEWeights(WeightsCStruct):
         d = meta.d
         di = meta.di
         num_experts = meta._num_experts
+        
         assert nh % nkvh == 0
         assert nh % ndev == 0
         assert nkvh % ndev == 0
@@ -234,8 +235,7 @@ class Qwen3MoEForCauslLM:
         )
         print(input_content, end="", flush=True)
         tokens = self.tokenizer.encode(input_content)
-        print("tokens: ", tokens)
-        # tokens =[4340,  525,  498,   11]
+        # print("tokens: ", tokens)
 
         infer_task = InferTask(
             0,
@@ -272,7 +272,7 @@ class Qwen3MoEForCauslLM:
 
             if step_i > 0:
                 total_time += end_time - start_time
-            # break
+           
 
         print("\n")
         avg_time = total_time * 1000 / (steps - 1 + 1e-5)
@@ -360,14 +360,10 @@ def test():
         print("Usage: python qwen3_moe.py --nvidia <path/to/model_dir> [n_device]")
         sys.exit(1)
 
-    #model_path = r"/data-aisoft/wangpengcheng_data/Qwen3-30B-A3B_small"
-    model_path = r"/data-aisoft/wangpengcheng_data/Qwen3-30B-A3B" 
-
     ndev = int(sys.argv[3]) if len(sys.argv) > 3 else 1
     model = Qwen3MoEForCauslLM(model_path, device_type, ndev)
-    model.generate("山东最高的山是？", 5)
+    model.generate("山东最高的山是？", 500)
     model.destroy_model_instance()
-
 
 if __name__ == "__main__":
     test()

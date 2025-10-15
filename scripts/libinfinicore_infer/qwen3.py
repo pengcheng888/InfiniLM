@@ -36,17 +36,6 @@ class MLPCStruct(ctypes.Structure):
 
         ### gate_up
         self.gate_up_tensor = torch.concat(self.gate_up_slices(ilayer, di, ndev, state_dict, gate_proj=gate_proj, up_proj=up_proj)).to(torch_dt_mat)
-        '''
-        ndev等于1时， 
-                self.gate_up_tensor是：torch.Size([6144, 1024])   
-               gate_up_slices函数的返回值是：  [Size([3072, 1024]), 
-                                             Size([3072, 1024])]
-
-        ndev等于2时， 
-                self.gate_up_tensor是：torch.Size([6144, 1024])   
-               gate_up_slices函数的返回值是：  [Size([1536, 1024]), Size([1536, 1024]), 
-                                              Size([1536, 1024]), Size([1536, 1024])]
-        '''
 
         if not transpose_weight:
             self.gate_up_tensor = self.gate_up_tensors.reshape(ndev, 2 * di // ndev, d).transpose(1, 2).contiguous()
@@ -59,15 +48,7 @@ class MLPCStruct(ctypes.Structure):
             self.ffn_down_tensor = state_dict[down_proj].to(torch_dt_mat).reshape([d, ndev, di // ndev]).transpose(0, 1).contiguous()
         else:
             self.ffn_down_tensor = state_dict[down_proj].transpose(0, 1).to(torch_dt_mat).contiguous()
-        '''
-        ndev等于1时， 
-            self.ffn_down_tensor 是： torch.Size([1, 1024, 3072])
-    
-        ndev等于1时， 
-            self.ffn_down_tensor 是： torch.Size([2, 1024, 1536])
-        '''
-        # print(     self.ffn_down_tensor.shape)
-        # exit(-1)
+
         setattr(self, "_down_proj_weight", self.ffn_down_tensor.data_ptr())
 
     def gate_up_slices(self, ilayer: int, di, ndev, state_dict: dict,

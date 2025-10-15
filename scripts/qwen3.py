@@ -86,12 +86,6 @@ class Qwen3Weights(WeightsCStruct):
                          transpose_weight,
                          state_dict)
 
-
-# from jiuge import JiugeBatchedTask
-
-# BatchedTask = JiugeBatchedTask
-
-
 class BatchedTask:
     def __init__(self, tasks: List[InferTask]):
         self.tasks = tasks
@@ -346,12 +340,9 @@ def test():
         print("Usage: python qwen3.py --nvidia <path/to/model_dir> [n_device]")
         sys.exit(1)
 
-
-    model_path = r"/data-aisoft/wangpengcheng_data/Qwen3-0.6B"
-
     ndev = int(sys.argv[3]) if len(sys.argv) > 3 else 1
     model = Qwen3ForCauslLM(model_path, device_type, ndev)
-    model.generate("山东最高的山是？", 15)
+    model.generate("山东最高的山是？", 500)
     model.destroy_model_instance() # 
 
 
