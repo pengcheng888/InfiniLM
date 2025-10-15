@@ -1,8 +1,9 @@
 import ctypes
-from ctypes import c_size_t, c_uint, c_int, c_float, c_void_p,c_bool, POINTER
+from ctypes import c_size_t, c_uint, c_int, c_float, c_void_p, c_bool, POINTER
 import os
 import torch
 from .base import DataType, DeviceType
+from libinfinicore_infer.qwen3 import AttentionCStruct, MLPCStruct
 
 
 class MoEMetaCStruct(ctypes.Structure):
@@ -27,8 +28,6 @@ class MoEMetaCStruct(ctypes.Structure):
         ("_norm_topk_prob", c_bool),
     ]
 
-from libinfinicore_infer.qwen3 import AttentionCStruct, MLPCStruct
-
 
 class SparseMLPCStruct(ctypes.Structure):
     _fields_ = [
@@ -40,7 +39,7 @@ class SparseMLPCStruct(ctypes.Structure):
         ("_experts", POINTER(MLPCStruct)),
     ]
 
-    def __init__(self, ilayer: int, num_experts,  ndev, d,
+    def __init__(self, ilayer: int, num_experts, ndev, d,
                  torch_dt_mat, transpose_weight,
                  _moe_intermediate_size, _shared_expert_intermediate_size, _num_experts_per_tok, _norm_topk_prob,
                  state_dict: dict):
@@ -98,7 +97,7 @@ class DecoderLayerCStruct(ctypes.Structure):
         ("_ilayer", c_int),
         ("_post_attention_layernorm_weight", c_void_p),
         ("_input_layernorm_weight", c_void_p),
-        ("_self_attn",AttentionCStruct),
+        ("_self_attn", AttentionCStruct),
         ("_mlp", SparseMLPCStruct),
     ]
 
@@ -120,11 +119,10 @@ class DecoderLayerCStruct(ctypes.Structure):
         self.self_attn = AttentionCStruct(ilayer, nh, nkvh, d, dh, ndev, torch_dt_mat, torch_dt_logits, torch_dt_norm, transpose_weight, state_dict)
         setattr(self, "_self_attn", self.self_attn)
 
-        self.mlp = SparseMLPCStruct(ilayer, num_experts,  ndev, d, torch_dt_mat, transpose_weight,
-                                     _moe_intermediate_size, _shared_expert_intermediate_size, _num_experts_per_tok, _norm_topk_prob,
-                                     state_dict)
+        self.mlp = SparseMLPCStruct(ilayer, num_experts, ndev, d, torch_dt_mat, transpose_weight,
+                                    _moe_intermediate_size, _shared_expert_intermediate_size, _num_experts_per_tok, _norm_topk_prob,
+                                    state_dict)
         setattr(self, "_mlp", self.mlp)
-
 
 
 # Define the QwenWeights struct
@@ -193,16 +191,14 @@ class WeightsCStruct(ctypes.Structure):
         for ilayer in range(nlayer):
             self.layers.append(
                 DecoderLayerCStruct(ilayer, num_experts, nh, nkvh, d, di, dh, ndev,
-                                           torch_dt_mat, torch_dt_logits, torch_dt_norm,
-                                           transpose_weight,
-                                           _moe_intermediate_size, _shared_expert_intermediate_size, _num_experts_per_tok, _norm_topk_prob,
-                                           state_dict)
+                                    torch_dt_mat, torch_dt_logits, torch_dt_norm,
+                                    transpose_weight,
+                                    _moe_intermediate_size, _shared_expert_intermediate_size, _num_experts_per_tok, _norm_topk_prob,
+                                    state_dict)
             )
 
         self.layers_array = (DecoderLayerCStruct * nlayer)(*self.layers)
         setattr(self, "_layers", self.layers_array)
-
-
 
 
 class ModelCSruct(ctypes.Structure):
@@ -213,14 +209,11 @@ class KVCacheCStruct(ctypes.Structure):
     pass
 
 
-
-
-
 def __open_library__():
     lib_path = os.path.join(
         os.environ.get("INFINI_ROOT"), "lib", "libinfinicore_infer.so"
     )
-    
+
     lib = ctypes.CDLL(lib_path)
     lib.Qwen3MoEcreateModel.restype = POINTER(ModelCSruct)
     lib.Qwen3MoEcreateModel.argtypes = [

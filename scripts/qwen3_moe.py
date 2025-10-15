@@ -1,7 +1,7 @@
 from typing import List, Sequence
 
 from sympy import true
-from libinfinicore_infer.qwen3_moe  import (
+from libinfinicore_infer.qwen3_moe import (
     MoEMetaCStruct,
     WeightsCStruct,
     DataType,
@@ -80,7 +80,7 @@ class Qwen3MoEWeights(WeightsCStruct):
         d = meta.d
         di = meta.di
         num_experts = meta._num_experts
-        
+
         assert nh % nkvh == 0
         assert nh % ndev == 0
         assert nkvh % ndev == 0
@@ -99,8 +99,6 @@ class Qwen3MoEWeights(WeightsCStruct):
                          transpose_weight,
                          _moe_intermediate_size, _shared_expert_intermediate_size, _num_experts_per_tok, _norm_topk_prob,
                          state_dict)
-
-
 
 
 class BatchedTask:
@@ -251,19 +249,13 @@ class Qwen3MoEForCauslLM:
         steps = 0
         total_time = 0
         output_content = ""
-        output_tokens_list = []
         for step_i in range(max_steps):
             start_time = time.time()
             output_tokens = self.batch_infer_one_round([infer_task])
-            output_tokens_list.append(output_tokens)
-
+            
             end_time = time.time()
             steps += 1
-            output_str = (
-                self.tokenizer._tokenizer.id_to_token(output_tokens[0])
-                .replace("▁", " ")
-                .replace("<0x0A>", "\n")
-            )
+            output_str = self.tokenizer.decode(output_tokens[0])
             output_content += output_str
             print(output_str, end="", flush=True)
             if output_tokens[0] in self.eos_token_id:
@@ -272,18 +264,11 @@ class Qwen3MoEForCauslLM:
 
             if step_i > 0:
                 total_time += end_time - start_time
-           
 
         print("\n")
-        avg_time = total_time * 1000 / (steps - 1 + 1e-5)
+        avg_time = total_time * 1000 / (steps - 1 + 1e-9)
         print(f"Time per step: {avg_time:.3f}ms")
 
-        print('\n -----------------------------------------------\n')
-        output_tokens_tensor = torch.tensor(output_tokens_list).reshape((1, -1)).contiguous()
-        print(output_tokens_tensor.shape)
-        print(self.tokenizer.decode(output_tokens_tensor[0], skip_special_tokens=True))
-        print('\n ----------------------------------------------- \n')
-        print("\n")
 
         infer_task._kv_cache.drop(self)
         return output_content, avg_time
@@ -364,6 +349,7 @@ def test():
     model = Qwen3MoEForCauslLM(model_path, device_type, ndev)
     model.generate("山东最高的山是？", 500)
     model.destroy_model_instance()
+
 
 if __name__ == "__main__":
     test()
