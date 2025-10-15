@@ -3,7 +3,7 @@ from ctypes import c_size_t, c_uint, c_int, c_float, c_void_p, POINTER
 import os
 import torch
 from .base import DataType, DeviceType
-
+from typing import List
 
 class MetaCStruct(ctypes.Structure):
     _fields_ = [
@@ -21,6 +21,14 @@ class MetaCStruct(ctypes.Structure):
         ("end_token", c_uint),
     ]
 
+def find_name_in_state_dict(name_list : List[str] , state_dict: dict ):
+    retname = None
+    for name in name_list:
+        if name in state_dict:
+            retname = name
+            break
+    return retname
+
 
 class MLPCStruct(ctypes.Structure):
     _fields_ = [
@@ -31,7 +39,7 @@ class MLPCStruct(ctypes.Structure):
     def __init__(self, ilayer: int, di, ndev, d,
                  torch_dt_mat, transpose_weight,
                  state_dict: dict,
-                 gate_proj=None, up_proj=None, down_proj=None   ):
+                 gate_proj=None, up_proj=None, down_proj=None ):
         # transpose_weight 默认为True
 
         ### gate_up
@@ -43,7 +51,7 @@ class MLPCStruct(ctypes.Structure):
 
         ### down
         if down_proj is None:
-            down_proj = f"model.layers.{ilayer}.mlp.down_proj.weight"
+            down_proj = find_name_in_state_dict([f"model.layers.{ilayer}.mlp.down_proj.weight" , f"layers.{ilayer}.mlp.down_proj.weight" ], state_dict )
         if transpose_weight:
             self.ffn_down_tensor = state_dict[down_proj].to(torch_dt_mat).reshape([d, ndev, di // ndev]).transpose(0, 1).contiguous()
         else:
@@ -54,9 +62,9 @@ class MLPCStruct(ctypes.Structure):
     def gate_up_slices(self, ilayer: int, di, ndev, state_dict: dict,
                        gate_proj=None, up_proj=None):
         if gate_proj is None:
-            gate_proj = f"model.layers.{ilayer}.mlp.gate_proj.weight"
+            gate_proj = find_name_in_state_dict([ f"model.layers.{ilayer}.mlp.gate_proj.weight", f"layers.{ilayer}.mlp.gate_proj.weight"], state_dict )
         if up_proj is None:
-            up_proj = f"model.layers.{ilayer}.mlp.up_proj.weight"
+            up_proj = find_name_in_state_dict([ f"model.layers.{ilayer}.mlp.up_proj.weight" , f"layers.{ilayer}.mlp.up_proj.weight" ], state_dict )
 
         _result = []
         _di = di // ndev
@@ -88,24 +96,25 @@ class AttentionCStruct(ctypes.Structure):
 
         ###
         self.qkv_b_tensor = None
-        attn_q_b = f"model.layers.{ilayer}.self_attn.q_proj.bias"
+        attn_q_b = f"model.layers.{ilayer}.self_attn.q_proj.bias" 
         if attn_q_b in state_dict:
             self.qkv_b_tensor = torch.concat(self.qkv_b_slices(ilayer, nh, nkvh, d, dh, ndev, state_dict)).to(torch_dt_logits)
             setattr(self, "_qkv_proj_bias", self.qkv_b_tensor.data_ptr())
 
         ###
         self.qk_norm_tensor = None
-        attn_q_norm = f"model.layers.{ilayer}.self_attn.q_norm.weight"
+        attn_q_norm = find_name_in_state_dict([ f"model.layers.{ilayer}.self_attn.q_norm.weight"      , f"layers.{ilayer}.self_attn.q_norm.weight"  ], state_dict )
         if attn_q_norm in state_dict:
-            attn_q_norm = f"model.layers.{ilayer}.self_attn.q_norm.weight"
-            attn_k_norm = f"model.layers.{ilayer}.self_attn.k_norm.weight"
+            attn_q_norm =find_name_in_state_dict([  f"model.layers.{ilayer}.self_attn.q_norm.weight"       ,  f"layers.{ilayer}.self_attn.q_norm.weight"    ], state_dict )
+            attn_k_norm = find_name_in_state_dict([  f"model.layers.{ilayer}.self_attn.k_norm.weight"      , f"layers.{ilayer}.self_attn.k_norm.weight"    ], state_dict )
+
             q_norm = state_dict[attn_q_norm].reshape([2, dh // 2]).transpose(1, 0)
             k_norm = state_dict[attn_k_norm].reshape([2, dh // 2]).transpose(1, 0)
             self.qk_norm_tensor = torch.concat([q_norm, k_norm]).to(torch_dt_norm)
             setattr(self, "_qk_norm_weight", self.qk_norm_tensor.data_ptr())
 
         ###
-        attn_o = f"model.layers.{ilayer}.self_attn.o_proj.weight"
+        attn_o = find_name_in_state_dict([  f"model.layers.{ilayer}.self_attn.o_proj.weight"     , f"layers.{ilayer}.self_attn.o_proj.weight"   ], state_dict )
         if transpose_weight:
             self.attn_o_tensor = state_dict[attn_o].to(torch_dt_mat).reshape([d, ndev, nh // ndev * dh]).transpose(0, 1).contiguous()
         else:
@@ -131,9 +140,9 @@ class AttentionCStruct(ctypes.Structure):
         return _result
 
     def qkv_slices(self, ilayer: int, nh, nkvh, d, dh, ndev, state_dict):
-        attn_q = f"model.layers.{ilayer}.self_attn.q_proj.weight"
-        attn_k = f"model.layers.{ilayer}.self_attn.k_proj.weight"
-        attn_v = f"model.layers.{ilayer}.self_attn.v_proj.weight"
+        attn_q =  find_name_in_state_dict([f"model.layers.{ilayer}.self_attn.q_proj.weight"  , f"layers.{ilayer}.self_attn.q_proj.weight" ], state_dict )
+        attn_k = find_name_in_state_dict([ f"model.layers.{ilayer}.self_attn.k_proj.weight"  ,  f"layers.{ilayer}.self_attn.k_proj.weight"  ], state_dict )
+        attn_v = find_name_in_state_dict([  f"model.layers.{ilayer}.self_attn.v_proj.weight"    ,  f"layers.{ilayer}.self_attn.v_proj.weight"   ], state_dict )
 
         _Q = state_dict[attn_q].reshape([nh, 2, dh // 2, d]).transpose(1, 2)
         _K = state_dict[attn_k].reshape([nkvh, 2, dh // 2, d]).transpose(1, 2)
@@ -166,13 +175,14 @@ class DecoderLayerCStruct(ctypes.Structure):
                  transpose_weight,
                  state_dict: dict):
         setattr(self, "_ilayer", ilayer)
+        
         ###
-        attn_norm = f"model.layers.{ilayer}.input_layernorm.weight"
+        attn_norm = find_name_in_state_dict([ f"model.layers.{ilayer}.input_layernorm.weight", f"layers.{ilayer}.input_layernorm.weight"], state_dict )
         self.attn_norm_tensor = state_dict[attn_norm].to(torch_dt_norm)
         setattr(self, "_input_layernorm_weight", self.attn_norm_tensor.data_ptr())
 
         ###
-        ffn_norm = f"model.layers.{ilayer}.post_attention_layernorm.weight"
+        ffn_norm = attn_norm = find_name_in_state_dict([  f"model.layers.{ilayer}.post_attention_layernorm.weight", f"layers.{ilayer}.post_attention_layernorm.weight"], state_dict )
         self.mlp_norm_tensor = state_dict[ffn_norm].to(torch_dt_norm)
         setattr(self, "_post_attention_layernorm_weight", self.mlp_norm_tensor.data_ptr())
 
@@ -183,6 +193,9 @@ class DecoderLayerCStruct(ctypes.Structure):
         ###
         self.mlp = MLPCStruct(ilayer, di, ndev, d, torch_dt_mat, transpose_weight, state_dict)
         setattr(self, "_mlp", self.mlp)
+
+
+
 
 
 # Define the Qwen3Weights struct
@@ -228,16 +241,8 @@ class WeightsCStruct(ctypes.Structure):
             raise ValueError("Unsupported norm weight data type")
 
         ###        
-        input_embd = None
-        output_embd = None
-        for name in ["model.embed_tokens.weight", "embed_tokens.weight"]:
-            if name in state_dict:
-                input_embd = name
-                break
-        for name in ["lm_head.weight"]:
-            if name in state_dict:
-                output_embd = name
-                break
+        input_embd = find_name_in_state_dict(["model.embed_tokens.weight", "embed_tokens.weight"], state_dict)
+        output_embd = find_name_in_state_dict(["lm_head.weight"], state_dict)
 
         input_embd_naming = input_embd if input_embd else output_embd
         self.input_embd_tensor = state_dict[input_embd_naming].to(torch_dt_logits)
@@ -250,7 +255,7 @@ class WeightsCStruct(ctypes.Structure):
         setattr(self, "_lm_head_weight", self.output_embd_tensor.data_ptr())
 
         ###
-        output_norm = "model.norm.weight"
+        output_norm =  find_name_in_state_dict([  "model.norm.weight"    ,  "norm.weight" ], state_dict )
         self.output_norm_tensor = state_dict[output_norm].to(torch_dt_norm)
         setattr(self, "_norm_weight", self.output_norm_tensor.data_ptr())
 
