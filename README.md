@@ -18,6 +18,9 @@ xmake && xmake install
 python scripts/jiuge.py [--cpu | --nvidia | --cambricon | --ascend | --metax | --moore | --iluvatar | --kunlun | --hygon] path/to/model_dir [n_device]
 python scripts/qwen3.py --nvidia  "" 1
 
+python scripts/jiuge.py  --nvidia /data-aisoft/mechdancer/models/9G4B 1
+
+python scripts/qwen3_moe.py --nvidia  "" 1
 ```
 
 - 部署模型推理服务

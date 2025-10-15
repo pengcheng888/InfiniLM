@@ -360,12 +360,12 @@ def test():
         print("Usage: python qwen3_moe.py --nvidia <path/to/model_dir> [n_device]")
         sys.exit(1)
 
-    # model_path = r"/home/wangpengcheng/H100/Qwen3-30B-A3B_small"
+    #model_path = r"/data-aisoft/wangpengcheng_data/Qwen3-30B-A3B_small"
     model_path = r"/data-aisoft/wangpengcheng_data/Qwen3-30B-A3B" 
 
     ndev = int(sys.argv[3]) if len(sys.argv) > 3 else 1
     model = Qwen3MoEForCauslLM(model_path, device_type, ndev)
-    model.generate("山东最高的山是？", 20)
+    model.generate("山东最高的山是？", 5)
     model.destroy_model_instance()
 
 
