@@ -1,5 +1,7 @@
 from jiuge import JiugeForCauslLM
 from jiuge_awq import JiugeAWQForCausalLM
+from qwen3 import Qwen3ForCauslLM,load_config_json
+from qwen3_moe import Qwen3MoEForCauslLM
 from libinfinicore_infer import DeviceType
 from infer_task import InferTask
 from kvcache_pool import KVCachePool
@@ -119,16 +121,31 @@ class AsyncInferTask(InferTask):
 
 
 @contextlib.asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Startup
-    if USE_AWQ:
-        app.state.model = JiugeAWQForCausalLM(
+async def lifespan(app: FastAPI):    
+    config_json = load_config_json(model_path)
+    model_type = config_json["model_type"]
+
+    if model_type in ["llama","fm9g","fm9g7b","qwen2"]:
+        # Startup
+        if USE_AWQ:
+            app.state.model = JiugeAWQForCausalLM(
+                model_path, device_type, ndev, max_tokens=max_tokens
+            )
+        else:
+            app.state.model = JiugeForCauslLM(
+                model_path, device_type, ndev, max_tokens=max_tokens
+            )
+    elif "qwen3" == model_type:
+        app.state.model = Qwen3ForCauslLM(
+            model_path, device_type, ndev, max_tokens=max_tokens
+        )
+    elif "qwen3_moe" == model_type:
+        app.state.model = Qwen3MoEForCauslLM(
             model_path, device_type, ndev, max_tokens=max_tokens
         )
     else:
-        app.state.model = JiugeForCauslLM(
-            model_path, device_type, ndev, max_tokens=max_tokens
-        )
+        raise ValueError("Unsupported model architecture")
+
     app.state.kv_cache_pool = KVCachePool(app.state.model, MAX_BATCH)
     app.state.request_queue = janus.Queue()
     worker_thread = threading.Thread(target=worker_loop, args=(app,), daemon=True)
@@ -226,11 +243,8 @@ async def chat_stream(id_, request_data, request: Request):
                 break
 
             token = await infer_task.output_queue.async_q.get()
-            content = (
-                request.app.state.model.tokenizer._tokenizer.id_to_token(token)
-                .replace("▁", " ")
-                .replace("<0x0A>", "\n")
-            )
+            content = request.app.state.model.tokenizer.decode(token)
+
             chunk = json.dumps(chunk_json(id_, content=content), ensure_ascii=False)
             yield f"data: {chunk}\n\n"
 
@@ -255,11 +269,7 @@ async def chat(id_, request_data, request: Request):
                 break
 
             token = await infer_task.output_queue.async_q.get()
-            content = (
-                request.app.state.model.tokenizer._tokenizer.id_to_token(token)
-                .replace("▁", " ")
-                .replace("<0x0A>", "\n")
-            )
+            content = request.app.state.model.tokenizer.decode(token)
             output.append(content)
 
         output_text = "".join(output).strip()
