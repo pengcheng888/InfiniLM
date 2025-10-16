@@ -125,7 +125,7 @@ async def lifespan(app: FastAPI):
     config_json = load_config_json(model_path)
     model_type = config_json["model_type"]
 
-    if model_type in ["llama","fm9g","fm9g7b","qwen2"]:
+    if model_type in ["llama","fm9g","minicpm","fm9g7b","qwen2"]:
         # Startup
         if USE_AWQ:
             app.state.model = JiugeAWQForCausalLM(
