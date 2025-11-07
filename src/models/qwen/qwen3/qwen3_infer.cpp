@@ -124,23 +124,28 @@ void Qwen3inferDeviceBatch(const Qwen3::Meta *meta, DeviceResource &rsrc,
             auto seq_len = req_lens[req];
             auto total_len = past_len + seq_len;
             auto o = o_buf->slice({{0, token_offset, seq_len}})->view({seq_len, nkvh, ngroup, dh})->permute({1, 2, 0, 3});
+
+            // qkv_rope是{ntok, nh + nkvh * 2, dh}
             auto q = qkv_rope->slice({{0, token_offset, seq_len}, {1, 0, nh}})->view({seq_len, nkvh, ngroup, dh})->permute({1, 2, 0, 3});
             auto k = qkv_rope->slice({{0, token_offset, seq_len}, {1, nh, nkvh}});
             auto v = qkv_rope->slice({{0, token_offset, seq_len}, {1, nh + nkvh, nkvh}});
 
-            // self attention
-            // concat
+            // kv cache 更新
             rearrange(kv_caches[req]->k[idev][ilayer]->slice(0, past_len, seq_len), k);
             rearrange(kv_caches[req]->v[idev][ilayer]->slice(0, past_len, seq_len), v);
+            auto k_gemm = kv_caches[req]->k[idev][ilayer]->slice(0, 0, total_len)->permute({1, 2, 0}); //  {total_len, nkvh, dh} => { nkvh, dh, total_len}
+            auto v_gemm = kv_caches[req]->v[idev][ilayer]->slice(0, 0, total_len)->permute({1, 0, 2}); //  {total_len, nkvh, dh} => { nkvh, total_len, dh}
+
+            // self attention
             // qk
             rearrange(q_rearrange->slice(2, 0, seq_len), q);
             auto qk_gemm = qk_buf->slice(1, 0, seq_len * total_len)->view({nkvh, ngroup * seq_len, total_len});
-            auto k_gemm = kv_caches[req]->k[idev][ilayer]->slice(0, 0, total_len)->permute({1, 2, 0});
+
             linear(qk_gemm, rearrange_q_buf->slice(1, 0, ngroup * seq_len), k_gemm, 1.f / float(sqrt(dh)), 0.f, nullptr, nullptr);
             // softmax
             auto qk_softmax = qk_buf->slice(1, 0, seq_len * total_len)->view({nh, seq_len, total_len});
             causalSoftmax(qk_softmax, qk_softmax);
-            auto v_gemm = kv_caches[req]->v[idev][ilayer]->slice(0, 0, total_len)->permute({1, 0, 2});
+
             linear(attn_val_buf->slice(1, 0, ngroup * seq_len), qk_gemm, v_gemm, 1.f, 0.f, nullptr, nullptr);
             // rearrange attn val
             rearrange(o, attn_val_gemm->slice(2, 0, seq_len));

@@ -16,6 +16,11 @@ xmake && xmake install
 
 ```bash
 python scripts/jiuge.py [--cpu | --nvidia | --cambricon | --ascend | --metax | --moore | --iluvatar | --kunlun | --hygon] path/to/model_dir [n_device]
+
+python scripts/qwen3.py --cpu /home/ubuntu/models/Qwen3-0.6B  1
+
+python scripts/qwen3.py --cpu /home/ubuntu/models/Qwen3-0.6B-small/  1
+
 ```
 
 - 部署模型推理服务

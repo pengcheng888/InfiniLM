@@ -325,13 +325,15 @@ def test():
         device_type = DeviceType.DEVICE_TYPE_NVIDIA
     elif sys.argv[1] == "--metax":
         device_type = DeviceType.DEVICE_TYPE_METAX
+    elif sys.argv[1] == "--cpu":
+        device_type = DeviceType.DEVICE_TYPE_CPU
     else:
         print("Usage: python qwen3.py --nvidia <path/to/model_dir> [n_device]")
         sys.exit(1)
 
     ndev = int(sys.argv[3]) if len(sys.argv) > 3 else 1
     model = Qwen3ForCauslLM(model_path, device_type, ndev)
-    model.generate("山东最高的山是？", 500)
+    model.generate("山东最高的山是？", 10)
     model.destroy_model_instance()  #
 
 
