@@ -8,6 +8,9 @@ build/
 # Vscode
 .vscode/
 
+# Pycharm
+.idea/
+
 # Python
 __pycache__/
 

@@ -16,8 +16,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 import torch
-from .cache_utils_wpc import Cache
-
+from .cache_utils import Cache
 
 
 @dataclass
@@ -55,6 +54,7 @@ class BaseModelOutputWithPast():
     past_key_values: Optional[Cache] = None
     last_hidden_state_last_token: Optional[infinicore.Tensor] = None
 
+
 @dataclass
 class CausalLMOutputWithPast():
     """
@@ -83,7 +83,7 @@ class CausalLMOutputWithPast():
             heads.
     """
     import infinicore
-    
+
     logits: Optional[torch.FloatTensor] = None
     past_key_values: Optional[Cache] = None
     next_token_logits: Optional[infinicore.Tensor] = None

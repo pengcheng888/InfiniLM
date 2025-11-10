@@ -7,16 +7,9 @@ import torch
 # from .configuration_utils import PretrainedConfig
 PretrainedConfig = None
 
-from .utils import (
-
-
-    logging,
-)
-
-
+import transformers.utils.logging as logging
 
 _is_torch_greater_or_equal_than_2_7 = False
-
 
 logger = logging.get_logger(__name__)
 
@@ -33,21 +26,26 @@ class CacheLayerMixin(ABC):
         return f"{self.__class__.__name__}"
 
     @abstractmethod
-    def lazy_initialization(self, key_states: torch.Tensor): ...
+    def lazy_initialization(self, key_states: torch.Tensor):
+        ...
 
     @abstractmethod
     def update(
-        self, key_states: torch.Tensor, value_states: torch.Tensor, cache_kwargs: Optional[dict[str, Any]] = None
-    ) -> tuple[torch.Tensor, torch.Tensor]: ...
+            self, key_states: torch.Tensor, value_states: torch.Tensor, cache_kwargs: Optional[dict[str, Any]] = None
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        ...
 
     @abstractmethod
-    def get_mask_sizes(self, cache_position: torch.Tensor) -> tuple[int, int]: ...
+    def get_mask_sizes(self, cache_position: torch.Tensor) -> tuple[int, int]:
+        ...
 
     @abstractmethod
-    def get_seq_length(self) -> int: ...
+    def get_seq_length(self) -> int:
+        ...
 
     @abstractmethod
-    def get_max_cache_shape(self) -> int: ...
+    def get_max_cache_shape(self) -> int:
+        ...
 
     def offload(self):
         """Offload this layer's data to CPU device."""
@@ -91,10 +89,10 @@ class DynamicLayer(CacheLayerMixin):
         self.values = torch.tensor([], dtype=self.dtype, device=self.device)
 
     def update(
-        self,
-        key_states: torch.Tensor,
-        value_states: torch.Tensor,
-        cache_kwargs: Optional[dict[str, Any]] = None,
+            self,
+            key_states: torch.Tensor,
+            value_states: torch.Tensor,
+            cache_kwargs: Optional[dict[str, Any]] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Update the key and value caches in-place, and return the necessary keys and value states.
@@ -114,7 +112,6 @@ class DynamicLayer(CacheLayerMixin):
         self.keys = torch.cat([self.keys, key_states], dim=-2)
         self.values = torch.cat([self.values, value_states], dim=-2)
         return self.keys, self.values
-
 
     def get_mask_sizes(self, cache_position: torch.Tensor) -> tuple[int, int]:
         """Return the length and offset of the cache, used to generate the mask"""
@@ -161,9 +158,6 @@ class DynamicLayer(CacheLayerMixin):
             self.values = self.values[indices, ...]
 
 
-
-
-
 class Cache:
     """
     A `Cache` is mostly a list of `CacheLayerMixin` objects, one per model layer. It serves as a container for
@@ -185,11 +179,11 @@ class Cache:
     """
 
     def __init__(
-        self,
-        layers: Optional[list[CacheLayerMixin]] = None,
-        layer_class_to_replicate: Optional[type[CacheLayerMixin]] = None,
-        offloading: bool = False,
-        offload_only_non_sliding: bool = True,
+            self,
+            layers: Optional[list[CacheLayerMixin]] = None,
+            layer_class_to_replicate: Optional[type[CacheLayerMixin]] = None,
+            offloading: bool = False,
+            offload_only_non_sliding: bool = True,
     ):
         if layers is not None and layer_class_to_replicate is not None:
             raise ValueError(
@@ -241,11 +235,11 @@ class Cache:
             self.layers[layer_idx].offload()
 
     def update(
-        self,
-        key_states: torch.Tensor,
-        value_states: torch.Tensor,
-        layer_idx: int,
-        cache_kwargs: Optional[dict[str, Any]] = None,
+            self,
+            key_states: torch.Tensor,
+            value_states: torch.Tensor,
+            layer_idx: int,
+            cache_kwargs: Optional[dict[str, Any]] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Updates the cache with the new `key_states` and `value_states` for the layer `layer_idx`.
@@ -282,7 +276,7 @@ class Cache:
         return keys, values
 
     def early_initialization(
-        self, batch_size: int, num_heads: int, head_dim: int, dtype: torch.dtype, device: torch.device
+            self, batch_size: int, num_heads: int, head_dim: int, dtype: torch.dtype, device: torch.device
     ):
         """
         Initialize all the layers in advance (it's otherwise lazily initialized on the first `update` call).
@@ -449,11 +443,11 @@ class DynamicCache(Cache):
     """
 
     def __init__(
-        self,
-        ddp_cache_data: Optional[Iterable[tuple[torch.Tensor, torch.Tensor]]] = None,
-        config: Optional[PretrainedConfig] = None,
-        offloading: bool = False,
-        offload_only_non_sliding: bool = False,
+            self,
+            ddp_cache_data: Optional[Iterable[tuple[torch.Tensor, torch.Tensor]]] = None,
+            config: Optional[PretrainedConfig] = None,
+            offloading: bool = False,
+            offload_only_non_sliding: bool = False,
     ):
         layers = []
         # If a config is passed, use it to infer the layer types and initialize accordingly
@@ -520,5 +514,3 @@ class DynamicCache(Cache):
                 key_states, value_states = past_key_values[layer_idx]
                 cache.update(key_states, value_states, layer_idx)
         return cache
-
-

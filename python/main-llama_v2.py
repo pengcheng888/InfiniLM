@@ -1,6 +1,6 @@
 import os
 import numbers
-import infinilm as transformers_v2 
+import infinilm as transformers_v2
 import time
 import torch
 ##----
@@ -25,9 +25,6 @@ str_to_torch_dtype = {
 }
 
 
-
-
-
 def load_state_dict(
         checkpoint_file: Union[str, os.PathLike],
         map_location: Optional[Union[str, torch.device]] = "cpu",
@@ -37,7 +34,7 @@ def load_state_dict(
     Reads a `safetensor` or a `.bin` checkpoint file. We load the checkpoint on "cpu" by default.
     """
     # Use safetensors if possible
-    if checkpoint_file.endswith(".safetensors") :
+    if checkpoint_file.endswith(".safetensors"):
         with safe_open(checkpoint_file, framework="pt") as f:
             metadata = f.metadata()
 
@@ -63,8 +60,9 @@ def load_state_dict(
 
 def get_config(Folder):
     config_dict = transformers_v2.LlamaConfig._get_config_dict(Folder)[0]
-    config =  transformers_v2.LlamaConfig(**config_dict)
+    config = transformers_v2.LlamaConfig(**config_dict)
     return config
+
 
 def get_config_v2(Folder):
     def load_config_json(dir_path_: str):
@@ -74,29 +72,24 @@ def get_config_v2(Folder):
         return config
 
     config_dict = load_config_json(os.path.join(Folder))
-    config =  transformers_v2.LlamaConfig(**config_dict)
+    config = transformers_v2.LlamaConfig(**config_dict)
     return config
-
-
 
 
 def func(Folder):
     # ------------------------------------------------------------------------------------------ #
     # ------------------------------------------------------------------------------------------ #
     # ------------------------------------------------------------------------------------------ #
-     
 
     config = get_config_v2(Folder)
 
-  
-
     model = transformers_v2.LlamaForCausalLM(config)
 
-    path = os.path.join(Folder,"model.safetensors")
+    path = os.path.join(Folder, "model.safetensors")
     model_param = load_state_dict(path)
-    
+
     model.load_state_dict(model_param)
-    
+
     # ------------------------------------------------------------------------------------------ #
     # ------------------------------------------------------------------------------------------ #
     # ------------------------------------------------------------------------------------------ #
@@ -109,8 +102,8 @@ def func(Folder):
     # ------------------------------------------------------------------------------------------ #
     prompt = ["How are you,"]  # {'input_ids': tensor([[    1,  1128,   526,   366, 29892]]), 'attention_mask': tensor([[1, 1, 1, 1, 1]])}
     prompt = "How are you,"  # {'input_ids': tensor([[    1,  1128,   526,   366, 29892]]), 'attention_mask': tensor([[1, 1, 1, 1, 1]])}
-    
-    #prompt = "山东最高的山是"  # {'input_ids': tensor([[    1,  1128,   526,   366, 29892]]), 'attention_mask': tensor([[1, 1, 1, 1, 1]])}
+
+    # prompt = "山东最高的山是"  # {'input_ids': tensor([[    1,  1128,   526,   366, 29892]]), 'attention_mask': tensor([[1, 1, 1, 1, 1]])}
     # prompt = ["How are you,",
     #           "How old are you,"]  # {'input_ids': tensor([[1,1128,526,366, 29892,2],  [1, 1128, 2030, 526, 366, 29892]]), 'attention_mask': tensor([[1, 1, 1, 1, 1, 0], [1, 1, 1, 1, 1, 1]])}
 
@@ -120,7 +113,7 @@ def func(Folder):
                           truncation=True,  # 自动截断到最大长度
                           max_length=128,  # 设置最大长度
                           return_tensors="pt").to(model_device)
-   
+
     with torch.no_grad():
         print('------> start')
         t1 = time.time()
@@ -130,8 +123,8 @@ def func(Folder):
 
         t2 = time.time()
         print("time: ", (t2 - t1) * 1000)
-        print( outputs, output_tokens_list )
-        outputs =torch.tensor([output_tokens_list]) 
+        print(outputs, output_tokens_list)
+        outputs = torch.tensor([output_tokens_list])
         for output in outputs:
             print(tokenizer.decode(output, skip_special_tokens=True))
 
