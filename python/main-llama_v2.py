@@ -9,6 +9,8 @@ from safetensors import safe_open
 from safetensors.torch import load_file as safe_load_file
 from safetensors.torch import save_file as safe_save_file
 
+
+
 str_to_torch_dtype = {
     "BOOL": torch.bool,
     "U8": torch.uint8,
@@ -88,7 +90,14 @@ def func(Folder):
     path = os.path.join(Folder, "model.safetensors")
     model_param = load_state_dict(path)
 
+    #
+
+    # torch ==> infini_tensor
+    #
+    model_device = "cuda"
+
     model.load_state_dict(model_param)
+    model.to(model_device)
 
     # ------------------------------------------------------------------------------------------ #
     # ------------------------------------------------------------------------------------------ #
@@ -96,7 +105,6 @@ def func(Folder):
     from transformers import AutoTokenizer
     tokenizer = AutoTokenizer.from_pretrained(Folder)
 
-    model_device = "cpu"
     # ------------------------------------------------------------------------------------------ #
     # ------------------------------------------------------------------------------------------ #
     # ------------------------------------------------------------------------------------------ #

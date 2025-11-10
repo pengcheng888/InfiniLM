@@ -49,8 +49,6 @@ class BaseModelOutputWithPast():
             heads.
     """
     import infinicore
-
-    last_hidden_state: Optional[torch.FloatTensor] = None
     past_key_values: Optional[Cache] = None
     last_hidden_state_last_token: Optional[infinicore.Tensor] = None
 
