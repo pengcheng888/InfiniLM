@@ -37,7 +37,7 @@ logger = logging.get_logger(__name__)
 
 import infinicore
 
-from torch import nn
+
 
 LlamaRMSNorm = infinicore.nn.RMSNorm
 
