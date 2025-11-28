@@ -27,6 +27,8 @@ from .configuration_llama import LlamaConfig
 
 logger = logging.get_logger(__name__)
 
+model_time = 0.0
+
 
 def repeat_kv(keys: infinicore.Tensor, values: infinicore.Tensor, ngroup: int):
     total_seq_len, num_heads, head_dim = keys.shape
@@ -357,6 +359,7 @@ class LlamaModel(infinicore.nn.Module):
         #                    decoder_layer
         # --------------------------------------------------------- #
         ilayer = 0  # noqa: F841
+
         hidden_states = inputs_embeds
         for decoder_layer in self.layers[: self.config.num_hidden_layers]:
             # print("ilayer: ", ilayer)
@@ -376,6 +379,9 @@ class LlamaModel(infinicore.nn.Module):
         last_token = hidden_states.narrow(1, seq_len - 1, 1)
 
         return self.norm(last_token)
+
+
+import time
 
 
 class LlamaForCausalLM(infinicore.nn.Module, GenerationMixin):
@@ -402,6 +408,9 @@ class LlamaForCausalLM(infinicore.nn.Module, GenerationMixin):
         use_cache: Optional[bool] = None,
         **kwargs,
     ):
+        global model_time
+        t1 = time.time()
+
         last_token = self.model(
             input_ids,
             position_ids,
@@ -409,6 +418,10 @@ class LlamaForCausalLM(infinicore.nn.Module, GenerationMixin):
             use_cache=use_cache,
             **kwargs,
         )
+        t2 = time.time()
+
+        model_time += t2 - t1
+
         return self.lm_head(last_token)
 
     @classmethod

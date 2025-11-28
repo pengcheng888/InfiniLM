@@ -188,6 +188,7 @@ class GenerationMixin:
             # -------------------------------------------------------------------------- #
             #                     prepare model inputs
             # -------------------------------------------------------------------------- #
+
             model_inputs = self.prepare_inputs_for_generation(device, **model_kwargs)
 
             model_kwargs["position_ids"] = model_inputs["position_ids"]
