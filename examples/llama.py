@@ -144,6 +144,23 @@ def test(
     print(
         f"total_time: {round((t2 - t1) * 1000, 2)} ms",
     )
+    print(
+        f"Tensor.s_time {infinicore.Tensor.s_time * 1000} ms",
+    )
+    print(
+        f"Tensor.s_time {infinicore.Tensor.s_count}",
+    )
+    print(
+        f"device.s_time {infinicore.device.s_time * 1000} ms",
+    )
+    print(
+        f"device.s_time {infinicore.device.s_count}",
+    )
+    from infinilm.models.llama.modeling_llama import model_time
+
+    print(
+        f"model_time {model_time * 1000}",
+    )
 
 
 if __name__ == "__main__":
