@@ -18,7 +18,7 @@ xmake && xmake install
 python scripts/jiuge.py [--cpu | --nvidia | --cambricon | --ascend | --metax | --moore | --iluvatar | --kunlun | --hygon] path/to/model_dir [n_device]
 
 python scripts/jiuge.py --nvidia /home/ubuntu/models/Llama/Llama-2-TinyLlama-1.1B-Chat-v1.0
-
+python scripts/jiuge.py --nvidia /data/shared/zhushuang/models/9G7B_MHA
 ```
 
 - 部署模型推理服务
@@ -57,4 +57,5 @@ python examples/llama.py [--cpu | --nvidia | --metax | --moore | --iluvatar] --m
 例如：
 ```bash
 python examples/llama.py --nvidia --model_path=~/TinyLlama-1.1B-Chat-v1.0
+python examples/fm9g.py --nvidia --model_path=/data/shared/zhushuang/models/9G7B_MHA
 ```
