@@ -869,7 +869,7 @@ def test():
     ndev = int(ndev_args[0]) if ndev_args else 1
 
     model = JiugeForCauslLM(model_path, device_type, ndev)
-    model.generate("山东最高的山是？", 500, verbose=verbose)
+    model.generate("山东最高的山是", 500, verbose=verbose)
     model.destroy_model_instance()
 
 

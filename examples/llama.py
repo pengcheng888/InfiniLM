@@ -148,13 +148,13 @@ def test(
         f"Tensor.s_time {infinicore.Tensor.s_time * 1000} ms",
     )
     print(
-        f"Tensor.s_time {infinicore.Tensor.s_count}",
+        f"Tensor.s_count {infinicore.Tensor.s_count}",
     )
     print(
         f"device.s_time {infinicore.device.s_time * 1000} ms",
     )
     print(
-        f"device.s_time {infinicore.device.s_count}",
+        f"device.s_count {infinicore.device.s_count}",
     )
     from infinilm.models.llama.modeling_llama import model_time
 
@@ -185,7 +185,7 @@ if __name__ == "__main__":
             "such as, python examples/llama.py --nvidia --model_path=~/TinyLlama-1.1B-Chat-v1.0"
         )
         sys.exit(1)
-    prompt = "山东最高的山是？"
+    prompt = "山东最高的山是"
 
     model_path = args.model_path
     max_new_tokens = args.max_new_tokens

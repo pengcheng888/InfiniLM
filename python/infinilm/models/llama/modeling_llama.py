@@ -64,13 +64,19 @@ def multi_head_attention(
 
     # [num_heads, seq_len, head_dim] @ [ num_heads, head_dim, total_seq_len]
     # => [ num_heads, seq_len, total_seq_len]
-    attn_weight = Q @ K.permute((1, 2, 0))
+    if True:
+        attn_weight = Q @ K.permute((1, 2, 0))
 
-    scaling = infinicore.from_list(
-        [scaling], dtype=attn_weight.dtype, device=attn_weight.device
-    ).as_strided(attn_weight.shape, [0, 0, 0])
+        scaling = infinicore.from_list(
+            [scaling], dtype=attn_weight.dtype, device=attn_weight.device
+        ).as_strided(attn_weight.shape, [0, 0, 0])
 
-    attn_weight = attn_weight * scaling
+        attn_weight = attn_weight * scaling
+    else:
+        # Q @ K.T *scaling
+        attn_weight = infinicore.baddbmm(
+            None, Q, K.permute((1, 2, 0)), alpha=scaling, beta=0
+        )
 
     infinicore.nn.functional.causal_softmax(attn_weight, out=attn_weight)
 

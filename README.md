@@ -16,6 +16,9 @@ xmake && xmake install
 
 ```bash
 python scripts/jiuge.py [--cpu | --nvidia | --cambricon | --ascend | --metax | --moore | --iluvatar | --kunlun | --hygon] path/to/model_dir [n_device]
+
+python scripts/jiuge.py --nvidia /home/ubuntu/models/Llama/Llama-2-TinyLlama-1.1B-Chat-v1.0
+
 ```
 
 - 部署模型推理服务
