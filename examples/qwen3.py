@@ -1,0 +1,186 @@
+import sys
+import time
+import os
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../python"))
+
+import argparse
+import infinilm
+from infinilm.modeling_utils import get_model_state_dict
+from tokenizers import decoders as _dec
+from transformers import AutoTokenizer
+
+import infinicore
+
+
+def get_args():
+    parser = argparse.ArgumentParser(description="run Qwen3 args")
+
+    parser.add_argument(
+        "--cpu",
+        action="store_true",
+        help="Run cpu test",
+    )
+    parser.add_argument(
+        "--nvidia",
+        action="store_true",
+        help="Run nvidia test",
+    )
+    parser.add_argument(
+        "--metax",
+        action="store_true",
+        help="Run metax test",
+    )
+    parser.add_argument(
+        "--moore",
+        action="store_true",
+        help="Run moore test",
+    )
+    parser.add_argument(
+        "--iluvatar",
+        action="store_true",
+        help="Run iluvatar test",
+    )
+    parser.add_argument(
+        "--model_path",
+        type=str,
+        required=True,
+        help="model_path",
+    )
+    parser.add_argument(
+        "--max_new_tokens",
+        type=int,
+        default=100,
+        help="max_new_tokens",
+    )
+    parser.add_argument(
+        "--backend",
+        type=str,
+        default="python",
+        help="python or cpp model",
+    )
+    return parser.parse_args()
+
+
+def test(
+    prompt,
+    model_path,
+    max_new_tokens=100,
+    infini_dtype=infinicore.bfloat16,
+    infini_device=infinicore.device("cpu", 0),
+    backend="python",
+):
+    # ---------------------------------------------------------------------------- #
+    #                        创建模型,
+    # ---------------------------------------------------------------------------- #
+    model = infinilm.AutoQwen3Model.from_pretrained(
+        model_path, device=infini_device, dtype=infini_dtype, backend=backend
+    )
+
+    # ---------------------------------------------------------------------------- #
+    #                        加载权重
+    # ---------------------------------------------------------------------------- #
+    model_param_infini = get_model_state_dict(
+        model_path,
+        device=infini_device,
+        dtype=infini_dtype,
+    )
+
+    model.load_state_dict(model_param_infini)
+
+    config = model.config
+
+    # ---------------------------------------------------------------------------- #
+    #                        创建 tokenizer
+    # ---------------------------------------------------------------------------- #
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+
+    # ---------------------------------------------------------------------------- #
+    #                        token编码
+    # ---------------------------------------------------------------------------- #
+    # prompt = "山东最高的山是？"
+    input_content = tokenizer.apply_chat_template(
+        conversation=[{"role": "user", "content": prompt}],
+        add_generation_prompt=True,
+        tokenize=False,
+    )
+    print(input_content, end="", flush=True)
+    input_ids = tokenizer.encode(input_content)
+
+    # ---------------------------------------------------------------------------- #
+    #                        自回归生成
+    # ---------------------------------------------------------------------------- #
+    input_ids_list = [input_ids]  # List: [[1, 1128, 526, 366, 29892]]
+    input_ids_infini = infinicore.from_list(input_ids_list)
+
+    t1 = time.time()
+    model.generate(
+        input_ids_infini,
+        max_new_tokens=max_new_tokens,
+        device=infini_device,
+        tokenizer=tokenizer,
+        config=config,
+    )
+    t2 = time.time()
+
+    print(
+        f"total_time: {round((t2 - t1) * 1000, 2)} ms",
+    )
+    print(
+        f"Tensor.s_time {infinicore.Tensor.s_time * 1000} ms",
+    )
+    print(
+        f"Tensor.s_count {infinicore.Tensor.s_count}",
+    )
+    print(
+        f"device.s_time {infinicore.device.s_time * 1000} ms",
+    )
+    print(
+        f"device.s_count {infinicore.device.s_count}",
+    )
+    from infinilm.models.qwen3.modeling_qwen3 import model_time
+
+    print(
+        f"model_time {model_time * 1000}",
+    )
+
+
+if __name__ == "__main__":
+    args = get_args()
+    print(args)
+
+    # Parse command line arguments
+    device_str = "cpu"
+    if args.cpu:
+        device_str = "cpu"
+    elif args.nvidia:
+        device_str = "cuda"
+    elif args.metax:
+        device_str = "cuda"
+    elif args.moore:
+        device_str = "musa"
+    elif args.iluvatar:
+        device_str = "cuda"
+    else:
+        print(
+            "Usage:  python examples/qwen3.py [--cpu | --nvidia | --metax | --moore | --iluvatar] --model_path=<path/to/model_dir>\n"
+            "such as, python examples/qwen3.py --nvidia --model_path=~/Qwen3-0.6B"
+        )
+        sys.exit(1)
+    prompt = "山东最高的山是"
+
+    model_path = args.model_path
+    max_new_tokens = args.max_new_tokens
+    backend = args.backend
+
+    infini_device = infinicore.device(device_str, 0)
+    infini_dtype = infinicore.bfloat16
+
+    test(
+        prompt,
+        model_path,
+        max_new_tokens,
+        infini_device=infini_device,
+        infini_dtype=infini_dtype,
+        backend=backend,
+    )
