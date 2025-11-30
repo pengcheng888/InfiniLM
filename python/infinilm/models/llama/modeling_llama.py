@@ -229,6 +229,7 @@ class LlamaAttention(infinicore.nn.Module):
         #                           注意力计算
         # --------------------------------------------------------------------------------------- #
         total_seq_len = key_states_total.shape[1]
+
         attn_output = infinicore.empty_like(query_states)
         for i in range(0, bs):
             query_states_i = query_states.narrow(0, i, 1).view(
@@ -298,7 +299,8 @@ class LlamaDecoderLayer(infinicore.nn.Module):
             **kwargs,
         )
 
-        hidden_states = residual + hidden_states
+        # hidden_states = residual + hidden_states
+        hidden_states += residual
 
         # ------------------------------------------------ #
         #           Fully Connected
@@ -309,7 +311,8 @@ class LlamaDecoderLayer(infinicore.nn.Module):
 
         hidden_states = self.mlp(hidden_states)
 
-        hidden_states = residual + hidden_states
+        # hidden_states = residual + hidden_states
+        hidden_states += residual
 
         return hidden_states
 
@@ -382,7 +385,10 @@ class LlamaModel(infinicore.nn.Module):
         #                    norm
         # --------------------------------------------------------- #
         seq_len = hidden_states.shape[1]
-        last_token = hidden_states.narrow(1, seq_len - 1, 1)
+        if seq_len > 1:
+            last_token = hidden_states.narrow(1, seq_len - 1, 1)
+        else:
+            last_token = hidden_states
 
         return self.norm(last_token)
 
