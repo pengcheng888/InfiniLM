@@ -22,6 +22,9 @@ python scripts/jiuge.py [--cpu | --nvidia | --cambricon | --ascend | --metax | -
 
 ```bash
 python scripts/launch_server.py --model-path MODEL_PATH [-h] [--dev {cpu,nvidia,cambricon,ascend,metax,moore,iluvatar,kunlun,hygon}] [--ndev NDEV] [--max-batch MAX_BATCH] [--max-tokens MAX_TOKENS]
+
+
+python scripts/launch_server.py --model-path /home/ubuntu/models/TinyLlama-1.1B-Chat-v1.0-small  --dev cpu --ndev 1 --max-batch 1 --max-tokens 10
 ```
 
 - 测试模型推理服务性能

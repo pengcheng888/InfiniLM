@@ -130,6 +130,7 @@ async def lifespan(app: FastAPI):
         app.state.model = JiugeForCauslLM(
             model_path, device_type, ndev, max_tokens=max_tokens
         )
+    print("111111111111111")
     app.state.kv_cache_pool = KVCachePool(app.state.model, MAX_BATCH)
     app.state.request_queue = janus.Queue()
     worker_thread = threading.Thread(target=worker_loop, args=(app,), daemon=True)
@@ -152,6 +153,8 @@ App = FastAPI(lifespan=lifespan)
 
 # App loop: take requests from the queue, do inference, and put unfinished requests back into the queue.
 def worker_loop(app):
+    print("2222222222222222")
+
     while True:
         try:
             task = app.state.request_queue.sync_q.get(timeout=0.01)
@@ -162,14 +165,26 @@ def worker_loop(app):
             return
 
         batch = [task]
-        while len(batch) < MAX_BATCH:
+
+        print(
+            "44444444444", task
+        )  #  <__main__.AsyncInferTask object at 0x7d0527289190>
+
+        print("555555555555", len(batch), MAX_BATCH)
+        while len(batch) < MAX_BATCH:  # 1 1
             try:
                 req = app.state.request_queue.sync_q.get_nowait()
                 if req is not None:
                     batch.append(req)
             except queue.Empty:
                 break
+
+        print("666666666")
+
         output_tokens = app.state.model.batch_infer_one_round(batch)
+
+        print("77777777777", output_tokens)
+
         for task, token in zip(batch, output_tokens):
             task.output(token)
             if task.finish_reason is None:
@@ -180,6 +195,7 @@ def worker_loop(app):
 
 
 def build_task(id_, request_data, request: Request):
+    print("build_task-----> 1111111 ")
     messages = request_data.get("messages", [])
     input_content = request.app.state.model.tokenizer.apply_chat_template(
         conversation=messages,
@@ -187,6 +203,9 @@ def build_task(id_, request_data, request: Request):
         tokenize=False,
     )
     tokens = request.app.state.model.tokenizer.encode(input_content)
+
+    print("build_task-----> 22222222 ")
+
     return AsyncInferTask(
         id_,
         tokens,
@@ -200,6 +219,13 @@ def build_task(id_, request_data, request: Request):
 
 async def chat_stream(id_, request_data, request: Request):
     try:
+        print("chat_stream     >>>>>>>>>   1111111")
+        print(id_)  # cmpl-75d249150a924f1ba22e3f27b7e407c3
+        print(
+            request_data
+        )  # {'messages': [{'role': 'user', 'content': '如果猫能写诗，它们会写些什么？'}], 'model': 'FM9G-7B', 'stream': True}
+        print(request)  # <starlette.requests.Request object at 0x7fc0d1db2570>
+
         infer_task = build_task(id_, request_data, request)
         await request.app.state.kv_cache_pool.acquire(infer_task)
 
@@ -241,6 +267,7 @@ async def chat_stream(id_, request_data, request: Request):
 
 async def chat(id_, request_data, request: Request):
     try:
+        print("chat          111111111111")
         infer_task = build_task(id_, request_data, request)
         await request.app.state.kv_cache_pool.acquire(infer_task)
         request.app.state.request_queue.sync_q.put(infer_task)
@@ -276,15 +303,17 @@ async def chat(id_, request_data, request: Request):
 @App.post("/chat/completions")
 async def chat_completions(request: Request):
     data = await request.json()
-    print('-----------------------------------------')
+    print("-----------------------------------------")
     print(data)
-    print('-----------------------------------------')
+    print("-----------------------------------------")
 
     if not data.get("messages"):
         if not data.get("prompt"):
-            return JSONResponse(content={"error": "No message provided"}, status_code=400)
+            return JSONResponse(
+                content={"error": "No message provided"}, status_code=400
+            )
         else:
-            data['messages'] = [{"role": "user", "content": data.get("prompt")}]
+            data["messages"] = [{"role": "user", "content": data.get("prompt")}]
 
     stream = data.get("stream", False)
     id_ = f"cmpl-{uuid.uuid4().hex}"
