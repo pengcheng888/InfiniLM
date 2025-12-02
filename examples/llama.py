@@ -70,6 +70,7 @@ def test(
     infini_device=infinicore.device("cpu", 0),
     backend="python",
 ):
+    model_path = os.path.expanduser(model_path)
     # ---------------------------------------------------------------------------- #
     #                        创建模型,
     # ---------------------------------------------------------------------------- #
@@ -147,6 +148,25 @@ def test(
 
 
 if __name__ == "__main__":
+    if True:
+        prompt = "山东最高的山是"
+
+        model_path = "/home/ubuntu/models/TinyLlama-1.1B-Chat-v1.0"
+        # model_path = "/home/ubuntu/models/TinyLlama-1.1B-Chat-v1.0-small"
+        # model_path = "~/models/TinyLlama-1.1B-Chat-v1.0-small"
+        device = infinicore.device("cpu", 0)
+        dtype = infinicore.bfloat16
+        max_new_tokens = 100
+        backend = "python"
+        test(
+            prompt,
+            model_path,
+            max_new_tokens=max_new_tokens,
+            infini_device=device,
+            infini_dtype=dtype,
+            backend=backend,
+        )
+        exit(-1)
     args = get_args()
     print(args)
 
