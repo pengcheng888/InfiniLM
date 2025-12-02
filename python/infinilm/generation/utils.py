@@ -207,14 +207,13 @@ class GenerationMixin:
             #                     random_sample
             # -------------------------------------------------------------------------- #
             batch_size, _, vocab_size = token_scores.shape
-
             next_tokens = infinicore.empty(
                 (batch_size,),
                 dtype=infinicore.int32,
                 device=token_scores.device,
             )
             for i in range(0, batch_size):
-                score = token_scores.narrow(0, i, 1).view([vocab_size])
+                score = token_scores.narrow(0, i, 1).view((vocab_size,))
                 out = next_tokens.narrow(0, i, 1).view([])
                 infinicore.nn.functional.random_sample(
                     score,
