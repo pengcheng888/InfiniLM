@@ -110,8 +110,10 @@ class LlamaMLP(infinicore.nn.Module):
             intermediate_size, hidden_size, bias=mlp_bias, **kwargs
         )
         self.act_fn = infinicore.nn.functional.silu
+ 
 
     def forward(self, x: infinicore.Tensor) -> infinicore.Tensor:
+   
         down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
         return down_proj
 
@@ -137,28 +139,28 @@ class LlamaAttention(infinicore.nn.Module):
         self.q_proj = infinicore.nn.Linear(
             self.hidden_size,
             self.num_attention_heads * self.head_dim,
-            bias=attention_bias,
+            bias=True,
             **kwargs,
         )
 
         self.k_proj = infinicore.nn.Linear(
             self.hidden_size,
             self.num_key_value_heads * self.head_dim,
-            bias=attention_bias,
+            bias=True,
             **kwargs,
         )
 
         self.v_proj = infinicore.nn.Linear(
             self.hidden_size,
             self.num_key_value_heads * self.head_dim,
-            bias=attention_bias,
+            bias=True,
             **kwargs,
         )
 
         self.o_proj = infinicore.nn.Linear(
             self.num_attention_heads * self.head_dim,
             self.hidden_size,
-            bias=attention_bias,
+            bias=False,
             **kwargs,
         )
 

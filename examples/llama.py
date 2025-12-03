@@ -92,7 +92,7 @@ def test(
     # ---------------------------------------------------------------------------- #
     #                        创建 tokenizer
     # ---------------------------------------------------------------------------- #
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
 
     if "llama" == model.config.model_type:
         backend = getattr(tokenizer, "backend_tokenizer", None)
@@ -146,13 +146,14 @@ def test(
 
 if __name__ == "__main__":
     if True:
-        prompt = "山东最高的山是"
+        prompt = "山东最高的山是？"
 
-        model_path = "/home/ubuntu/models/TinyLlama-1.1B-Chat-v1.0"
+        model_path = "/data/huggingface/TinyLlama-1.1B-Chat-v1.0"
+        model_path = "/data/shared/zhushuang/models/9G7B_MHA"
         # model_path = "/home/ubuntu/models/TinyLlama-1.1B-Chat-v1.0-small"
         # model_path = "~/models/TinyLlama-1.1B-Chat-v1.0-small"
-        device = infinicore.device("cpu", 0)
-        dtype = infinicore.bfloat16
+        device = infinicore.device("cuda", 0)
+        dtype = infinicore.float16
         max_new_tokens = 100
         backend = "python"
         test(
