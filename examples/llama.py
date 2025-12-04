@@ -86,6 +86,7 @@ def test(
     infini_device=infinicore.device("cpu", 0),
     backend="python",
 ):
+    model_path = os.path.expanduser(model_path)
     # ---------------------------------------------------------------------------- #
     #                        创建模型,
     # ---------------------------------------------------------------------------- #
@@ -104,14 +105,12 @@ def test(
 
     model.load_state_dict(model_param_infini)
 
-    config = model.config
-
     # ---------------------------------------------------------------------------- #
     #                        创建 tokenizer
     # ---------------------------------------------------------------------------- #
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
 
-    if "llama" == config.model_type:
+    if "llama" == model.config.model_type:
         backend = getattr(tokenizer, "backend_tokenizer", None)
         target = getattr(backend, "_tokenizer", backend)
         norm = getattr(target, "normalizer", None)
@@ -162,7 +161,6 @@ def test(
         max_new_tokens=max_new_tokens,
         device=infini_device,
         tokenizer=tokenizer,
-        config=config,
     )
     t2 = time.time()
 
@@ -172,6 +170,26 @@ def test(
 
 
 if __name__ == "__main__":
+    if True:
+        prompt = "山东最高的山是？"
+
+        model_path = "/data/huggingface/TinyLlama-1.1B-Chat-v1.0"
+        model_path = "/data/shared/zhushuang/models/9G7B_MHA"
+        # model_path = "/home/ubuntu/models/TinyLlama-1.1B-Chat-v1.0-small"
+        # model_path = "~/models/TinyLlama-1.1B-Chat-v1.0-small"
+        device = infinicore.device("cuda", 0)
+        dtype = infinicore.float16
+        max_new_tokens = 100
+        backend = "python"
+        test(
+            prompt,
+            model_path,
+            max_new_tokens=max_new_tokens,
+            infini_device=device,
+            infini_dtype=dtype,
+            backend=backend,
+        )
+        exit(-1)
     args = get_args()
     print(args)
 

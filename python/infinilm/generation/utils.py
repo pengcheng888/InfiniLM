@@ -121,7 +121,6 @@ class GenerationMixin:
         max_new_tokens: int,
         device: infinicore.device,
         tokenizer,
-        config,
         **kwargs,
     ):
         model_kwargs = kwargs
@@ -144,7 +143,6 @@ class GenerationMixin:
             max_new_tokens=max_new_tokens,
             device=device,
             tokenizer=tokenizer,
-            config=config,
             **model_kwargs,
         )
         return result
@@ -155,7 +153,6 @@ class GenerationMixin:
         max_new_tokens: int,
         device: infinicore.device,
         tokenizer,
-        config,
         **model_kwargs,
     ):
         r"""
@@ -170,7 +167,7 @@ class GenerationMixin:
 
         batch_size, seq_len = input_ids.shape[:2]
 
-        eos_token_id = config.eos_token_id
+        eos_token_id = self.config.eos_token_id
         eos_token_id_list = (
             [eos_token_id] if isinstance(eos_token_id, int) else eos_token_id
         )
@@ -209,14 +206,13 @@ class GenerationMixin:
             #                     random_sample
             # -------------------------------------------------------------------------- #
             batch_size, _, vocab_size = token_scores.shape
-
             next_tokens = infinicore.empty(
                 (batch_size,),
                 dtype=infinicore.int32,
                 device=token_scores.device,
             )
             for i in range(0, batch_size):
-                score = token_scores.narrow(0, i, 1).view([vocab_size])
+                score = token_scores.narrow(0, i, 1).view((vocab_size,))
                 out = next_tokens.narrow(0, i, 1).view([])
                 infinicore.nn.functional.random_sample(
                     score,
