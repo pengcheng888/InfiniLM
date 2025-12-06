@@ -79,7 +79,7 @@ def get_args():
     parser.add_argument(
         "--tp",
         type=int,
-        default=None,
+        default=1,
         help="total rank for tensor parallel",
     )
 
