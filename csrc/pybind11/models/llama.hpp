@@ -217,19 +217,19 @@ inline void bind_llama(py::module &m) {
 
     // Bind LlamaForCausalLM
     py::class_<LlamaForCausalLM, std::shared_ptr<LlamaForCausalLM>>(m, "LlamaForCausalLM")
-        .def(py::init([](const LlamaConfig &config, const Device &device, py::object dtype_obj) {
-                 infinicore::DataType dtype = infinicore::DataType::F32;
-                 if (!dtype_obj.is_none()) {
-                     // Extract dtype from Python object
-                     if (py::hasattr(dtype_obj, "_underlying")) {
-                         dtype = dtype_obj.attr("_underlying").cast<infinicore::DataType>();
-                     } else {
-                         dtype = dtype_obj.cast<infinicore::DataType>();
-                     }
-                 }
-                 return std::make_shared<LlamaForCausalLM>(config, device, dtype);
-             }),
-             py::arg("config"), py::arg("device"), py::arg("dtype") = py::none())
+        // .def(py::init([](const LlamaConfig &config, const Device &device, py::object dtype_obj) {
+        //          infinicore::DataType dtype = infinicore::DataType::F32;
+        //          if (!dtype_obj.is_none()) {
+        //              // Extract dtype from Python object
+        //              if (py::hasattr(dtype_obj, "_underlying")) {
+        //                  dtype = dtype_obj.attr("_underlying").cast<infinicore::DataType>();
+        //              } else {
+        //                  dtype = dtype_obj.cast<infinicore::DataType>();
+        //              }
+        //          }
+        //          return std::make_shared<LlamaForCausalLM>(config, device, dtype);
+        //      }),
+        //      py::arg("config"), py::arg("device"), py::arg("dtype") = py::none())
         .def("state_dict", [](const LlamaForCausalLM &model) {
             // Return a dictionary containing references to the whole state of the module.
             auto state_dict = model.state_dict();

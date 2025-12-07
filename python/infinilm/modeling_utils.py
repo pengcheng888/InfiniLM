@@ -4,7 +4,7 @@ from typing import Dict, Union
 import torch
 from safetensors import safe_open
 import glob
-
+from tqdm import tqdm
 import infinicore
 
 str_to_torch_dtype = {
@@ -124,7 +124,11 @@ def load_model_state_dict_by_file(
     model_keys = model.state_dict().keys()
 
     already_loaded_keys = []
-    for file_path in glob.glob(os.path.join(model_path, "*.safetensors")):
+
+    file_list = glob.glob(os.path.join(model_path, "*.safetensors"))
+    for file_path in tqdm(file_list, desc="Processing files"):
+        tqdm.write(f"Processing: {os.path.basename(file_path)}")
+
         # --------------------------------------------------------- #
         #          Load weights from *.safetensors file
         # --------------------------------------------------------- #
