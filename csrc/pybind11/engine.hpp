@@ -47,14 +47,22 @@ inline void bind_infer_engine(py::module &m) {
                 return self.generate(input_ids.cast<infinicore::Tensor>(), position_ids.cast<infinicore::Tensor>());
             },
             "Run inference on all ranks with arbitrary arguments")
-        .def("reset_cache", &InferEngine::reset_cache,
-             py::arg("full_reset") = true,
-             "Reset the internal cache in all workers (clears state between generations)");
-
+        .def("reset_cache", &InferEngine::reset_cache, py::arg("full_reset") = true, "Reset the internal cache in all workers (clears state between generations)")
+        .def("state_dict", [](InferEngine &self) {
+            // Return a dictionary containing references to the whole state of the module.
+            auto state_dict = self.state_dict();
+            py::dict result;
+            for (const auto &[name, param] : state_dict) {
+                result[py::cast(name)] = infinicore::Tensor(param);
+            }
+            return result;
+        });
     // Optionally, you can add __repr__ for debugging
-    m.attr("InferEngine").attr("__repr__") = py::cpp_function([](const InferEngine &self) {
-        return "<InferEngine: " + std::string(self.get_dist_config()) + ">";
-    });
+    m.attr("InferEngine")
+        .attr("__repr__")
+        = py::cpp_function([](const InferEngine &self) {
+              return "<InferEngine: " + std::string(self.get_dist_config()) + ">";
+          });
 }
 
 } // namespace infinilm::engine

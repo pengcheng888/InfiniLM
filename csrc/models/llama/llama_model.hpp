@@ -1,16 +1,16 @@
 #pragma once
 
-#include "llama_config.hpp"
-#include "llama_decoder_layer.hpp"
 #include "cache/kv_cache.hpp"
-#include "infinicore/nn/module.hpp"
+#include "infinicore/device.hpp"
 #include "infinicore/nn/embedding.hpp"
+#include "infinicore/nn/module.hpp"
 #include "infinicore/nn/rmsnorm.hpp"
 #include "infinicore/nn/rope.hpp"
 #include "infinicore/tensor.hpp"
-#include "infinicore/device.hpp"
-#include <vector>
+#include "llama_config.hpp"
+#include "llama_decoder_layer.hpp"
 #include <memory>
+#include <vector>
 
 namespace infinilm::models::llama {
 
@@ -46,9 +46,8 @@ public:
      * @return Output tensor of shape [batch, seq_len, hidden_size]
      */
     infinicore::Tensor forward(const infinicore::Tensor &input_ids,
-                                const infinicore::Tensor &position_ids,
-                                void *kv_cache = nullptr) const;
-
+                               const infinicore::Tensor &position_ids,
+                               void *kv_cache = nullptr) const;
 
     // Module information
     const LlamaConfig &config() const { return config_; }

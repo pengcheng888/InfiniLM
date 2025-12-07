@@ -18,13 +18,15 @@ namespace infinilm::cache {
 /**
  * @brief Helper function to format tensor shape as string for logging
  */
-inline std::string shape_to_string(const std::vector<size_t>& shape) {
+inline std::string shape_to_string(const std::vector<size_t> &shape) {
     if (shape.empty()) {
         return "[]";
     }
     std::string result = "[";
     for (size_t i = 0; i < shape.size(); ++i) {
-        if (i > 0) result += ", ";
+        if (i > 0) {
+            result += ", ";
+        }
         result += std::to_string(shape[i]);
     }
     result += "]";
@@ -59,13 +61,13 @@ struct KVCacheLayer {
      */
     void ensure_capacity(size_t batch_size, size_t num_kv_heads, size_t head_dim, size_t seq_len,
                          infinicore::DataType dtype, const infinicore::Device &device,
-                        size_t max_position_embeddings = 4096) {
+                         size_t max_position_embeddings = 4096) {
         size_t required_capacity = seq_len + std::accumulate(cache_positions.begin(), cache_positions.end(), 0, [](int a, int b) { return std::max(a, b); });
 
         // VALIDATION: Verify input parameters
         if (num_kv_heads == 0 || head_dim == 0 || seq_len == 0) {
             SPDLOG_ERROR("KVCacheLayer::ensure_capacity: Invalid parameters - num_kv_heads: {}, head_dim: {}, seq_len: {}",
-                        num_kv_heads, head_dim, seq_len);
+                         num_kv_heads, head_dim, seq_len);
             throw std::runtime_error("KV cache ensure_capacity: invalid parameters");
         }
 
@@ -81,10 +83,9 @@ struct KVCacheLayer {
 
             // VALIDATION: Verify cache was created correctly
             // Shape is [batch_size, num_kv_heads, max_capacity, head_dim]
-            if (k_cache->shape()[0] != batch_size || k_cache->shape()[1] != num_kv_heads ||
-                k_cache->shape()[2] != max_capacity || k_cache->shape()[3] != head_dim) {
+            if (k_cache->shape()[0] != batch_size || k_cache->shape()[1] != num_kv_heads || k_cache->shape()[2] != max_capacity || k_cache->shape()[3] != head_dim) {
                 SPDLOG_ERROR("KVCacheLayer::ensure_capacity: Cache shape mismatch after initialization - expected: [{}, {}, {}, {}], got: {}",
-                            batch_size, num_kv_heads, max_capacity, head_dim, shape_to_string(k_cache->shape()));
+                             batch_size, num_kv_heads, max_capacity, head_dim, shape_to_string(k_cache->shape()));
                 throw std::runtime_error("KV cache initialization: shape mismatch");
             }
         }
@@ -122,7 +123,7 @@ struct KVCacheLayer {
             // Shape is [batch_size, num_kv_heads, max_capacity, head_dim]
             if (k_cache->shape()[2] != new_capacity) {
                 SPDLOG_ERROR("KVCacheLayer::ensure_capacity: New cache capacity mismatch - expected: {}, got: {}",
-                            new_capacity, k_cache->shape()[2]);
+                             new_capacity, k_cache->shape()[2]);
                 throw std::runtime_error("KV cache growth: capacity mismatch");
             }
         }
@@ -130,7 +131,7 @@ struct KVCacheLayer {
         // VALIDATION: Final check that capacity is sufficient
         if (required_capacity > max_capacity) {
             SPDLOG_ERROR("KVCacheLayer::ensure_capacity: Capacity still insufficient after growth - required: {}, max_capacity: {}",
-                        required_capacity, max_capacity);
+                         required_capacity, max_capacity);
             throw std::runtime_error("KV cache ensure_capacity: capacity insufficient");
         }
     }
@@ -226,7 +227,7 @@ public:
         const infinicore::Tensor &v_new) {
         if (layer_idx >= layers_.size()) {
             SPDLOG_ERROR("DynamicCache::update: layer_idx {} out of range (num_layers: {})",
-                        layer_idx, layers_.size());
+                         layer_idx, layers_.size());
             throw std::runtime_error("DynamicCache: layer_idx out of range");
         }
 
@@ -278,7 +279,7 @@ public:
      * This should be called when starting a new generation sequence
      */
     void reset() {
-        for (auto& layer : layers_) {
+        for (auto &layer : layers_) {
             std::fill(layer.cache_positions.begin(), layer.cache_positions.end(), 0);
             // Note: We don't reset initialized flag or clear the cache tensors
             // to avoid reallocation. The cache will be overwritten on next update.
@@ -293,7 +294,7 @@ public:
      * Use this when you need to guarantee a completely clean cache state
      */
     void full_reset() {
-        for (auto& layer : layers_) {
+        for (auto &layer : layers_) {
             std::fill(layer.cache_positions.begin(), layer.cache_positions.end(), 0);
             // Note: We don't zero out tensors as they will be overwritten on next update
             // Resetting positions ensures the cache starts fresh
@@ -303,14 +304,14 @@ public:
     /**
      * @brief Access a specific layer's cache (for advanced usage)
      */
-    KVCacheLayer& layer(size_t layer_idx) {
+    KVCacheLayer &layer(size_t layer_idx) {
         if (layer_idx >= layers_.size()) {
             throw std::runtime_error("DynamicCache: layer_idx out of range");
         }
         return layers_[layer_idx];
     }
 
-    const KVCacheLayer& layer(size_t layer_idx) const {
+    const KVCacheLayer &layer(size_t layer_idx) const {
         if (layer_idx >= layers_.size()) {
             throw std::runtime_error("DynamicCache: layer_idx out of range");
         }
