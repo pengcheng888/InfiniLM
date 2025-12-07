@@ -203,7 +203,7 @@ inline void bind_llama(py::module &m) {
                     cpp_state_dict.emplace(key, convert_to_tensor(value, device));
                 }
                 model.load_state_dict(cpp_state_dict); }, py::arg("state_dict"), py::arg("device"))
-        .def("config", &LlamaForCausalLM::config, py::return_value_policy::reference_internal)
+        // .def("config", &LlamaForCausalLM::config, py::return_value_policy::reference_internal)
         .def("forward", [convert_to_tensor](const LlamaForCausalLM &model, py::object input_ids, py::object position_ids, py::object kv_caches = py::none()) {
                 // Helper to extract C++ tensor from Python object
                 auto get_tensor = [convert_to_tensor](py::object obj) -> infinicore::Tensor {

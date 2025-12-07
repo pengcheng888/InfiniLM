@@ -1,0 +1,55 @@
+#include "llama_for_causal_lm.hpp"
+#include "infinicore/nn/linear.hpp"
+#include "infinicore/ops.hpp"
+
+namespace infinilm::models::llama {
+
+LlamaForCausalLM::LlamaForCausalLM(const LlamaConfig &config,
+                                   const infinicore::Device &device,
+                                   infinicore::DataType dtype,
+                                   engine::distributed::RankInfo rank_info) : rank_info_(rank_info) {
+
+    device_ = device;
+
+    // Initialize token embeddings
+    INFINICORE_NN_MODULE_INIT(embed_tokens, config.vocab_size, config.hidden_size,
+                              std::nullopt, dtype, device);
+
+    INFINICORE_NN_MODULE_INIT(self_attn, config, device, dtype);
+}
+
+infinicore::Tensor LlamaForCausalLM::forward(const infinicore::Tensor &input_ids,
+                                             const infinicore::Tensor &position_ids,
+                                             std::vector<void *> *kv_caches) const {
+
+    // 1. Embed tokens: input_ids -> [batch, seq_len, hidden_size]
+    auto hidden_states = embed_tokens_->forward(input_ids);
+    auto attn_output = self_attn_->forward(hidden_states, position_ids, kv_caches);
+
+    // if (rank_info_.tp_rank == 0) {
+    //     attn_output->debug("mlp_output_tp_rank=-1.bin");
+    // }
+    // exit(-1);
+
+    return attn_output;
+}
+
+infinicore::Tensor LlamaForCausalLM::forward(std::vector<std::any> args) const {
+    if (args.size() < 2) {
+        throw std::invalid_argument("LlamaForCausalLM::forward requires at least 2 arguments: input_ids and position_ids");
+    }
+
+    // Extract input tensors from args
+    const auto &input_ids = std::any_cast<const infinicore::Tensor &>(args[0]);
+    const auto &position_ids = std::any_cast<const infinicore::Tensor &>(args[1]);
+
+    // Optional KV caches
+    std::vector<void *> *kv_caches = nullptr;
+    if (args.size() >= 3) {
+        kv_caches = std::any_cast<std::vector<void *> *>(args[2]);
+    }
+
+    return forward(input_ids, position_ids, kv_caches);
+}
+
+} // namespace infinilm::models::llama

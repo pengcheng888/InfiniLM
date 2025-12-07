@@ -29,6 +29,15 @@ infinicore::Tensor LlamaMLP::forward(const infinicore::Tensor &hidden_states) co
     auto hidden_states_mutable = hidden_states;
     auto gate = gate_proj_->forward(hidden_states_mutable);
 
+    // auto s = gate_proj_->weight()->shape();
+    // printf(" gate_proj_ xxxxxxxxxxxxxx tp_rank %d      %d, %d \n", rank_info_.tp_rank, s[0], s[1]);
+
+    // if (0 == rank_info_.tp_rank) {
+    //     auto show = gate_proj_->weight()->narrow({{0, 0, 1}});
+    //     // show->debug();
+    //     printf(" gate_proj_ xxxxxxxxxxxxxx\n");
+    // }
+
     auto up = up_proj_->forward(hidden_states_mutable);
 
     // 2. Apply SwiGLU: silu(gate) * up
