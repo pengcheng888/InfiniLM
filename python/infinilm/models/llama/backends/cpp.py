@@ -245,6 +245,9 @@ class LlamaForCausalLM(GenerationMixin):
         for name, param in state_dict.items():
             self._model.load_param(name, param._underlying)
 
+    def load_param(self, name: str, weight: infinicore.Tensor):
+        self._model.load_param(name, weight._underlying)
+
     def get_parameter(self, name):
         """
         Get a parameter tensor by name

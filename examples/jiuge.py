@@ -1,7 +1,7 @@
 import infinicore
 from transformers import AutoTokenizer
 from tokenizers import decoders as _dec
-from infinilm.modeling_utils import load_model_state_dict_by_file
+from infinilm.modeling_utils import load_model_state_dict_by_tensor
 import infinilm
 from infinilm.distributed import DistConfig
 import argparse
@@ -110,7 +110,7 @@ def test(
     # ---------------------------------------------------------------------------- #
     #                        加载权重
     # ---------------------------------------------------------------------------- #
-    load_model_state_dict_by_file(model, model_path, dtype=infini_dtype)
+    load_model_state_dict_by_tensor(model, model_path, dtype=infini_dtype)
 
     # ---------------------------------------------------------------------------- #
     #                        创建 tokenizer
@@ -186,18 +186,21 @@ if __name__ == "__main__":
         # model_path = "/home/wangpengcheng/Llama-2-TinyLlama-1.1B-Chat-v1.0-mlp"
         # model_path = "/home/wangpengcheng/Llama-2-TinyLlama-1.1B-Chat-v1.0-attention"
 
-        model_path = "/data/shared/zhushuang/models/9G7B_MHA"
-        model_path = "/data-aisoft/mechdancer/models/9G7B_MHA"
-        model_path = (
-            "/data-aisoft/mechdancer/models/FM9G_70B_SFT_MHA/FM9G_70B_SFT_MHA_layer0/"
-        )
+        # model_path = "/data/shared/zhushuang/models/9G7B_MHA"
+        # model_path = "/data-aisoft/mechdancer/models/9G7B_MHA"
+        # model_path = (
+        #     "/data-aisoft/mechdancer/models/FM9G_70B_SFT_MHA/FM9G_70B_SFT_MHA_layer0/"
+        # )
 
-        model_path = "/data-aisoft/mechdancer/models/FM9G_70B_SFT_MHA/"
+        # model_path = "/data-aisoft/mechdancer/models/FM9G_70B_SFT_MHA/"
+
+        model_path = "/data/huggingface/9G7B_MHA"
+
         device = infinicore.device("cuda", 0)
         dtype = infinicore.bfloat16
         max_new_tokens = 6
         backend = "cpp"
-        tp = 3
+        tp = 2
         test(
             prompt,
             model_path,
