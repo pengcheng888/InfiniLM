@@ -51,6 +51,7 @@ inline void bind_infer_engine(py::module &m) {
             }
             return result;
         })
+        .def("reset_cache", &InferEngine::reset_cache, py::arg("full_reset") = true, "Reset the internal cache in all workers (clears state between generations)"),
         .def("generate", [](InferEngine &self, py::object input_ids, py::object position_ids) -> infinicore::Tensor { return self.generate(input_ids.cast<infinicore::Tensor>(), position_ids.cast<infinicore::Tensor>()); }, "Run inference on all ranks with arbitrary arguments");
 
     // Optionally, you can add __repr__ for debugging
