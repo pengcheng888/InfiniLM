@@ -1,7 +1,7 @@
 import infinicore
 from transformers import AutoTokenizer
 from tokenizers import decoders as _dec
-from infinilm.modeling_utils import load_model_state_dict_by_file
+from infinilm.modeling_utils import load_model_state_dict_by_tensor
 import infinilm
 from infinilm.distributed import DistConfig
 import argparse
@@ -79,7 +79,7 @@ def get_args():
     parser.add_argument(
         "--tp",
         type=int,
-        default=None,
+        default=1,
         help="total rank for tensor parallel",
     )
 
@@ -93,6 +93,7 @@ def test(
     infini_dtype=infinicore.bfloat16,
     infini_device=infinicore.device("cpu", 0),
     backend="python",
+    tp=1,
 ):
     model_path = os.path.expanduser(model_path)
     # ---------------------------------------------------------------------------- #
@@ -103,19 +104,19 @@ def test(
         device=infini_device,
         dtype=infini_dtype,
         backend=backend,
-        distributed_config=DistConfig(args.tp),
+        distributed_config=DistConfig(tp),
     )
 
     # ---------------------------------------------------------------------------- #
     #                        加载权重
     # ---------------------------------------------------------------------------- #
-    load_model_state_dict_by_file(model, model_path, dtype=infini_dtype)
+    load_model_state_dict_by_tensor(model, model_path, dtype=infini_dtype)
 
     # ---------------------------------------------------------------------------- #
     #                        创建 tokenizer
     # ---------------------------------------------------------------------------- #
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-  
+
     if "llama" == model.config.model_type:
         backend = getattr(tokenizer, "backend_tokenizer", None)
         target = getattr(backend, "_tokenizer", backend)
@@ -133,7 +134,6 @@ def test(
                     _dec.Fuse(),
                 ]
             )
-
 
     # ---------------------------------------------------------------------------- #
     #                        token编码
@@ -161,6 +161,8 @@ def test(
 
     t1 = time.time()
     print("=================== start generate ====================")
+    # time.sleep(100)
+
     model.generate(
         input_ids_infini,
         max_new_tokens=max_new_tokens,
@@ -175,6 +177,41 @@ def test(
 
 
 if __name__ == "__main__":
+    if True:
+        prompt = "山东最高的山是？"
+
+        model_path = "/data/huggingface/TinyLlama-1.1B-Chat-v1.0/"
+        # model_path = "/home/wangpengcheng/Llama-2-TinyLlama-1.1B-Chat-v1.0-small"
+
+        # model_path = "/home/wangpengcheng/Llama-2-TinyLlama-1.1B-Chat-v1.0-mlp"
+        # model_path = "/home/wangpengcheng/Llama-2-TinyLlama-1.1B-Chat-v1.0-attention"
+
+        # model_path = "/data/shared/zhushuang/models/9G7B_MHA"
+        # model_path = "/data-aisoft/mechdancer/models/9G7B_MHA"
+        # model_path = (
+        #     "/data-aisoft/mechdancer/models/FM9G_70B_SFT_MHA/FM9G_70B_SFT_MHA_layer0/"
+        # )
+
+        # model_path = "/data-aisoft/mechdancer/models/FM9G_70B_SFT_MHA/"
+
+        model_path = "/data/huggingface/9G7B_MHA"
+
+        device = infinicore.device("cuda", 0)
+        dtype = infinicore.bfloat16
+        max_new_tokens = 6
+        backend = "cpp"
+        tp = 2
+        test(
+            prompt,
+            model_path,
+            max_new_tokens=max_new_tokens,
+            infini_device=device,
+            infini_dtype=dtype,
+            backend=backend,
+            tp=tp,
+        )
+        exit(-1)
+
     args = get_args()
     print(args)
 

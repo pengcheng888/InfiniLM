@@ -1,15 +1,22 @@
 #include "llama_for_causal_lm.hpp"
+#include "infinicore/context/context.hpp"
 #include "infinicore/nn/linear.hpp"
 #include "infinicore/ops.hpp"
+#include "infinicore/ops/random_sample.hpp"
+#include <iostream>
 
 namespace infinilm::models::llama {
 
-LlamaForCausalLM::LlamaForCausalLM(const LlamaConfig &config, const infinicore::Device &device,
-                                   infinicore::DataType dtype) {
+LlamaForCausalLM::LlamaForCausalLM(const LlamaConfig &config,
+                                   const infinicore::Device &device,
+                                   infinicore::DataType dtype,
+                                   engine::distributed::RankInfo rank_info) {
 
+    // Initialize module's device_ member
     device_ = device;
+
     // Initialize base model
-    INFINICORE_NN_MODULE_INIT(model, config, device, dtype);
+    INFINICORE_NN_MODULE_INIT(model, config, device, dtype, rank_info);
 
     // Initialize language modeling head
     // Note: If tie_word_embeddings is true, we would share weights with embed_tokens
@@ -20,13 +27,20 @@ LlamaForCausalLM::LlamaForCausalLM(const LlamaConfig &config, const infinicore::
 
 infinicore::Tensor LlamaForCausalLM::forward(const infinicore::Tensor &input_ids,
                                              const infinicore::Tensor &position_ids,
-                                             std::vector<void *> *kv_caches) const {
+                                             void *kv_cache) const {
     // 1. Forward through base model to get hidden states
     auto position_ids_device = position_ids->to(device_);
-    auto hidden_states = model_->forward(input_ids, position_ids_device, kv_caches);
+    auto hidden_states = model_->forward(input_ids, position_ids_device, kv_cache);
 
     // 2. Apply language modeling head to get logits
     auto logits = lm_head_->forward(hidden_states);
+
+    // 3. CRITICAL: Synchronize the C++ backend's context after forward pass
+    // This ensures all C++ backend operations complete before returning to Python
+    if (device_.getType() != infinicore::Device::Type::CPU) {
+        infinicore::context::setDevice(device_, false);
+        infinicore::context::syncStream();
+    }
 
     return logits;
 }

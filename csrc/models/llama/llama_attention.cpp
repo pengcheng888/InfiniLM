@@ -12,31 +12,54 @@
 
 namespace infinilm::models::llama {
 
-LlamaAttention::LlamaAttention(const LlamaConfig &config, const infinicore::Device &device,
-                               infinicore::DataType dtype)
+LlamaAttention::LlamaAttention(const LlamaConfig &config,
+                               const infinicore::Device &device,
+                               infinicore::DataType dtype,
+                               engine::distributed::RankInfo rank_info)
     : hidden_size_(config.hidden_size),
       num_attention_heads_(config.num_attention_heads),
       num_key_value_heads_(config.num_key_value_heads),
       head_dim_(config.head_dim),
       kv_dim_(config.kv_dim()),
-      use_bias_(config.attention_bias) {
+      use_bias_(config.attention_bias),
+      use_output_bias_(config.attention_output_bias),
+      max_position_embeddings_(config.max_position_embeddings), rank_info_(rank_info) {
+
+    int tp_rank = rank_info.tp_rank;
+    int tp_size = rank_info.tp_size;
+
+    // // Initialize projection layers
+    // INFINICORE_NN_MODULE_INIT(q_proj, hidden_size_, hidden_size_, use_bias_,
+    //                           dtype, device);
+    // INFINICORE_NN_MODULE_INIT(k_proj, hidden_size_, kv_dim_, use_bias_,
+    //                           dtype, device);
+    // INFINICORE_NN_MODULE_INIT(v_proj, hidden_size_, kv_dim_, use_bias_,
+    //                           dtype, device);
+    // // Output projection uses attention_output_bias (can be different from qkv)
+    // INFINICORE_NN_MODULE_INIT(o_proj, hidden_size_, hidden_size_, use_output_bias_,
+    //                           dtype, device);
+
     // Initialize projection layers
     INFINICORE_NN_MODULE_INIT(q_proj, hidden_size_, hidden_size_, use_bias_,
-                              dtype, device);
+                              dtype, device, tp_rank, tp_size);
     INFINICORE_NN_MODULE_INIT(k_proj, hidden_size_, kv_dim_, use_bias_,
-                              dtype, device);
+                              dtype, device, tp_rank, tp_size);
     INFINICORE_NN_MODULE_INIT(v_proj, hidden_size_, kv_dim_, use_bias_,
-                              dtype, device);
-    INFINICORE_NN_MODULE_INIT(o_proj, hidden_size_, hidden_size_, use_bias_,
-                              dtype, device);
+                              dtype, device, tp_rank, tp_size);
+
+    // printf("use_bias_   use_output_bias_     % d, % d\n", use_bias_, use_output_bias_);
+
+    use_output_bias_ = false;
+    // Output projection uses attention_output_bias (can be different from qkv)
+    INFINICORE_NN_MODULE_INIT(o_proj, hidden_size_, hidden_size_, use_output_bias_,
+                              dtype, device, tp_rank, tp_size, rank_info.comm);
 }
 
 infinicore::Tensor LlamaAttention::forward(const infinicore::Tensor &hidden_states,
                                            const infinicore::Tensor &position_ids,
-                                           void *kv_cache) const {
-    if (!rotary_emb_) {
-        throw std::runtime_error("LlamaAttention: rotary_emb not configured");
-    }
+                                           void *kv_cache,
+                                           size_t layer_idx) const {
+
     // Input shape: [batch, seq_len, hidden_size]
     auto hidden_states_mutable = hidden_states;
     auto shape = hidden_states->shape();
@@ -72,32 +95,32 @@ infinicore::Tensor LlamaAttention::forward(const infinicore::Tensor &hidden_stat
         throw std::runtime_error("Unexpected position_ids shape");
     }
 
-    // 4. Process each batch item separately for attention computation
-    infinilm::cache::KVCache *external_cache = static_cast<infinilm::cache::KVCache *>(kv_cache);
-
+    // 4. Prepare KV caches
     // Convert to [batch, n_head, seq_len, head_dim] for cache
     // Ensure contiguous after permute for F16 compatibility with cache operations
     q_reshaped = q_reshaped->permute({0, 2, 1, 3})->contiguous(); // [bs, n_q_head, seq_len, head_dim]
     auto k_permuted = k_reshaped->permute({0, 2, 1, 3});          // [bs, n_kv_head, seq_len, head_dim]
     auto v_permuted = v_reshaped->permute({0, 2, 1, 3});          // [bs, n_kv_head, seq_len, head_dim]
-
-    // 4. Prepare KV caches
+    infinilm::cache::DynamicCache *external_cache = static_cast<infinilm::cache::DynamicCache *>(kv_cache);
     infinicore::Tensor k_total; // [bs, n_kv_head, total_seq_len, head_dim]
     infinicore::Tensor v_total; // [bs, n_kv_head, total_seq_len, head_dim]
     if (external_cache != nullptr) {
-        auto [k_total_tmp, v_total_tmp] = external_cache->update(k_permuted, v_permuted);
+        auto [k_total_tmp, v_total_tmp] = external_cache->update(layer_idx, k_permuted, v_permuted);
         k_total = k_total_tmp;
         v_total = v_total_tmp;
     } else {
-        auto [k_total_tmp, v_total_tmp] = internal_cache_.update(k_permuted, v_permuted);
-        k_total = k_total_tmp;
-        v_total = v_total_tmp;
+        // No external cache - this shouldn't happen in normal operation, but handle gracefully
+        throw std::runtime_error("LlamaAttention: kv_cache is required but nullptr provided");
     }
     auto total_seq_len = k_total->shape()[2];
 
     // 5. Apply RoPE to full batch
     auto q_rope = q_reshaped->view({batch_size * num_attention_heads_, seq_len, head_dim_})->permute({1, 0, 2});                                               // [seq_len, bs * n_q_head, head_dim]
     auto k_rope = k_total->narrow({{2, total_seq_len - seq_len, seq_len}})->view({batch_size * num_key_value_heads_, seq_len, head_dim_})->permute({1, 0, 2}); // [seq_len, bs * n_kv_head, head_dim]
+
+    if (!rotary_emb_) {
+        throw std::runtime_error("LlamaAttention: rotary_emb not configured");
+    }
     rotary_emb_->forward(q_rope, pos_ids_for_rope, true);
     rotary_emb_->forward(k_rope, pos_ids_for_rope, true);
 
