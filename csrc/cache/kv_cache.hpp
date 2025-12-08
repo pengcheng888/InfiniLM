@@ -41,6 +41,7 @@ inline std::string shape_to_string(const std::vector<size_t> &shape) {
  *
  * This represents a single layer's cache within a model-level cache container.
  */
+
 struct KVCacheLayer {
     infinicore::Tensor k_cache;          // [batch_size, n_kv_head, capacity, head_dim]
     infinicore::Tensor v_cache;          // [batch_size, n_kv_head, capacity, head_dim]
@@ -74,10 +75,13 @@ struct KVCacheLayer {
         // Lazy initialization
         if (!initialized) {
             max_capacity = std::max(required_capacity, size_t(4096)); // Start with at least 4096
-            k_cache = infinicore::Tensor::empty({batch_size, num_kv_heads, max_capacity, head_dim},
-                                                dtype, device);
-            v_cache = infinicore::Tensor::empty({batch_size, num_kv_heads, max_capacity, head_dim},
-                                                dtype, device);
+            max_capacity = 512;
+
+            // printf(" ensure_capacity initialized   required_capacity: %d   max_capacity: %d \n ", required_capacity, max_capacity);
+            // printf(" KVCacheLayer:  num_kv_heads %d \n", num_kv_heads);
+
+            k_cache = infinicore::Tensor::empty({batch_size, num_kv_heads, max_capacity, head_dim}, dtype, device);
+            v_cache = infinicore::Tensor::empty({batch_size, num_kv_heads, max_capacity, head_dim}, dtype, device);
             cache_positions = std::vector<size_t>(batch_size, 0);
             initialized = true;
 
@@ -128,6 +132,12 @@ struct KVCacheLayer {
             }
         }
 
+        // printf("\n k_cache->shape: \t ");
+        // for (auto &v : k_cache->shape()) {
+        //     printf("%ld  ", v);
+        // }
+        // printf("\n");
+
         // VALIDATION: Final check that capacity is sufficient
         if (required_capacity > max_capacity) {
             SPDLOG_ERROR("KVCacheLayer::ensure_capacity: Capacity still insufficient after growth - required: {}, max_capacity: {}",
@@ -136,11 +146,14 @@ struct KVCacheLayer {
         }
     }
 
-    KVCacheLayer(size_t max_batch_size, size_t n_kv_head, size_t head_dim, infinicore::DataType dtype, size_t max_seqlen = 4096, infinicore::Device device = infinicore::context::getDevice())
-        : max_capacity(max_seqlen), initialized(false) {
-        cache_positions = std::vector<size_t>(max_batch_size, 0);
-        ensure_capacity(max_batch_size, n_kv_head, head_dim, max_capacity, dtype, device);
-    }
+    // KVCacheLayer(size_t max_batch_size, size_t n_kv_head, size_t head_dim, infinicore::DataType dtype, size_t max_seqlen = 4096, infinicore::Device device = infinicore::context::getDevice())
+    //     : max_capacity(max_seqlen), initialized(false) {
+
+    //     cache_positions = std::vector<size_t>(max_batch_size, 0);
+
+    //     printf(" KVCacheLayer:  n_kv_head %d \n", n_kv_head);
+    //     ensure_capacity(max_batch_size, n_kv_head, head_dim, max_capacity, dtype, device);
+    // }
 
     /**
      * @brief Update cache with new key and value states
@@ -162,9 +175,17 @@ struct KVCacheLayer {
         size_t seq_len = k_new->shape()[2];
         size_t head_dim = k_new->shape()[3];
 
+        // printf("\n k_new->shape: \t ");
+        // for (auto &v : k_new->shape()) {
+        //     printf("%ld  ", v);
+        // }
+        // printf("\n");
+
         // Ensure capacity
         ensure_capacity(batch_size, num_kv_heads, head_dim, seq_len,
                         k_new->dtype(), k_new->device());
+
+        //   printf("KVCacheLayer update  max_capacity   %d \n ", max_capacity);
 
         // Copy new k/v into cache at current position
         bool all_equal = cache_positions.empty() || std::equal(cache_positions.begin() + 1, cache_positions.end(), cache_positions.begin());

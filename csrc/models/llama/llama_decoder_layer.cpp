@@ -4,8 +4,11 @@
 
 namespace infinilm::models::llama {
 
-LlamaDecoderLayer::LlamaDecoderLayer(const LlamaConfig &config, const infinicore::Device &device,
-                                     infinicore::DataType dtype) {
+LlamaDecoderLayer::LlamaDecoderLayer(const LlamaConfig &config,
+                                     const infinicore::Device &device,
+                                     infinicore::DataType dtype,
+                                     engine::distributed::RankInfo rank_info) : rank_info_(rank_info) {
+
     // Initialize layer normalization layers
     INFINICORE_NN_MODULE_INIT(input_layernorm, config.hidden_size, config.rms_norm_eps,
                               dtype, device);
@@ -13,14 +16,14 @@ LlamaDecoderLayer::LlamaDecoderLayer(const LlamaConfig &config, const infinicore
                               dtype, device);
 
     // Initialize attention and MLP modules
-    INFINICORE_NN_MODULE_INIT(self_attn, config, device, dtype);
-    INFINICORE_NN_MODULE_INIT(mlp, config, device, dtype);
+    INFINICORE_NN_MODULE_INIT(self_attn, config, device, dtype, rank_info);
+    INFINICORE_NN_MODULE_INIT(mlp, config, device, dtype, rank_info);
 }
 
 infinicore::Tensor LlamaDecoderLayer::forward(const infinicore::Tensor &hidden_states,
-                                               const infinicore::Tensor &position_ids,
-                                               void *kv_cache,
-                                               size_t layer_idx) const {
+                                              const infinicore::Tensor &position_ids,
+                                              void *kv_cache,
+                                              size_t layer_idx) const {
     // Save residual for attention
     auto residual = hidden_states;
 

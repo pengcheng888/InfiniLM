@@ -1,20 +1,22 @@
 #include "llama_for_causal_lm.hpp"
+#include "infinicore/context/context.hpp"
 #include "infinicore/nn/linear.hpp"
 #include "infinicore/ops.hpp"
 #include "infinicore/ops/random_sample.hpp"
-#include "infinicore/context/context.hpp"
 #include <iostream>
 
 namespace infinilm::models::llama {
 
-LlamaForCausalLM::LlamaForCausalLM(const LlamaConfig &config, const infinicore::Device &device,
-                                   infinicore::DataType dtype) {
+LlamaForCausalLM::LlamaForCausalLM(const LlamaConfig &config,
+                                   const infinicore::Device &device,
+                                   infinicore::DataType dtype,
+                                   engine::distributed::RankInfo rank_info) {
 
     // Initialize module's device_ member
     device_ = device;
 
     // Initialize base model
-    INFINICORE_NN_MODULE_INIT(model, config, device, dtype);
+    INFINICORE_NN_MODULE_INIT(model, config, device, dtype, rank_info);
 
     // Initialize language modeling head
     // Note: If tie_word_embeddings is true, we would share weights with embed_tokens
@@ -26,6 +28,7 @@ LlamaForCausalLM::LlamaForCausalLM(const LlamaConfig &config, const infinicore::
 infinicore::Tensor LlamaForCausalLM::forward(const infinicore::Tensor &input_ids,
                                              const infinicore::Tensor &position_ids,
                                              void *kv_cache) const {
+
     // 1. Forward through base model to get hidden states
     auto position_ids_device = position_ids->to(device_);
     auto hidden_states = model_->forward(input_ids, position_ids_device, kv_cache);

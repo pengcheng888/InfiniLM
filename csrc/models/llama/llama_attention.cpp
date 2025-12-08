@@ -9,38 +9,75 @@
 #include <iostream>
 #include <spdlog/spdlog.h>
 #include <stdexcept>
+#include <vector>
 
 namespace infinilm::models::llama {
 
-LlamaAttention::LlamaAttention(const LlamaConfig &config, const infinicore::Device &device,
-                               infinicore::DataType dtype)
+LlamaAttention::LlamaAttention(const LlamaConfig &config,
+                               const infinicore::Device &device,
+                               infinicore::DataType dtype,
+                               engine::distributed::RankInfo rank_info)
     : hidden_size_(config.hidden_size),
-      num_attention_heads_(config.num_attention_heads),
-      num_key_value_heads_(config.num_key_value_heads),
       head_dim_(config.head_dim),
       kv_dim_(config.kv_dim()),
       use_bias_(config.attention_bias),
       use_output_bias_(config.attention_output_bias),
-      max_position_embeddings_(config.max_position_embeddings) {
+      max_position_embeddings_(config.max_position_embeddings), rank_info_(rank_info) {
+
+    int tp_rank = rank_info.tp_rank;
+    int tp_size = rank_info.tp_size;
+
+    int num_attention_heads = config.num_attention_heads;
+    int num_key_value_heads = config.num_key_value_heads;
+
+    if ((num_attention_heads > tp_size) && (num_key_value_heads > tp_size) && (0 == (num_attention_heads % tp_size)) && (0 == (num_key_value_heads % tp_size))) {
+        this->num_attention_heads_ = num_attention_heads / tp_size;
+        this->num_key_value_heads_ = num_key_value_heads / tp_size;
+    } else {
+        throw std::runtime_error("num_attention_heads / tp_size error.");
+    }
+
+    // printf("LlamaMLP  tp_rank %d   tp_size %d \n", tp_rank, tp_size);
+
+    // // Initialize projection layers
+    // INFINICORE_NN_MODULE_INIT(q_proj, hidden_size_, hidden_size_, use_bias_,
+    //                           dtype, device);
+    // INFINICORE_NN_MODULE_INIT(k_proj, hidden_size_, kv_dim_, use_bias_,
+    //                           dtype, device);
+    // INFINICORE_NN_MODULE_INIT(v_proj, hidden_size_, kv_dim_, use_bias_,
+    //                           dtype, device);
+    // // Output projection uses attention_output_bias (can be different from qkv)
+    // INFINICORE_NN_MODULE_INIT(o_proj, hidden_size_, hidden_size_, use_output_bias_,
+    //                           dtype, device);
+
     // Initialize projection layers
     INFINICORE_NN_MODULE_INIT(q_proj, hidden_size_, hidden_size_, use_bias_,
-                              dtype, device);
+                              dtype, device, tp_rank, tp_size);
     INFINICORE_NN_MODULE_INIT(k_proj, hidden_size_, kv_dim_, use_bias_,
-                              dtype, device);
+                              dtype, device, tp_rank, tp_size);
     INFINICORE_NN_MODULE_INIT(v_proj, hidden_size_, kv_dim_, use_bias_,
-                               dtype, device);
+                              dtype, device, tp_rank, tp_size);
+
+    // printf("use_bias_   use_output_bias_     % d, % d\n", use_bias_, use_output_bias_);
+
+    use_output_bias_ = false;
     // Output projection uses attention_output_bias (can be different from qkv)
     INFINICORE_NN_MODULE_INIT(o_proj, hidden_size_, hidden_size_, use_output_bias_,
-                              dtype, device);
+                              dtype, device, tp_rank, tp_size, rank_info.comm);
 }
 
-infinicore::Tensor LlamaAttention::forward(const infinicore::Tensor &hidden_states,
-                                            const infinicore::Tensor &position_ids,
-                                            void *kv_cache,
-                                            size_t layer_idx) const {
-    if (!rotary_emb_) {
-        throw std::runtime_error("LlamaAttention: rotary_emb not configured");
+void printshape(const std::vector<long unsigned int> &shape) {
+
+    for (auto &v : shape) {
+        printf("%ld  ", v);
     }
+    printf("\n");
+}
+infinicore::Tensor LlamaAttention::forward(const infinicore::Tensor &hidden_states,
+                                           const infinicore::Tensor &position_ids,
+                                           void *kv_cache,
+                                           size_t layer_idx) const {
+    // printf(" ----------->   LlamaAttention::forward  111 \n");
     // Input shape: [batch, seq_len, hidden_size]
     auto hidden_states_mutable = hidden_states;
     auto shape = hidden_states->shape();
@@ -48,20 +85,40 @@ infinicore::Tensor LlamaAttention::forward(const infinicore::Tensor &hidden_stat
     size_t seq_len = shape[1];
 
     // 1. Project Q, K, V
+
     auto q = q_proj_->forward(hidden_states_mutable); // [batch, seq_len, hidden_size]
-
     auto k = k_proj_->forward(hidden_states_mutable); // [batch, seq_len, kv_dim]
-
     auto v = v_proj_->forward(hidden_states_mutable); // [batch, seq_len, kv_dim]
 
-    // 2. Reshape for multi-head attention
+    // printf(" ----------->   LlamaAttention::forward  222 \n");
 
+    // printf("\n q->shape: \t ");
+    // printshape(q->shape());
+
+    // printf("\n k->shape: \t ");
+    // printshape(k->shape());
+
+    // printf("\n v->shape: \t ");
+    // printshape(v->shape());
+
+    // 2. Reshape for multi-head attention
     // Reshape Q, K, V to include batch dimension
     // Python: query_states = self.q_proj(hidden_states).view(querys_shape)
     // The view operation requires the tensor to be contiguous in the required dimensions
     auto q_reshaped = q->view({batch_size, seq_len, num_attention_heads_, head_dim_});
     auto k_reshaped = k->view({batch_size, seq_len, num_key_value_heads_, head_dim_});
     auto v_reshaped = v->view({batch_size, seq_len, num_key_value_heads_, head_dim_});
+
+    //    printf("   num_attention_heads_ %d   num_key_value_heads_ %d \n", num_attention_heads_, num_key_value_heads_);
+    // printf(" ----------->   LlamaAttention::forward  333 \n");
+    // printf("\n q_reshaped->shape: \t ");
+    // printshape(q_reshaped->shape());
+
+    // printf("\n k_reshaped->shape: \t ");
+    // printshape(k_reshaped->shape());
+
+    // printf("\n v_reshaped->shape: \t ");
+    // printshape(v_reshaped->shape());
 
     // 3. Prepare position_ids for RoPE - align with Python pattern
     // Python: bs, num = pos_ids.shape; pos_ids = pos_ids.view((bs * num,))
@@ -75,17 +132,45 @@ infinicore::Tensor LlamaAttention::forward(const infinicore::Tensor &hidden_stat
     } else {
         throw std::runtime_error("Unexpected position_ids shape");
     }
-
+    // printf(" ----------->   LlamaAttention::forward  444 \n");
     // 4. Prepare KV caches
     // Convert to [batch, n_head, seq_len, head_dim] for cache
     // Ensure contiguous after permute for F16 compatibility with cache operations
-    q_reshaped = q_reshaped->permute({0, 2, 1, 3})->contiguous(); // [bs, n_q_head, seq_len, head_dim]
-    auto k_permuted = k_reshaped->permute({0, 2, 1, 3});          // [bs, n_kv_head, seq_len, head_dim]
-    auto v_permuted = v_reshaped->permute({0, 2, 1, 3});          // [bs, n_kv_head, seq_len, head_dim]
+
+    // q_reshaped->debug("q_reshaped.bin");
+    // printf(" ----------->   LlamaAttention::forward 444 0000000 \n");
+    // printf("!!!!!!!! q_reshaped-  %s \n ", q_reshaped->info().c_str());
+    // printf("!!!!!!!! q_reshaped->permute({0, 2, 1, 3})    %s \n ", q_reshaped->permute({0, 2, 1, 3})->info().c_str());
+
+    // q_reshaped->contiguous();
+    // q_reshaped->contiguous()->permute({0, 2, 1, 3});
+    // q_reshaped->contiguous()->permute({0, 2, 1, 3})->contiguous();
+    //  printf(" ----------->   LlamaAttention::forward 444 0000000 1111 \n");
+
+    //  q_reshaped->permute({0, 2, 1, 3})->contiguous();
+
+    // printf(" ----------->   LlamaAttention::forward 444 0000000  2222222222\n");
+    q_reshaped
+        = q_reshaped->permute({0, 2, 1, 3})->contiguous(); // [bs, n_q_head, seq_len, head_dim]
+                                                           // printf(" ----------->   LlamaAttention::forward  444  1111111 \n");
+    auto k_permuted = k_reshaped->permute({0, 2, 1, 3});   // [bs, n_kv_head, seq_len, head_dim]
+    // printf(" ----------->   LlamaAttention::forward  444  222222 \n");
+    auto v_permuted = v_reshaped->permute({0, 2, 1, 3}); // [bs, n_kv_head, seq_len, head_dim]
+    // printf(" ----------->   LlamaAttention::forward  444  333333 \n");
     infinilm::cache::DynamicCache *external_cache = static_cast<infinilm::cache::DynamicCache *>(kv_cache);
+    //  printf(" ----------->   LlamaAttention::forward  444  444 \n");
     infinicore::Tensor k_total; // [bs, n_kv_head, total_seq_len, head_dim]
     infinicore::Tensor v_total; // [bs, n_kv_head, total_seq_len, head_dim]
+
+    // printf(" ----------->   LlamaAttention::forward  444  555 \n");
     if (external_cache != nullptr) {
+
+        // printf("\n k_permuted->shape: \t ");
+        // printshape(k_permuted->shape());
+
+        // printf("\n v_permuted->shape: \t ");
+        // printshape(v_permuted->shape());
+
         auto [k_total_tmp, v_total_tmp] = external_cache->update(layer_idx, k_permuted, v_permuted);
         k_total = k_total_tmp;
         v_total = v_total_tmp;
@@ -98,6 +183,10 @@ infinicore::Tensor LlamaAttention::forward(const infinicore::Tensor &hidden_stat
     // 5. Apply RoPE to full batch
     auto q_rope = q_reshaped->view({batch_size * num_attention_heads_, seq_len, head_dim_})->permute({1, 0, 2});                                               // [seq_len, bs * n_q_head, head_dim]
     auto k_rope = k_total->narrow({{2, total_seq_len - seq_len, seq_len}})->view({batch_size * num_key_value_heads_, seq_len, head_dim_})->permute({1, 0, 2}); // [seq_len, bs * n_kv_head, head_dim]
+
+    if (!rotary_emb_) {
+        throw std::runtime_error("LlamaAttention: rotary_emb not configured");
+    }
     rotary_emb_->forward(q_rope, pos_ids_for_rope, true);
     rotary_emb_->forward(k_rope, pos_ids_for_rope, true);
 
