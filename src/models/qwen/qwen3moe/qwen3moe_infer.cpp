@@ -7,7 +7,7 @@
 #include <random>
 #include <thread>
 #include <vector>
-
+    
 void Qwen3MoEinferDeviceBatch(const Qwen3MoE::Meta *meta, DeviceResource<Qwen3MoE::WeightsTensor> &rsrc,
                               uint32_t idev, uint32_t ndev,
                               const uint32_t *tokens, uint32_t ntok,
@@ -16,29 +16,39 @@ void Qwen3MoEinferDeviceBatch(const Qwen3MoE::Meta *meta, DeviceResource<Qwen3Mo
                               const float *temperature, const uint32_t *topk, const float *topp,
                               uint32_t *output, void *last_logits) {
 
-    auto nlayer = meta->nlayer;
-    auto nkvh = meta->nkvh / ndev;
-    auto nh = meta->nh / ndev;
-    auto ngroup = nh / nkvh;
-    // auto dctx = meta.dctx;
-    auto dh = meta->dh;
-    auto d = meta->d;
-    auto dt_logits = meta->dt_logits;
-    // auto di = meta->di / ndev;
-    auto dvoc = meta->dvoc;
-    auto stream = rsrc.stream;
+    // ========================================================================
+    // 1. 提取模型配置参数
+    // ========================================================================
+    auto nlayer = meta->nlayer;              // Transformer层数
+    auto nkvh = meta->nkvh / ndev;           // 每个设备的KV头数（分布式时分割）
+    auto nh = meta->nh / ndev;                // 每个设备的注意力头数（分布式时分割）
+    auto ngroup = nh / nkvh;                  // GQA分组数（Grouped Query Attention）
+    auto dh = meta->dh;                       // 每个注意力头的维度
+    auto d = meta->d;                         // 模型隐藏层维度
+    auto dt_logits = meta->dt_logits;         // logits的数据类型
+    auto dvoc = meta->dvoc;                   // 词汇表大小
+    auto stream = rsrc.stream;               // CUDA流，用于异步操作
 
-    // Allocate buffers
-    auto logits_in = Tensor::buffer(dt_logits, {ntok, d}, rsrc.memory_pool);
-    auto logits_out = Tensor::buffer(dt_logits, {ntok, d}, rsrc.memory_pool);
+    // ========================================================================
+    // 2. 分配主要计算缓冲区
+    // ========================================================================
+    // 主计算缓冲区：用于存储每层的输入输出
+    auto logits_in = Tensor::buffer(dt_logits, {ntok, d}, rsrc.memory_pool);      // 层输入 [ntok, d]
+    auto logits_out = Tensor::buffer(dt_logits, {ntok, d}, rsrc.memory_pool);    // 层输出 [ntok, d]
+    
+    // QKV缓冲区：存储query、key、value投影结果
+    // 形状: [ntok, (nh + nkvh * 2) * dh]
+    // nh个query头 + nkvh个key头 + nkvh个value头
     auto qkv_buf = Tensor::buffer(dt_logits, {ntok, (nh + nkvh * 2) * dh}, rsrc.memory_pool);
+    auto qkv_rope = qkv_buf->view({ntok, nh + nkvh * 2, dh});  // 用于RoPE的视图
 
-    auto o_buf = Tensor::buffer(dt_logits, {ntok, nh * dh}, rsrc.memory_pool);
-    auto prob_buf = Tensor::buffer(dt_logits, {nreq, dvoc}, rsrc.memory_pool);
-    auto result_buf = Tensor::buffer(INFINI_DTYPE_I64, {nreq}, rsrc.memory_pool);
-    auto result_cpu = std::vector<int64_t>(nreq);
-
-    auto qkv_rope = qkv_buf->view({ntok, nh + nkvh * 2, dh});
+    // 注意力输出缓冲区
+    auto o_buf = Tensor::buffer(dt_logits, {ntok, nh * dh}, rsrc.memory_pool);   // 注意力输出 [ntok, nh*dh]
+    
+    // 采样相关缓冲区
+    auto prob_buf = Tensor::buffer(dt_logits, {nreq, dvoc}, rsrc.memory_pool);    // 输出概率分布 [nreq, dvoc]
+    auto result_buf = Tensor::buffer(INFINI_DTYPE_I64, {nreq}, rsrc.memory_pool); // 采样结果 [nreq]
+    auto result_cpu = std::vector<int64_t>(nreq);                                 // CPU端的结果缓冲区
 
     // Prepare inputs
     auto batch_pos_ids = std::vector<uint32_t>(ntok);
@@ -50,9 +60,10 @@ void Qwen3MoEinferDeviceBatch(const Qwen3MoE::Meta *meta, DeviceResource<Qwen3Mo
         req_start += req_lens[req];
     }
 
+    // 获取权重张量指针
     const Qwen3MoE::WeightsTensor *g_WeightsTensor = rsrc.weights_tensor_ptr.get();
     if (!g_WeightsTensor) {
-        return;
+        return;  // 权重未加载，直接返回
     }
 
     std::shared_ptr<Tensor> pos_ids_buf;
@@ -63,6 +74,8 @@ void Qwen3MoEinferDeviceBatch(const Qwen3MoE::Meta *meta, DeviceResource<Qwen3Mo
         RUN_INFINI(infinirtMemcpyAsync(pos_ids_buf->data(), batch_pos_ids.data(), sizeof(uint32_t) * ntok,
                                        INFINIRT_MEMCPY_H2D, stream));
     }
+    
+    // 将输入token嵌入到隐藏空间：从词汇表嵌入矩阵中查找每个token的嵌入向量
     for (uint32_t i = 0; i < ntok; i++) {
         RUN_INFINI(infinirtMemcpyAsync(logits_in->data(i * d), g_WeightsTensor->w_in_embd->data(tokens[i] * d),
                                        dsize(dt_logits) * d, INFINIRT_MEMCPY_D2D, stream));
@@ -74,9 +87,9 @@ void Qwen3MoEinferDeviceBatch(const Qwen3MoE::Meta *meta, DeviceResource<Qwen3Mo
     size_t max_seq_len = 0;
 
     for (uint32_t req = 0; req < nreq; req++) {
-        auto past_len = req_pos[req];
-        auto seq_len = req_lens[req];
-        auto total_len = past_len + seq_len;
+        auto past_len = req_pos[req];      // 历史长度（已缓存的token数）
+        auto seq_len = req_lens[req];      // 当前请求的新token数
+        auto total_len = past_len + seq_len; // 总长度（历史 + 当前）
 
         max_qk_size = std::max(max_qk_size, size_t(seq_len * total_len));
         max_seq_len = std::max(max_seq_len, size_t(seq_len));
@@ -112,9 +125,12 @@ void Qwen3MoEinferDeviceBatch(const Qwen3MoE::Meta *meta, DeviceResource<Qwen3Mo
 
         size_t token_offset = 0;
         for (uint32_t req = 0; req < nreq; req++) {
-            auto past_len = req_pos[req];
-            auto seq_len = req_lens[req];
-            auto total_len = past_len + seq_len;
+            auto past_len = req_pos[req];      // 该请求的历史长度
+            auto seq_len = req_lens[req];      // 该请求的新token数
+            auto total_len = past_len + seq_len; // 总长度
+            
+            // 提取当前请求的Q、K、V
+            // Q: [seq_len, nh, dh] -> 重排为 [nkvh, ngroup, seq_len, dh] 用于GQA
             auto o = o_buf->slice({{0, token_offset, seq_len}})->view({seq_len, nkvh, ngroup, dh})->permute({1, 2, 0, 3});
             auto q = qkv_rope->slice({{0, token_offset, seq_len}, {1, 0, nh}})->view({seq_len, nkvh, ngroup, dh})->permute({1, 2, 0, 3});
             auto k = qkv_rope->slice({{0, token_offset, seq_len}, {1, nh, nkvh}});
@@ -154,45 +170,46 @@ void Qwen3MoEinferDeviceBatch(const Qwen3MoE::Meta *meta, DeviceResource<Qwen3Mo
         // 2. FFN
         rmsnorm(logits_out, logits_in, layer_tensor->w_ffn_norm, meta->epsilon);
 
-        // ------------------------------------------------------------------------ //
-        //                          SparseMLP                                       //
-        // ------------------------------------------------------------------------ //
+        // ------------------------------------------------------------------------
+        // SparseMLP: 稀疏混合专家网络
+        // 每个token根据路由权重选择top-k个专家进行计算
+        // ------------------------------------------------------------------------
         {
-            // 明确输入输出变量
-            std::shared_ptr<Tensor> hidden_states = logits_out; // logits_out 是整个 MoE的输入，重新起名字为 hidden_states
+            std::shared_ptr<Tensor> hidden_states = logits_out;  // MoE的输入
 
-            // 需要提前申请的缓存
-            size_t moe_intermediate_size = meta->_moe_intermediate_size / ndev;
+            // MoE配置参数
+            size_t moe_intermediate_size = meta->_moe_intermediate_size / ndev;  // 每个设备的专家中间层大小
 
-            // 需要提前申请的缓存
+            // 分配MoE计算缓冲区
+            // gate_up_buf: 存储gate和up投影的拼接结果 [1, 2 * moe_intermediate_size]
             auto router_gate_up_buf = Tensor::buffer(dt_logits, {1, 2 * moe_intermediate_size}, rsrc.memory_pool);
-            auto router_gate_buf = router_gate_up_buf->slice(1, 0, moe_intermediate_size);
-            auto router_up_buf = router_gate_up_buf->slice(1, moe_intermediate_size, moe_intermediate_size);
+            auto router_gate_buf = router_gate_up_buf->slice(1, 0, moe_intermediate_size);  // gate部分
+            auto router_up_buf = router_gate_up_buf->slice(1, moe_intermediate_size, moe_intermediate_size);  // up部分
 
-            // 需要提前申请的缓存
-            std::shared_ptr<Tensor> router_states_sum = Tensor::buffer(hidden_states->dtype(), hidden_states->shape(), rsrc.memory_pool); // 用于存储 SparseMLP的输出
+            // 输出缓冲区：存储所有专家输出的加权和
+            std::shared_ptr<Tensor> router_states_sum = Tensor::buffer(hidden_states->dtype(), hidden_states->shape(), rsrc.memory_pool);
+            
+            // 路由logits：每个token对所有专家的路由分数 [ntok, num_experts]
+            std::shared_ptr<Tensor> router_logits = Tensor::buffer(dt_logits, {ntok, meta->_num_experts}, rsrc.memory_pool);
 
-            // 需要提前申请的缓存
-            std::shared_ptr<Tensor> router_logits = Tensor::buffer(dt_logits, {ntok, meta->_num_experts}, rsrc.memory_pool); // 路由专家的权重
+            // TopK路由参数
+            size_t topk = meta->_num_experts_per_tok;        // 每个token选择的专家数量（通常为4或8）
+            bool norm_topk_prob = meta->_norm_topk_prob;     // 是否对topk概率进行归一化
 
-            //
-            size_t topk = meta->_num_experts_per_tok;
-            bool norm_topk_prob = meta->_norm_topk_prob;
-
-            std::shared_ptr<Tensor> values_gpu = Tensor::buffer(infiniDtype_t::INFINI_DTYPE_F32, {ntok * topk}, rsrc.memory_pool);  // 用于存储topkrouter的输出，每个expert对应的加权权重。
-            std::shared_ptr<Tensor> indices_gpu = Tensor::buffer(infiniDtype_t::INFINI_DTYPE_I32, {ntok * topk}, rsrc.memory_pool); // 用于存储topkrouter的输出，要经过哪些专家id（从256个中选8个）
-            std::vector<float> values_cpu(ntok * topk, 0.f);                                                                        // 用于存储topkrouter的输出，每个expert对应的加权权重。（从256个中选8个）
-            std::vector<int> indices_cpu(ntok * topk, 0);                                                                           // 用于存储topkrouter的输出，要经过哪些专家的索引。
-
-            // ------------------------------------------------------------------------ //
-            //                            开始计算                                       //
-            // ------------------------------------------------------------------------ //
+            // TopK路由结果缓冲区
+            std::shared_ptr<Tensor> values_gpu = Tensor::buffer(infiniDtype_t::INFINI_DTYPE_F32, {ntok * topk}, rsrc.memory_pool);   // 专家权重 [ntok * topk]
+            std::shared_ptr<Tensor> indices_gpu = Tensor::buffer(infiniDtype_t::INFINI_DTYPE_I32, {ntok * topk}, rsrc.memory_pool); // 专家索引 [ntok * topk]
+            std::vector<float> values_cpu(ntok * topk, 0.f);   // CPU端权重（用于后续计算）
+            std::vector<int> indices_cpu(ntok * topk, 0);      // CPU端索引（用于后续计算）
+ 
+            // ------------------------------------------------------------------------
+            // 开始MoE计算
+            // ------------------------------------------------------------------------
             auto ffn = layer_tensor->ffn;
 
-            // (1) topk操作：
-            //      hidden_states 先经过 gate_weight，得到 router_logits
-            //      router_logits 进行 topk 操作
-            linear(router_logits, hidden_states, ffn->_gate_weight, 1.0, 0.0, nullptr, nullptr); // 这一行的代码是正确的
+            // Step 1: 计算路由logits并执行TopK选择
+            // 将hidden_states通过路由门控网络，得到每个token对所有专家的路由分数
+            linear(router_logits, hidden_states, ffn->_gate_weight, 1.0, 0.0, nullptr, nullptr); 
             {
                 topksoftmax(values_gpu, indices_gpu, router_logits, topk, norm_topk_prob);
                 RUN_INFINI(infinirtMemcpy((void *)values_cpu.data(), values_gpu->data(), values_cpu.size() * sizeof(float), INFINIRT_MEMCPY_D2H));
@@ -200,15 +217,15 @@ void Qwen3MoEinferDeviceBatch(const Qwen3MoE::Meta *meta, DeviceResource<Qwen3Mo
                 RUN_INFINI(infinirtStreamSynchronize(rsrc.stream));
             }
 
-            // (2) MoE操作：  每个 token 经过 4个 路由专家
+            // Step 2: 对每个token执行MoE计算
+            // 每个token根据路由结果，依次经过topk个专家，并将结果加权求和
             {
-                // 输入: hidden_states
-                //      values_cpu，indices_cpu
                 for (size_t itok = 0; itok < ntok; ++itok) {
-                    std::shared_ptr<Tensor> hidden_states_i = hidden_states->slice(0, itok, 1);
-                    std::shared_ptr<Tensor> router_states_sum_i = router_states_sum->slice(0, itok, 1);
+                    // 提取当前token的输入和输出缓冲区
+                    std::shared_ptr<Tensor> hidden_states_i = hidden_states->slice(0, itok, 1);  // [1, d]
+                    std::shared_ptr<Tensor> router_states_sum_i = router_states_sum->slice(0, itok, 1);  // [1, d]
 
-                    // 经过第一个专家 : C = alpha * AB
+                    // 第一个专家：初始化输出（alpha * Expert(hidden_states_i)）
                     {
                         int index = indices_cpu[itok * topk + 0];
                         float alpha = values_cpu[itok * topk + 0];
@@ -217,16 +234,19 @@ void Qwen3MoEinferDeviceBatch(const Qwen3MoE::Meta *meta, DeviceResource<Qwen3Mo
                         linear(router_states_sum_i, router_gate_buf, layer_tensor->ffn->_experts[index]->w_ffn_down, alpha, 0.0, nullptr, nullptr);
                     }
 
-                    // 经过后续的专家 : C  = alpha * AB + C_last
+                    // 后续专家：累加到已有输出（alpha * Expert(hidden_states_i) + router_states_sum_i）
                     for (size_t k = 1; k < topk; ++k) {
                         int index = indices_cpu[itok * topk + k];
                         float alpha = values_cpu[itok * topk + k];
                         linear(router_gate_up_buf, hidden_states_i, layer_tensor->ffn->_experts[index]->w_ffn_gate_up, 1.0, 0.0, nullptr, nullptr);
                         swiglu(router_gate_buf, router_up_buf, router_gate_buf);
-                        linear(router_states_sum_i, router_gate_buf, layer_tensor->ffn->_experts[index]->w_ffn_down, alpha, 0.0, router_states_sum_i, nullptr);
+                        // 加权累加（注意这里使用router_states_sum_i作为残差，实现累加）
+                        linear(router_states_sum_i, router_gate_buf, 
+                               layer_tensor->ffn->_experts[index]->w_ffn_down, alpha, 0.0, router_states_sum_i, nullptr);
                     }
                 }
 
+                // 分布式AllReduce：聚合所有设备的MoE输出
                 if (rsrc.comm != nullptr) {
                     RUN_INFINI(infinicclAllReduce(
                         router_states_sum->data(), router_states_sum->data(), ntok * d, dt_logits,
@@ -235,7 +255,8 @@ void Qwen3MoEinferDeviceBatch(const Qwen3MoE::Meta *meta, DeviceResource<Qwen3Mo
                 }
             }
 
-            // (3) 最后的残差连接
+            // Step 3: 残差连接
+            // 将MoE输出与注意力输出相加，完成Transformer块的计算
             add(logits_in, router_states_sum, logits_in);
         }
 
@@ -292,22 +313,32 @@ void Qwen3MoEinferDeviceBatch(const Qwen3MoE::Meta *meta, DeviceResource<Qwen3Mo
 namespace Qwen3MoE {
 Model::Model(const Meta *_meta, const Weights *weights, infiniDevice_t device_, std::vector<int> device_ids) : meta(*_meta) {
 
-    printf("-------------> Model\n ");
-    int ndev = int(device_ids.size());
+    // 初始化设备相关参数
+    int ndev = int(device_ids.size());  // 设备数量
     device = device_;
     dev_ids = device_ids;
-    dev_resources = std::vector<DeviceResource<WeightsTensor>>(ndev);
-    states = std::vector<InferState>(ndev);
-    threads.resize(ndev);
+    dev_resources = std::vector<DeviceResource<WeightsTensor>>(ndev);  // 每个设备的资源
+    states = std::vector<InferState>(ndev);  // 每个设备的推理状态
+    threads.resize(ndev);  // 每个设备的推理线程
+    
+    // 初始化InfiniRT运行时
     RUN_INFINI(infinirtInit());
+    
+    // 初始化通信器（用于多设备间的AllReduce）
     auto comms = std::vector<infinicclComm_t>(ndev, nullptr);
     if (ndev > 1) {
         RUN_INFINI(infinicclCommInitAll(device, comms.data(), ndev, dev_ids.data()));
     }
 
+    // 为每个设备启动推理线程
     for (int i = 0; i < ndev; i++) {
-        threads[i] = std::thread(launchDevice<WeightsTensor, Meta, Weights>, std::cref(meta), weights, &dev_resources[i], std::ref(states[i]), std::ref(req), device, i, ndev, dev_ids[i], comms[i], Qwen3MoEinferDeviceBatch);
+        threads[i] = std::thread(launchDevice<WeightsTensor, Meta, Weights>, 
+                                  std::cref(meta), weights, &dev_resources[i], 
+                                  std::ref(states[i]), std::ref(req), device, i, ndev, 
+                                  dev_ids[i], comms[i], Qwen3MoEinferDeviceBatch);
     }
+    
+    // 等待所有设备完成权重加载
     for (int i = 0; i < ndev; i++) {
         std::unique_lock<std::mutex> lock(states[i].mtx);
         states[i].cv_load.wait(lock, [&] { return states[i].loaded; });
