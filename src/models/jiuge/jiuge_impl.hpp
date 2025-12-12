@@ -20,7 +20,7 @@ struct JiugeDeviceResource {
     // Weights
     std::shared_ptr<Tensor> w_in_embd, w_out_norm, w_out_embd, sin_table,
         cos_table;
-    std::vector<std::shared_ptr<Tensor>> w_attn_norm, w_attn_qkv, b_attn_qkv, w_attn_q_norm, w_attn_k_norm,w_attn_out,
+    std::vector<std::shared_ptr<Tensor>> w_attn_norm, w_attn_qkv, b_attn_qkv, w_attn_q_norm, w_attn_k_norm, w_attn_out,
         w_ffn_norm, w_ffn_gate_up, w_ffn_down;
     // Streams
     infinirtStream_t stream;
@@ -28,6 +28,9 @@ struct JiugeDeviceResource {
     infinicclComm_t comm;
 
     std::shared_ptr<MemoryPool> memory_pool;
+
+    //
+    const void *weights_tensor_ptr{nullptr};
 };
 
 struct InferState {
