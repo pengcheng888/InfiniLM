@@ -228,16 +228,6 @@ void inferBatch(Model *model,
 
 /**
  * @brief Perform forward pass (compute logits) for batch inference
- * @tparam Model Model type
- * @param model Pointer to model instance (must not be nullptr)
- * @param tokens Input token array
- * @param ntok Number of tokens
- * @param req_lens Request lengths array
- * @param nreq Number of requests
- * @param req_pos Request positions array
- * @param kv_caches KV cache array
- * @param logits Output logits buffer
- * @throws std::invalid_argument if model is nullptr
  */
 template <typename Model>
 void forwardBatch(Model *model,

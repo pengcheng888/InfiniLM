@@ -2,12 +2,12 @@
 #include "../../../utils.hpp"
 #include "../../inference_context.hpp"
 #include "../qwen_device_resource.hpp"
-#include "../qwen_kv_cache.hpp"
-#include "../qwen_model.hpp"
-#include "infinicore_infer.h"
+#include "qwen3_model.hpp"
+#include "qwen3_weight.hpp"
 
+#include <cmath>
 #include <random>
-#include <thread>
+#include <stdexcept>
 #include <vector>
 
 void Qwen3inferDeviceBatch(const Qwen3::Meta *meta, DeviceResource<Qwen3::WeightsTensor> &rsrc,
@@ -20,12 +20,20 @@ void Qwen3inferDeviceBatch(const Qwen3::Meta *meta, DeviceResource<Qwen3::Weight
     auto nlayer = meta->nlayer;
     auto nkvh = meta->nkvh / ndev;
     auto nh = meta->nh / ndev;
+    if (nkvh == 0) {
+        throw std::invalid_argument("Qwen3inferDeviceBatch: nkvh / ndev is zero");
+    }
     auto ngroup = nh / nkvh;
-    // auto dctx = meta.dctx;
+    if (ngroup == 0) {
+        throw std::invalid_argument("Qwen3inferDeviceBatch: nh / nkvh is zero");
+    }
     auto dh = meta->dh;
     auto d = meta->d;
     auto dt_logits = meta->dt_logits;
     auto di = meta->di / ndev;
+    if (di == 0) {
+        throw std::invalid_argument("Qwen3inferDeviceBatch: di / ndev is zero");
+    }
     auto dvoc = meta->dvoc;
     auto stream = rsrc.stream;
 
@@ -53,7 +61,7 @@ void Qwen3inferDeviceBatch(const Qwen3::Meta *meta, DeviceResource<Qwen3::Weight
 
     const Qwen3::WeightsTensor *g_WeightsTensor = rsrc.weights_tensor_ptr.get();
     if (!g_WeightsTensor) {
-        return;
+        throw std::runtime_error("Qwen3inferDeviceBatch: weights_tensor_ptr is nullptr");
     }
 
     std::shared_ptr<Tensor> pos_ids_buf;
@@ -65,6 +73,9 @@ void Qwen3inferDeviceBatch(const Qwen3::Meta *meta, DeviceResource<Qwen3::Weight
                                        INFINIRT_MEMCPY_H2D, stream));
     }
     for (uint32_t i = 0; i < ntok; i++) {
+        if (tokens[i] >= dvoc) {
+            throw std::invalid_argument("Qwen3inferDeviceBatch: token index out of vocabulary range");
+        }
         RUN_INFINI(infinirtMemcpyAsync(logits_in->data(i * d),
                                        g_WeightsTensor->w_in_embd->data(tokens[i] * d),
                                        dsize(dt_logits) * d, INFINIRT_MEMCPY_D2D, stream));
@@ -123,12 +134,12 @@ void Qwen3inferDeviceBatch(const Qwen3::Meta *meta, DeviceResource<Qwen3::Weight
             auto total_len = past_len + seq_len;
             auto o = o_buf->slice({{0, token_offset, seq_len}})->view({seq_len, nkvh, ngroup, dh})->permute({1, 2, 0, 3});
 
-            // qkv_rope是{ntok, nh + nkvh * 2, dh}
+            // qkv_rope shape: {ntok, nh + nkvh * 2, dh}
             auto q = qkv_rope->slice({{0, token_offset, seq_len}, {1, 0, nh}})->view({seq_len, nkvh, ngroup, dh})->permute({1, 2, 0, 3});
             auto k = qkv_rope->slice({{0, token_offset, seq_len}, {1, nh, nkvh}});
             auto v = qkv_rope->slice({{0, token_offset, seq_len}, {1, nh + nkvh, nkvh}});
 
-            // kv cache 更新
+            // Update KV cache
             rearrange(kv_caches[req]->k[idev][ilayer]->slice(0, past_len, seq_len), k);
             rearrange(kv_caches[req]->v[idev][ilayer]->slice(0, past_len, seq_len), v);
             auto k_gemm = kv_caches[req]->k[idev][ilayer]->slice(0, 0, total_len)->permute({1, 2, 0}); //  {total_len, nkvh, dh} => { nkvh, dh, total_len}
@@ -219,7 +230,30 @@ void Qwen3inferDeviceBatch(const Qwen3::Meta *meta, DeviceResource<Qwen3::Weight
 }
 
 namespace Qwen3 {
+/**
+ * @brief Construct a Qwen3 Model instance.
+ *
+ * This constructor initializes the model with metadata, weights, and device configuration.
+ * It sets up device resources, communication handles, and launches inference threads.
+ *
+ * @param _meta Pointer to model metadata (must not be nullptr).
+ * @param weights Pointer to model weights, it is cpu pointer, it will be copied to gpu memory.
+ * @param device_ The infiniDevice_t device type.
+ * @param device_ids Vector of device IDs to use for inference.
+ * @throws std::invalid_argument if _meta or weights is nullptr, or if device_ids is empty.
+ * @throws std::runtime_error if device initialization fails.
+ */
 Model::Model(const Meta *_meta, const Weights *weights, infiniDevice_t device_, std::vector<int> device_ids) : meta(*_meta) {
+    // Input validation
+    if (_meta == nullptr) {
+        throw std::invalid_argument("Qwen3::Model::Model: _meta cannot be nullptr");
+    }
+    if (weights == nullptr) {
+        throw std::invalid_argument("Qwen3::Model::Model: weights cannot be nullptr");
+    }
+    if (device_ids.empty()) {
+        throw std::invalid_argument("Qwen3::Model::Model: device_ids cannot be empty");
+    }
 
     int ndev = int(device_ids.size());
     device = device_;
@@ -233,9 +267,11 @@ Model::Model(const Meta *_meta, const Weights *weights, infiniDevice_t device_, 
         RUN_INFINI(infinicclCommInitAll(device, comms.data(), ndev, dev_ids.data()));
     }
 
+    // Launch device threads
     for (int i = 0; i < ndev; i++) {
         threads[i] = std::thread(launchDevice<WeightsTensor, Meta, Weights>, std::cref(meta), weights, &dev_resources[i], std::ref(states[i]), std::ref(req), device, i, ndev, dev_ids[i], comms[i], Qwen3inferDeviceBatch);
     }
+    // Wait for all devices to be ready
     for (int i = 0; i < ndev; i++) {
         std::unique_lock<std::mutex> lock(states[i].mtx);
         states[i].cv_load.wait(lock, [&] { return states[i].loaded; });

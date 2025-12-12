@@ -4,22 +4,21 @@
 #include "infinicore_infer/models/qwen3.h"
 #include <cmath>
 
-//
-// 存储 cpu 地址
-//
 namespace Qwen3 {
 
 using AttentionCStruct = Qwen::AttentionCStruct;
 using MLPCStruct = Qwen::MLPCStruct;
-
 using DecoderLayerCStruct = Qwen::DecoderLayerCStruct<AttentionCStruct, MLPCStruct>;
 
+//
+// 存储参数的 cpu 地址
+//
 struct Weights {
     size_t _nlayer{0};                     //  ("_nlayer", c_size_t)
     infiniDtype_t _dt_norm;                //  ("_dt_norm", DataType)
-    infiniDtype_t _dt_mat;                 //  ("_dt_mat", DataType),
-    int _transpose_linear_weights{false};  //  ("_transpose_linear_weights", c_int),
-    void *_embed_tokens_weight{nullptr};   //  ("_embed_tokens_weight", c_void_p),
+    infiniDtype_t _dt_mat;                 //  ("_dt_mat", DataType)
+    int _transpose_linear_weights{false};  //  ("_transpose_linear_weights", c_int)
+    void *_embed_tokens_weight{nullptr};   //  ("_embed_tokens_weight", c_void_p)
     void *_norm_weight{nullptr};           //  ("_norm_weight", c_void_p),
     void *_lm_head_weight{nullptr};        //  ("_lm_head_weight", c_void_p)
     DecoderLayerCStruct *_layers{nullptr}; //  ("_layers", POINTER(DecoderLayerCStruct))
@@ -39,9 +38,6 @@ struct Weights {
 };
 }; // namespace Qwen3
 
-//
-// 存储 gpu 地址
-//
 namespace Qwen3 {
 
 using AttentionTensor = Qwen::AttentionTensor<Meta, Weights>;
@@ -50,6 +46,9 @@ using MLPTensor = Qwen::MLPTensor<Meta, Weights>;
 
 using DecoderLayerTensor = Qwen::DecoderLayerTensor<AttentionTensor, MLPTensor, Meta, Weights>;
 
+//
+// 存储 参数的gpu 地址
+//
 struct WeightsTensor {
     size_t nlayer{0};
     std::shared_ptr<Tensor> sin_table;
