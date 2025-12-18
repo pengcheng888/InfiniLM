@@ -1,8 +1,8 @@
+#include "../../../../include/infinicore_infer/cache.h"
 #include "../../../tensor.hpp"
 #include "../../../utils.hpp"
 #include "../../inference_context.hpp"
 #include "../qwen_device_resource.hpp"
-#include "../../../../include/infinicore_infer/cache.h"
 #include "../qwen_model.hpp"
 #include "../qwen_weight.hpp"
 #include "infinicore_infer.h"
@@ -27,11 +27,10 @@ __C void Qwen3MoEdestroyModel(struct Qwen3MoE::Model *model) {
     destroyModel<Qwen3MoE::Model>(model);
 }
 
-
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ////////////////////////////////           infer API            //////////////////////////////////////////////
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////
-__C void Qwen3MoEinferBatch(struct Qwen3MoE::Model *model,
+__C void Qwen3MoEinferBatch(Qwen3MoE::Model *model,
                             const uint32_t *tokens, uint32_t ntok,
                             const uint32_t *req_lens, uint32_t nreq, const uint32_t *req_pos,
                             KVCache **kv_caches,
@@ -53,4 +52,34 @@ __C void Qwen3MoEforwardBatch(Qwen3MoE::Model *model,
                                   req_lens, nreq, req_pos,
                                   kv_caches,
                                   logits);
+}
+
+__C void
+Qwen3MoEinferBatchPaged(Qwen3MoE::Model *model,
+                        const uint32_t *tokens, uint32_t ntok,
+                        const uint32_t *req_lens, uint32_t nreq, const uint32_t *req_pos,
+                        struct KVCache **kv_caches,
+                        const int32_t *block_tables,
+                        const int32_t *slot_mapping,
+                        const float *temperature, const uint32_t *topk, const float *topp,
+                        const uint32_t is_prefill, const bool enable_paged_attn,
+                        uint32_t *output) {
+
+    inferBatchPaged<Qwen3MoE::Model>(model, tokens, ntok,
+                                     req_lens, nreq, req_pos,
+                                     kv_caches, block_tables, slot_mapping, temperature, topk, topp, is_prefill, enable_paged_attn, output);
+}
+
+__C void Qwen3MoEforwardBatchPaged(Qwen3MoE::Model *model,
+                                   const uint32_t *tokens, uint32_t ntok,
+                                   const uint32_t *req_lens, uint32_t nreq, const uint32_t *req_pos,
+                                   struct KVCache **kv_caches,
+                                   const int32_t *block_tables,
+                                   const int32_t *slot_mapping,
+                                   const uint32_t is_prefill, const bool enable_paged_attn,
+                                   void *logits) {
+                                    
+    forwardBatchPaged<Qwen3MoE::Model>(model, tokens, ntok,
+                                       req_lens, nreq, req_pos,
+                                       kv_caches, block_tables, slot_mapping, is_prefill, enable_paged_attn, logits);
 }

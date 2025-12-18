@@ -7,7 +7,7 @@ BreakBeforeBinaryOperators: All       # 在双目运算符之前换行，LLVM �
 ColumnLimit: 0                        # 列宽限制，LLVM 默认值为 80，改为不限制
 AllowShortBlocksOnASingleLine: Always # 是否允许短块（单个语句的块）不换行，LLVM 默认值为 Never，改为允许
 AllowShortLoopsOnASingleLine: true    # 是否允许短循环不换行，LLVM 默认值为 false，改为允许
-InsertBraces: true                    # 是否在 if/for/while/switch 等语句后插入大括号，LLVM 默认值为 false，改为允许
+# InsertBraces: true                  # clang-format 12 不支持此选项，已注释
 BreakBeforeBraces: Custom             # 大括号换行配置，LLVM 默认值为 LLVM，改为自定义以使 BraceWrapping 生效
 BraceWrapping:
   AfterCaseLabel: false

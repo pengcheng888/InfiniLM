@@ -1,19 +1,12 @@
-from .base import BaseModel, DataType, DeviceType, KVCacheCStruct, register_model
+from .libinfinicore_infer import  DataType, DeviceType, KVCacheCStruct
 import ctypes
 from ctypes import c_size_t, c_uint, c_int, c_float, c_void_p, c_bool,c_char, POINTER
 import torch
-from .base import DataType, DeviceType
 import ctypes
 from typing import List
 from easydict import EasyDict
+import os
 
-
-create_qwen3moe_model = None
-destroy_qwen3moe_model = None
-infer_batch_qwen3moe = None
-infer_batch_paged_qwen3moe = None
-forward_batch_qwen3moe = None
-forward_batch_paged_qwen3moe = None
 
 def find_name_in_state_dict(name_list: List[str], state_dict: dict):
     retname = None
@@ -375,6 +368,7 @@ class Qwen3MoEMeta(Qwen3MoEMetaCStruct):
         intermediate_size = config.intermediate_size
         max_position_embeddings = config.max_position_embeddings
         vocab_size = config.vocab_size
+        kvcache_block_size = config.kvcache_block_size
         rms_norm_eps = config.rms_norm_eps
         rope_theta = getattr(config, "rope_theta", 100000.0)
         eos_token_id = config.eos_token_id
@@ -395,6 +389,7 @@ class Qwen3MoEMeta(Qwen3MoEMetaCStruct):
             di=intermediate_size,
             dctx=max_position_embeddings if max_tokens is None else max_tokens,
             dvoc=vocab_size,
+            kvcache_block_size=kvcache_block_size,
             epsilon=rms_norm_eps,
             theta=rope_theta,
             end_token=eos_token_id,
@@ -444,152 +439,91 @@ class Qwen3MoEWeights(Qwen3MoEWeightsCStruct):
                          _moe_intermediate_size, _shared_expert_intermediate_size, _num_experts_per_tok, _norm_topk_prob,
                          state_dict)
 
-
-@register_model
-class Qwen3MoEModel(BaseModel):
-    @classmethod
-    def register_lib(cls, lib):
-        lib.Qwen3MoEcreateModel.restype = POINTER(Qwen3MoEModelCSruct)
-        lib.Qwen3MoEcreateModel.argtypes = [
-            POINTER(Qwen3MoEMetaCStruct),
-            POINTER(Qwen3MoEWeightsCStruct),
-            DeviceType,
-            c_int,
-            POINTER(c_int),
-        ]
-
-        lib.Qwen3MoEdestroyModel.argtypes = [POINTER(Qwen3MoEModelCSruct)]
-
-        lib.createKVCache.restype = POINTER(KVCacheCStruct)
-        lib.createKVCache.argtypes = [
-            c_size_t,
-            c_size_t,
-            c_size_t,
-            c_size_t,
-            c_size_t,
-            DataType,
-            DeviceType,
-            POINTER(c_int),
-            c_size_t,
-        ]
-
-        lib.dropKVCache.argtypes = [POINTER(KVCacheCStruct)]
-
-        lib.Qwen3MoEinferBatch.argtypes = [
-            POINTER(Qwen3MoEModelCSruct),
-            POINTER(c_uint),
-            c_uint,
-            POINTER(c_uint),
-            c_uint,
-            POINTER(c_uint),
-            POINTER(POINTER(KVCacheCStruct)),
-            POINTER(c_float),
-            POINTER(c_uint),
-            POINTER(c_float),
-            POINTER(c_uint),
-        ]
-
-        lib.Qwen3MoEforwardBatch.argtypes = [
-            POINTER(Qwen3MoEModelCSruct),
-            POINTER(c_uint),
-            c_uint,
-            POINTER(c_uint),
-            c_uint,
-            POINTER(c_uint),
-            POINTER(POINTER(KVCacheCStruct)),
-            c_void_p,
-        ]
-
-        lib.Qwen3MoEinferBatchPaged.argtypes = [
-            POINTER(Qwen3MoEModelCSruct),
-            POINTER(c_uint),
-            c_uint,
-            POINTER(c_uint),
-            c_uint,
-            POINTER(c_uint),
-            POINTER(POINTER(KVCacheCStruct)),
-            POINTER(c_int),  # unsigned int const *block_tables
-            POINTER(c_int),  # unsigned int const *slot_mapping
-            POINTER(c_float),
-            POINTER(c_uint),
-            POINTER(c_float),
-            c_uint,  # unsigned int is_prefill
-            c_bool,  # bool enable_paged_attn
-            POINTER(c_uint),  # unsigned int *output
-        ]
-
-        lib.Qwen3MoEforwardBatchPaged.argtypes = [
-            POINTER(Qwen3MoEModelCSruct),  # struct JiugeModel const *
-            POINTER(c_uint),  # unsigned int const *tokens
-            c_uint,  # unsigned int ntok
-            POINTER(c_uint),  # unsigned int const *req_lens
-            c_uint,  # unsigned int nreq
-            POINTER(c_uint),  # unsigned int const *req_pos
-            POINTER(POINTER(KVCacheCStruct)),  # struct KVCache **kv_caches
-            POINTER(c_int),  # unsigned int const *block_tables
-            POINTER(c_int),  # unsigned int const *slot_mapping
-            c_uint,  # unsigned int is_prefill
-            c_bool,  # bool enable_paged_attn
-            c_void_p,  # void *logits
-        ]
-
-
-        global create_qwen3moe_model ,destroy_qwen3moe_model,infer_batch_qwen3moe,infer_batch_paged_qwen3moe,forward_batch_qwen3moe,forward_batch_paged_qwen3moe
-        create_qwen3moe_model = lib.Qwen3MoEcreateModel
-        destroy_qwen3moe_model = lib.Qwen3MoEdestroyModel
-        infer_batch_qwen3moe = lib.Qwen3MoEinferBatch   
-        forward_batch_qwen3moe = lib.Qwen3MoEforwardBatch
-        infer_batch_paged_qwen3moe = lib.Qwen3MoEinferBatchPaged
-        forward_batch_paged_qwen3moe = lib.Qwen3MoEforwardBatchPaged
-
-    def create_model(self, meta, weights, device_type, ndev, dev_ids):
-        return self.lib.Qwen3MoEcreateModel(meta, weights, device_type, ndev, dev_ids)
-
-    def destroy_model(self, model):
-        self.lib.Qwen3MoEdestroyModel(model)
-
-    def create_kv_cache(
-        self, nlayer, max_len, nkvh, dk, dv, dtype, device, dev_ids, ndev
-    ):
-        return self.lib.createKVCache(
-            nlayer, max_len, nkvh, dk, dv, dtype, device, dev_ids, ndev
-        )
-
-    def drop_kv_cache(self, kv_cache):
-        self.lib.dropKVCache(kv_cache)
-
-    def infer_batch(
-        self,
-        model,
-        tokens,
-        ntok,
-        req_lens,
-        nreq,
-        req_pos,
-        kv_caches,
-        temperature,
-        topk,
-        topp,
-        output,
-    ):
-        self.lib.Qwen3MoEinferBatch(
-            model,
-            tokens,
-            ntok,
-            req_lens,
-            nreq,
-            req_pos,
-            kv_caches,
-            temperature,
-            topk,
-            topp,
-            output,
-        )
-
-    def forward_batch(
-        self, model, tokens, ntok, req_lens, nreq, req_pos, kv_caches, logits
-    ):
-        self.lib.Qwen3MoEforwardBatch(
-            model, tokens, ntok, req_lens, nreq, req_pos, kv_caches, logits
-        )
     
+def __open_library__():
+    lib_path = os.path.join(
+        os.environ.get("INFINI_ROOT"), "lib", "libinfinicore_infer.so"
+    )
+    lib = ctypes.CDLL(lib_path)
+    
+    lib.Qwen3MoEcreateModel.restype = POINTER(Qwen3MoEModelCSruct)
+    lib.Qwen3MoEcreateModel.argtypes = [
+        POINTER(Qwen3MoEMetaCStruct),
+        POINTER(Qwen3MoEWeightsCStruct),
+        DeviceType,
+        c_int,
+        POINTER(c_int),
+    ]
+
+    lib.Qwen3MoEdestroyModel.argtypes = [POINTER(Qwen3MoEModelCSruct)]
+
+    lib.Qwen3MoEinferBatch.argtypes = [
+        POINTER(Qwen3MoEModelCSruct),
+        POINTER(c_uint),
+        c_uint,
+        POINTER(c_uint),
+        c_uint,
+        POINTER(c_uint),
+        POINTER(POINTER(KVCacheCStruct)),
+        POINTER(c_float),
+        POINTER(c_uint),
+        POINTER(c_float),
+        POINTER(c_uint),
+    ]
+
+    lib.Qwen3MoEforwardBatch.argtypes = [
+        POINTER(Qwen3MoEModelCSruct),
+        POINTER(c_uint),
+        c_uint,
+        POINTER(c_uint),
+        c_uint,
+        POINTER(c_uint),
+        POINTER(POINTER(KVCacheCStruct)),
+        c_void_p,
+    ]
+
+    lib.Qwen3MoEinferBatchPaged.argtypes = [
+        POINTER(Qwen3MoEModelCSruct),
+        POINTER(c_uint),
+        c_uint,
+        POINTER(c_uint),
+        c_uint,
+        POINTER(c_uint),
+        POINTER(POINTER(KVCacheCStruct)),
+        POINTER(c_int),  # unsigned int const *block_tables
+        POINTER(c_int),  # unsigned int const *slot_mapping
+        POINTER(c_float),
+        POINTER(c_uint),
+        POINTER(c_float),
+        c_uint,  # unsigned int is_prefill
+        c_bool,  # bool enable_paged_attn
+        POINTER(c_uint),  # unsigned int *output
+    ]
+
+    lib.Qwen3MoEforwardBatchPaged.argtypes = [
+        POINTER(Qwen3MoEModelCSruct),  # struct JiugeModel const *
+        POINTER(c_uint),  # unsigned int const *tokens
+        c_uint,  # unsigned int ntok
+        POINTER(c_uint),  # unsigned int const *req_lens
+        c_uint,  # unsigned int nreq
+        POINTER(c_uint),  # unsigned int const *req_pos
+        POINTER(POINTER(KVCacheCStruct)),  # struct KVCache **kv_caches
+        POINTER(c_int),  # unsigned int const *block_tables
+        POINTER(c_int),  # unsigned int const *slot_mapping
+        c_uint,  # unsigned int is_prefill
+        c_bool,  # bool enable_paged_attn
+        c_void_p,  # void *logits
+    ]
+
+    return lib
+
+LIB = __open_library__()
+
+create_qwen3moe_model = LIB.Qwen3MoEcreateModel
+destroy_qwen3moe_model = LIB.Qwen3MoEdestroyModel
+
+infer_batch_qwen3moe = LIB.Qwen3MoEinferBatch
+forward_batch_qwen3moe = LIB.Qwen3MoEforwardBatch
+
+infer_batch_paged_qwen3moe = LIB.Qwen3MoEinferBatchPaged
+forward_batch_paged_qwen3moe = LIB.Qwen3MoEforwardBatchPaged

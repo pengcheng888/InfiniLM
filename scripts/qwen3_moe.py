@@ -8,92 +8,21 @@ import time
 import json
 import torch
 import transformers
+from easydict import EasyDict
 
 from libinfinicore_infer import (
-    Qwen3MoEModel,
-    Qwen3MoEMetaCStruct,
-    Qwen3MoEWeightsCStruct,
-    DataType,
     DeviceType,
     KVCacheCStruct,
+    Qwen3MoEModel,
+    Qwen3MoEMeta,
+    Qwen3MoEWeights,
+
 )
 from infer_task import InferTask, KVCache
-
 from ctypes import POINTER, c_float, c_int, c_uint, c_void_p, byref
-
 torch.set_default_device("cpu")
 
 
-
-class Qwen3MoEMeta(Qwen3MoEMetaCStruct):
-    def __init__(self, config: dict, dtype=torch.float16, max_tokens=None):
-        if dtype == torch.float16:
-            dt_ = DataType.INFINI_DTYPE_F16
-        elif dtype == torch.float32:
-            dt_ = DataType.INFINI_DTYPE_F32
-        elif dtype == torch.bfloat16:
-            dt_ = DataType.INFINI_DTYPE_BF16
-        else:
-            dt_ = DataType.INFINI_DTYPE_F16
-
-        super().__init__(
-            dt_logits=dt_,
-            nlayer=config["num_hidden_layers"],
-            d=config["hidden_size"],
-            nh=config["num_attention_heads"],
-            nkvh=config["num_key_value_heads"] if "num_key_value_heads" in config else config["num_attention_heads"],
-            dh=config["head_dim"] if "head_dim" in config else (config["hidden_size"] // config["num_attention_heads"]),
-            di=config["intermediate_size"],
-            dctx=config["max_position_embeddings"] if max_tokens is None else max_tokens,
-            dvoc=config["vocab_size"],
-            epsilon=config["rms_norm_eps"],
-            theta=config["rope_theta"] if "rope_theta" in config else 100000.0,
-            end_token=config["eos_token_id"],
-            #
-            _moe_intermediate_size=config["moe_intermediate_size"],
-            _shared_expert_intermediate_size=config["shared_expert_intermediate_size"] if "shared_expert_intermediate_size" in config else 0,
-            _num_experts=config["num_experts"],
-            _num_experts_per_tok=config["num_experts_per_tok"],
-            _norm_topk_prob=config["norm_topk_prob"],
-        )
-        self.torch_dtype_logits = dtype
-
-
-class Qwen3MoEWeights(Qwen3MoEWeightsCStruct):
-    def __init__(self,
-                 meta: Qwen3MoEMeta,
-                 state_dict: dict,
-                 torch_dt_mat=torch.float16,
-                 torch_dt_norm=torch.float32,
-                 ndev=1,
-                 transpose_weight: bool = True,
-                 ):
-        nlayer = meta.nlayer
-        nh = meta.nh
-        nkvh = meta.nkvh
-        dh = meta.dh
-        d = meta.d
-        di = meta.di
-        num_experts = meta._num_experts
-
-        assert nh % nkvh == 0
-        assert nh % ndev == 0
-        assert nkvh % ndev == 0
-        assert di % ndev == 0
-
-        torch_dt_logits = meta.torch_dtype_logits
-
-        _moe_intermediate_size = meta._moe_intermediate_size
-        _shared_expert_intermediate_size = meta._shared_expert_intermediate_size
-
-        _num_experts_per_tok = meta._num_experts_per_tok
-        _norm_topk_prob = meta._norm_topk_prob
-
-        super().__init__(nlayer, num_experts, nh, nkvh, d, di, dh, ndev,
-                         torch_dt_mat, torch_dt_logits, torch_dt_norm,
-                         transpose_weight,
-                         _moe_intermediate_size, _shared_expert_intermediate_size, _num_experts_per_tok, _norm_topk_prob,
-                         state_dict)
 
 
 class BatchedTask:
@@ -168,7 +97,10 @@ class Qwen3MoEForCauslLM:
 
         if "qwen3_moe" == config["model_type"] :
             state_dict = load_all_safetensors_from_dir(model_dir_path)
-            self.meta = Qwen3MoEMeta(self.config, max_tokens=max_tokens)
+        
+            config = EasyDict(config)
+
+            self.meta = Qwen3MoEMeta(config, max_tokens=max_tokens)
             self.weights = Qwen3MoEWeights(
                 self.meta,
                 state_dict,

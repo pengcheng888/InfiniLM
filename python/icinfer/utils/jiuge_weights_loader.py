@@ -16,6 +16,8 @@ import json
 import math
 import torch
 import transformers
+import sys
+from pathlib import Path
 
 from icinfer.engine.libinfinicore_infer import (
     JiugeMetaCStruct,
@@ -104,6 +106,7 @@ class JiugeMetaFromLlama(JiugeMetaCStruct):
         else:
             dt_ = DataType.INFINI_DTYPE_F16
 
+     
         self.scale_input = 1.0
         self.scale_output = 1.0
         self.scale_o = 1.0
@@ -479,6 +482,24 @@ def load_weights_to_cpu(
                 ndev=ndev,
                 transpose_weight=transpose_weight,
             )
+    elif "qwen3_moe" == hf_config.model_type:
+        from icinfer.engine.libinfinicore_infer_qwen import Qwen3MoEMeta, Qwen3MoEWeights,create_qwen3moe_model
+        
+        state_dict = load_all_safetensors_from_dir(model_dir_path)
+        logger.info(f"load over.")
+        load_statets_time = time.time()
+        meta = Qwen3MoEMeta(hf_config, max_tokens=max_tokens)
+        weights = Qwen3MoEWeights(
+            meta,
+            state_dict,
+            ndev=ndev,
+            transpose_weight=transpose_weight,
+        )
+        
+        global create_jiuge_model
+        create_jiuge_model = create_qwen3moe_model
+     
+ 
     else:
         raise ValueError("Unsupported model architecture")
 
@@ -500,6 +521,7 @@ def load_model(config: Config, device: DeviceType):
     ndev = config.tensor_parallel_size
     meta, weights = load_weights_to_cpu(config, device)
     dev_ids = (c_int * ndev)(*[i for i in range(ndev)])
+ 
     model = create_jiuge_model(
         byref(meta),
         byref(weights),
@@ -507,4 +529,5 @@ def load_model(config: Config, device: DeviceType):
         ndev,
         dev_ids,
     )
+  
     return model, meta

@@ -11,8 +11,10 @@ struct Weights;
 struct Model;
 
 struct Meta {
+    char model_type[128];
     infiniDtype_t dt_logits;
     size_t nlayer, d, nh, nkvh, dh, di, dctx, dvoc;
+    size_t kvcache_block_size;
     float epsilon, theta;
     uint32_t end_token;
     //
@@ -25,6 +27,8 @@ struct Meta {
 public:
     void print_info() const {
         printf("\n");
+        printf(" model_type : %s\n", model_type);
+        printf(" kvcache_block_size : %ld\n", kvcache_block_size);
         printf(" dt_logits : %d\n", dt_logits);
         printf(" nlayer : %ld\n", nlayer);
         printf(" d : %ld\n", d);
@@ -89,6 +93,17 @@ Qwen3MoEinferBatch(struct Qwen3MoE::Model *,
                    const float *temperature, const uint32_t *topk, const float *topp,
                    uint32_t *output);
 
+__C __export void
+Qwen3MoEinferBatchPaged(struct  Qwen3MoE::Model *,
+           const uint32_t *tokens, uint32_t ntok,
+           const uint32_t *req_lens, uint32_t nreq, const uint32_t *req_pos,
+           struct KVCache **kv_caches,
+           const int32_t *block_tables,
+           const int32_t *slot_mapping,
+           const float *temperature, const uint32_t *topk, const float *topp,
+           const uint32_t is_prefill, const bool enable_paged_attn,
+           uint32_t *output);
+
 /// @brief 批次推理一轮，输出 output embedding 后的 logits
 /// @param tokens 输入 token 地址
 /// @param ntok 输入 token 数量
@@ -103,5 +118,16 @@ Qwen3MoEforwardBatch(struct Qwen3MoE::Model *,
                      const uint32_t *req_lens, uint32_t nreq, const uint32_t *req_pos,
                      struct KVCache **kv_caches,
                      void *logits);
+
+
+__C __export void
+Qwen3MoEforwardBatchPaged(struct Qwen3MoE::Model *,
+             const uint32_t *tokens, uint32_t ntok,
+             const uint32_t *req_lens, uint32_t nreq, const uint32_t *req_pos,
+             struct KVCache **kv_caches,
+             const int32_t *block_tables,
+             const int32_t *slot_mapping,
+             const uint32_t is_prefill, const bool enable_paged_attn,
+             void *logits);
 
 #endif

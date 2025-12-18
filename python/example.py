@@ -8,11 +8,16 @@ from icinfer.engine.llm_engine import InfiniEngine
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model-path", type=str, default=None)
+    parser.add_argument("--model-path", type=str, default="/home/wangpengcheng/models/Qwen3-30B-A3B_small/")
+    #parser.add_argument("--model-path", type=str, default="/data-aisoft/mechdancer/models/Qwen3-30B-A3B/")
+    #parser.add_argument("--model-path", type=str, default="/data/shared/zhushuang/models/9G7B_MHA/")
+
     parser.add_argument("--device-type", type=str, default="nvidia")
     parser.add_argument("--ndev", type=int, default=1)
     parser.add_argument("--max-kvcache-tokens", type=int, default=10240)
-    parser.add_argument("--enable-paged-attn", action="store_true")
+    # parser.add_argument("--enable-paged-attn", action="store_true")
+    parser.add_argument("--enable-paged-attn",type=bool,default=True)
+
     args = parser.parse_args()
     return args
 
@@ -61,7 +66,7 @@ def main():
 
     prompts = [
         "山东最高的山是？",
-    ] * 16
+    ] *2
 
     prompts = [
         tokenizer.apply_chat_template(

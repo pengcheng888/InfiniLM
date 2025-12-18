@@ -76,7 +76,17 @@ class ModelRunner:
         self.dev_ids = (c_int * ndev)(*[i for i in range(ndev)])
 
         self.model, self.meta = load_model(self.config, device)
+        if b"qwen3_moe" ==getattr(self.meta, "model_type", None):
+            from icinfer.engine.libinfinicore_infer_qwen import destroy_qwen3moe_model
+            from icinfer.engine.libinfinicore_infer_qwen import infer_batch_paged_qwen3moe
+            from icinfer.engine.libinfinicore_infer_qwen import forward_batch_paged_qwen3moe
+            
+            global destroy_jiuge_model, infer_batch, forward_batch
+            destroy_jiuge_model = destroy_qwen3moe_model
+            infer_batch = infer_batch_paged_qwen3moe
+            forward_batch = forward_batch_paged_qwen3moe
 
+        
         eos_token_id = self.hf_config.eos_token_id
         self.eos_token_id = (
             [eos_token_id] if type(eos_token_id) == int else eos_token_id
@@ -122,6 +132,7 @@ class ModelRunner:
         return method(*args)
 
     def allocate_paged_kv_cache(self):
+      
         kv_cache = self.create_paged_kv_cache(
             self.meta.nlayer,
             self.meta.nkvh,
@@ -236,6 +247,17 @@ class ModelRunner:
     def create_kv_cache(
         self, nlayers, max_len, nkvh, dk, dv, dtype, device, dev_ids, ndev
     ):
+        # 确保 dtype 是整数类型，如果是 DataType 枚举则转换为 int
+        if hasattr(dtype, 'value'):
+            dtype = dtype.value
+        elif not isinstance(dtype, int):
+            dtype = int(dtype)
+        # 确保 device 是整数类型，如果是 DeviceType 枚举则转换为 int
+        if hasattr(device, 'value'):
+            device = device.value
+        elif not isinstance(device, int):
+            device = int(device)
+        
         return create_kv_cache(
             nlayers, max_len, nkvh, dk, dv, dtype, device, dev_ids, ndev
         )
@@ -255,6 +277,18 @@ class ModelRunner:
         dev_ids,
         ndev,
     ):
+        # 确保 dtype 是整数类型，如果是 DataType 枚举则转换为 int
+        if hasattr(dtype, 'value'):
+            dtype = dtype.value
+        elif not isinstance(dtype, int):
+            dtype = int(dtype)
+        # 确保 device 是整数类型，如果是 DeviceType 枚举则转换为 int
+        if hasattr(device, 'value'):
+            device = device.value
+        elif not isinstance(device, int):
+            device = int(device)
+        
+        print("create_paged_kv_cache.... ", dtype, type(dtype), device, type(device))
         return create_paged_kv_cache(
             nlayer,
             nkvh,
@@ -285,6 +319,7 @@ class ModelRunner:
             )
         else:
             batch_inputs = InferBatchedTask(tasks, is_prefill)
+
         infer_batch(
             self.model,
             *(batch_inputs.input_args()),

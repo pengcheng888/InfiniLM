@@ -136,7 +136,8 @@ void releaseDeviceResource(DeviceResource<WeightsTensor> &res) {
 template <typename WeightsTensor, typename Meta, typename Weights>
 void launchDevice(const Meta &meta, const Weights *weights, DeviceResource<WeightsTensor> *rsrc, InferState &state, InferRequest &req,
                   infiniDevice_t device, int idev, int ndev, int dev_id, infinicclComm_t comm,
-                  void (*inferDeviceBatch)(const Meta *, DeviceResource<WeightsTensor> &, uint32_t, uint32_t, const uint32_t *, uint32_t, const uint32_t *, uint32_t, const uint32_t *, struct KVCache **kv_caches, const float *, const uint32_t *, const float *, uint32_t *, void *)) {
+                  void (*inferDeviceBatch)(const Meta *, DeviceResource<WeightsTensor> &, uint32_t, uint32_t, const uint32_t *, uint32_t, const uint32_t *, uint32_t, const uint32_t *, struct KVCache **kv_caches, const float *, const uint32_t *, const float *, uint32_t *, void *),
+                  void (*inferDeviceBatchPaged)(const Meta *, DeviceResource<WeightsTensor> &, uint32_t, uint32_t, const uint32_t *, uint32_t, const uint32_t *, uint32_t, const uint32_t *, struct KVCache **kv_caches, const int32_t *, const int32_t *, const float *, const uint32_t *, const float *, uint32_t, bool, uint32_t *, void *)) {
     // Input validation
     if (rsrc == nullptr) {
         throw std::invalid_argument("launchDevice: rsrc cannot be nullptr");
@@ -172,9 +173,20 @@ void launchDevice(const Meta &meta, const Weights *weights, DeviceResource<Weigh
             break;
         }
 
-        inferDeviceBatch(&meta, *rsrc, idev, ndev, req.tokens, req.ntok,
-                         req.req_lens, req.nreq, req.req_pos, req.kv_caches,
-                         req.temperature, req.topk, req.topp, req.output, req.logits);
+        bool enable_paged = meta.kvcache_block_size != 0;
+        if (enable_paged) {
+            inferDeviceBatchPaged(&meta, *rsrc, idev, ndev, req.tokens, req.ntok,
+                req.req_lens, req.nreq, req.req_pos, req.kv_caches,
+                req.block_tables, req.slot_mapping,
+                req.temperature, req.topk, req.topp,
+                req.is_prefill, req.enable_paged_attn,
+                req.output, req.logits);
+
+        } else {
+            inferDeviceBatch(&meta, *rsrc, idev, ndev, req.tokens, req.ntok,
+                             req.req_lens, req.nreq, req.req_pos, req.kv_caches,
+                             req.temperature, req.topk, req.topp, req.output, req.logits);
+        }
 
         state.proceed = false;
         lock.unlock();
@@ -250,6 +262,89 @@ void forwardBatch(Model *model,
     model->req.temperature = nullptr;
     model->req.topk = nullptr;
     model->req.topp = nullptr;
+
+    for (size_t idev = 0; idev < model->dev_ids.size(); idev++) {
+        std::unique_lock<std::mutex> lock(model->states[idev].mtx);
+        model->states[idev].proceed = true;
+        lock.unlock();
+        model->states[idev].cv_start.notify_one();
+    }
+    for (size_t i = model->dev_ids.size(); i > 0; i--) {
+        auto idev = i - 1;
+        std::unique_lock<std::mutex> lock(model->states[idev].mtx);
+        model->states[idev].cv_done.wait(lock, [&] { return !(model->states[idev].proceed); });
+        lock.unlock();
+    }
+}
+
+template <typename Model>
+void inferBatchPaged(Model *model,
+                     const uint32_t *tokens, uint32_t ntok,
+                     const uint32_t *req_lens, uint32_t nreq, const uint32_t *req_pos,
+                     KVCache **kv_caches,
+                     const int32_t *block_tables,
+                     const int32_t *slot_mapping,
+                     const float *temperature, const uint32_t *topk, const float *topp,
+                     const uint32_t is_prefill, const bool enable_paged_attn,
+                     uint32_t *output) {
+    if (model == nullptr) {
+        throw std::invalid_argument("inferBatchPaged: model cannot be nullptr");
+    }
+
+    model->req.tokens = tokens;
+    model->req.ntok = ntok;
+    model->req.req_lens = req_lens;
+    model->req.nreq = nreq;
+    model->req.req_pos = req_pos;
+    model->req.kv_caches = kv_caches;
+    model->req.block_tables = block_tables;
+    model->req.slot_mapping = slot_mapping;
+    model->req.output = output;
+    model->req.logits = nullptr;
+    model->req.temperature = temperature;
+    model->req.topk = topk;
+    model->req.topp = topp;
+    model->req.is_prefill = is_prefill;
+    model->req.enable_paged_attn = enable_paged_attn;
+
+    for (size_t idev = 0; idev < model->dev_ids.size(); idev++) {
+        std::unique_lock<std::mutex> lock(model->states[idev].mtx);
+        model->states[idev].proceed = true;
+        lock.unlock();
+        model->states[idev].cv_start.notify_one();
+    }
+    for (size_t i = model->dev_ids.size(); i > 0; i--) {
+        auto idev = i - 1;
+        std::unique_lock<std::mutex> lock(model->states[idev].mtx);
+        model->states[idev].cv_done.wait(lock, [&] { return !(model->states[idev].proceed); });
+        lock.unlock();
+    }
+}
+
+template <typename Model>
+void forwardBatchPaged(Model *model,
+                       const uint32_t *tokens, uint32_t ntok,
+                       const uint32_t *req_lens, uint32_t nreq, const uint32_t *req_pos,
+                       KVCache **kv_caches,
+                       const int32_t *block_tables,
+                       const int32_t *slot_mapping,
+                       const uint32_t is_prefill, const bool enable_paged_attn,
+                       void *logits) {
+    model->req.tokens = tokens;
+    model->req.ntok = ntok;
+    model->req.req_lens = req_lens;
+    model->req.nreq = nreq;
+    model->req.req_pos = req_pos;
+    model->req.kv_caches = kv_caches;
+    model->req.block_tables = block_tables;
+    model->req.slot_mapping = slot_mapping;
+    model->req.output = nullptr;
+    model->req.logits = logits;
+    model->req.temperature = nullptr;
+    model->req.topk = nullptr;
+    model->req.topp = nullptr;
+    model->req.is_prefill = is_prefill;
+    model->req.enable_paged_attn = enable_paged_attn;
 
     for (size_t idev = 0; idev < model->dev_ids.size(); idev++) {
         std::unique_lock<std::mutex> lock(model->states[idev].mtx);
