@@ -137,7 +137,7 @@ template <typename WeightsTensor, typename Meta, typename Weights>
 void launchDevice(const Meta &meta, const Weights *weights, DeviceResource<WeightsTensor> *rsrc, InferState &state, InferRequest &req,
                   infiniDevice_t device, int idev, int ndev, int dev_id, infinicclComm_t comm,
                   void (*inferDeviceBatch)(const Meta *, DeviceResource<WeightsTensor> &, uint32_t, uint32_t, const uint32_t *, uint32_t, const uint32_t *, uint32_t, const uint32_t *, struct KVCache **kv_caches, const float *, const uint32_t *, const float *, uint32_t *, void *),
-                  void (*inferDeviceBatchPaged)(const Meta *, DeviceResource<WeightsTensor> &, uint32_t, uint32_t, const uint32_t *, uint32_t, const uint32_t *, uint32_t, const uint32_t *, struct KVCache **kv_caches, const int32_t *, const int32_t *, const float *, const uint32_t *, const float *, uint32_t, bool, uint32_t *, void *)) {
+                  void (*inferDeviceBatchPaged)(const Meta &, DeviceResource<WeightsTensor> &, uint32_t, uint32_t, const uint32_t *, uint32_t, const uint32_t *, uint32_t, const uint32_t *, struct KVCache **kv_caches, const int32_t *, const int32_t *, const float *, const uint32_t *, const float *, uint32_t, bool, uint32_t *, void *)) {
     // Input validation
     if (rsrc == nullptr) {
         throw std::invalid_argument("launchDevice: rsrc cannot be nullptr");
@@ -175,12 +175,12 @@ void launchDevice(const Meta &meta, const Weights *weights, DeviceResource<Weigh
 
         bool enable_paged = meta.kvcache_block_size != 0;
         if (enable_paged) {
-            inferDeviceBatchPaged(&meta, *rsrc, idev, ndev, req.tokens, req.ntok,
-                req.req_lens, req.nreq, req.req_pos, req.kv_caches,
-                req.block_tables, req.slot_mapping,
-                req.temperature, req.topk, req.topp,
-                req.is_prefill, req.enable_paged_attn,
-                req.output, req.logits);
+            inferDeviceBatchPaged(meta, *rsrc, idev, ndev, req.tokens, req.ntok,
+                                  req.req_lens, req.nreq, req.req_pos, req.kv_caches,
+                                  req.block_tables, req.slot_mapping,
+                                  req.temperature, req.topk, req.topp,
+                                  req.is_prefill, req.enable_paged_attn,
+                                  req.output, req.logits);
 
         } else {
             inferDeviceBatch(&meta, *rsrc, idev, ndev, req.tokens, req.ntok,

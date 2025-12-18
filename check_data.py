@@ -18,21 +18,22 @@ def read_binary_file(filename, dtype=np.float16):
         print(f"读取文件出错: {e}")
         return None
 
-if __name__ == '__main__':
+
+def func1():
     # ---------------- c++ 数据 ------------------ #
-    file_path = f"0_o_ok.bin"
-    data_array0 = read_binary_file(file_path, dtype=np.float16)
-    data_array0 = torch.Tensor(data_array0)
-    print("file_path:: ", data_array0.shape, data_array0)
+    # file_path = f"0_o_ok.bin"
+    # data_array0 = read_binary_file(file_path, dtype=np.float16)
+    # data_array0 = torch.Tensor(data_array0)
+    # print("file_path:: ", data_array0.shape, data_array0)
 
     # ---------------- c++ 数据 ------------------ #
-    file_path = f"0_o.bin"
+    file_path = f"logits_in.bin"
     data_array = read_binary_file(file_path, dtype=np.float16)
     data_array = torch.Tensor(data_array)
     print("file_path:: ", data_array.shape, data_array)
 
     # ---------------- c++ 数据 ------------------ #
-    file_path = f"0_temp.bin"
+    file_path = f"logits_in_2.bin"
     data_array_attn_val_gemm = read_binary_file(file_path, dtype=np.float16)
     data_array_attn_val_gemm = torch.Tensor(data_array_attn_val_gemm)
     print("file_path:: ", data_array_attn_val_gemm.shape, data_array_attn_val_gemm)
@@ -46,6 +47,28 @@ if __name__ == '__main__':
 
     # ---------------- 比较 数据 ------------------ #
     diff = (data_array0 - data_array[:69632]).abs()
-    print("diff sort: ", torch.sort(diff)[0][-10:] )
-    print("diff sort: ", torch.sort(diff)[1][-10:] )
+    print("diff sort: ", torch.sort(diff)[0][-10:])
+    print("diff sort: ", torch.sort(diff)[1][-10:])
     print("\n")
+
+
+if __name__ == "__main__":
+    # ---------------- c++ 数据 ------------------ #
+    file_path = f"logits_in.bin"
+    data_array = read_binary_file(file_path, dtype=np.float16)
+    data_array = torch.Tensor(data_array)
+    print("file_path:: ", data_array.shape, data_array)
+
+    # ---------------- c++ 数据 ------------------ #
+    file_path = f"logits_in_2.bin"
+    logits_in_2 = read_binary_file(file_path, dtype=np.float16)
+    logits_in_2 = torch.Tensor(logits_in_2)
+    print("file_path:: ", logits_in_2.shape, logits_in_2)
+
+    # ---------------- 比较 数据 ------------------ #
+    diff = (data_array - logits_in_2[34816:]).abs()
+    print("diff sort: ", torch.sort(diff)[0][-10:])
+    print("diff sort: ", torch.sort(diff)[1][-10:])
+    print("\n")
+
+    exit()

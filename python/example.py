@@ -8,18 +8,29 @@ from icinfer.engine.llm_engine import InfiniEngine
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model-path", type=str, default="/home/wangpengcheng/models/Qwen3-30B-A3B_small/")
-    #parser.add_argument("--model-path", type=str, default="/data-aisoft/mechdancer/models/Qwen3-30B-A3B/")
-    #parser.add_argument("--model-path", type=str, default="/data/shared/zhushuang/models/9G7B_MHA/")
+    # parser.add_argument("--model-path", type=str, default="/home/wangpengcheng/models/Qwen3-30B-A3B_small/")
+    # parser.add_argument(
+    #     "--model-path",
+    #     type=str,
+    #     default="/home/ubuntu/models/Qwen/Qwen3-30B-A3B_small/",
+    # )
+    parser.add_argument(
+        "--model-path",
+        type=str,
+        default="/home/ubuntu/models/Jiuge/FM9G_70B_SFT_MHA_layer0/",
+    )
+    # parser.add_argument("--model-path", type=str, default="/data-aisoft/mechdancer/models/Qwen3-30B-A3B/")
+    # parser.add_argument("--model-path", type=str, default="/data/shared/zhushuang/models/9G7B_MHA/")
 
     parser.add_argument("--device-type", type=str, default="nvidia")
     parser.add_argument("--ndev", type=int, default=1)
     parser.add_argument("--max-kvcache-tokens", type=int, default=10240)
     # parser.add_argument("--enable-paged-attn", action="store_true")
-    parser.add_argument("--enable-paged-attn",type=bool,default=True)
+    parser.add_argument("--enable-paged-attn", type=bool, default=True)
 
     args = parser.parse_args()
     return args
+
 
 def main():
     args = parse_args()
@@ -51,44 +62,51 @@ def main():
         path,
         device=device_type,
         ndev=args.ndev,
-        enforce_eager=True, 
+        enforce_eager=True,
         tensor_parallel_size=args.ndev,
-        trust_remote_code=True, 
+        trust_remote_code=True,
         attention_bias=True,
         enable_paged_attn=args.enable_paged_attn,
-        max_kvcache_tokens=max_kvcache_tokens
+        max_kvcache_tokens=max_kvcache_tokens,
     )
 
-    sampling_params = SamplingParams(
-        temperature=0.6,
-        max_tokens=128
-    )
+    sampling_params = SamplingParams(temperature=0.6, max_tokens=128)
 
     prompts = [
         "山东最高的山是？",
-    ] *2
+    ] * 3
 
     prompts = [
         tokenizer.apply_chat_template(
             [{"role": "user", "content": prompt}],
             tokenize=False,
             add_generation_prompt=True,
-            enable_thinking=False
+            enable_thinking=False,
         )
         for prompt in prompts
     ]
-    outputs, avg_prefill_throughput, avg_decode_throughput,  avg_ttft, avg_tbt, cache_efficiency = llm.generate(prompts, sampling_params)
+    (
+        outputs,
+        avg_prefill_throughput,
+        avg_decode_throughput,
+        avg_ttft,
+        avg_tbt,
+        cache_efficiency,
+    ) = llm.generate(prompts, sampling_params)
 
     for prompt, output in zip(prompts, outputs):
         print("\n")
         print(f"Prompt: {prompt!r}")
         print(f"Completion: {output['text']!r}")
-    print(f"batch_size: {len(prompts)}, n_dev: {args.ndev}, is_paged_attn: {args.enable_paged_attn}")
+    print(
+        f"batch_size: {len(prompts)}, n_dev: {args.ndev}, is_paged_attn: {args.enable_paged_attn}"
+    )
     print(f"Avg Prefill Throughput: {avg_prefill_throughput:.2f} tok/s")
     print(f"Avg Decode Throughput: {avg_decode_throughput:.2f} tok/s")
-    print(f"Avg TTFT: {avg_ttft*1000:.2f} ms")
-    print(f"Avg TBT: {avg_tbt*1000:.2f} ms")
-    print(f"Cache Efficiency: {cache_efficiency*100:.2f}%")
+    print(f"Avg TTFT: {avg_ttft * 1000:.2f} ms")
+    print(f"Avg TBT: {avg_tbt * 1000:.2f} ms")
+    print(f"Cache Efficiency: {cache_efficiency * 100:.2f}%")
+
 
 if __name__ == "__main__":
     main()
