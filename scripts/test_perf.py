@@ -28,8 +28,8 @@ PROMPTS = [
     "想象一下，如果每个人都能读懂他人的思想。"
 ]
 
-NUM_REQUESTS = 10
-CONCURRENCY = 5
+NUM_REQUESTS = 1
+CONCURRENCY = 1
 API_URL = "http://127.0.0.1:8000"
 MODEL = "FM9G-7B"
 
