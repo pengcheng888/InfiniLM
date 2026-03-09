@@ -14,7 +14,7 @@
 ////////////////////////////////           Model API            ////////////////////////////////////////////
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-__C Qwen3::Model *Qwen3createModel(const Qwen3::Meta *meta,
+__INFINI_C Qwen3::Model *Qwen3createModel(const Qwen3::Meta *meta,
                                    const Qwen3::Weights *weight,
                                    infiniDevice_t device,
                                    int ndev,
@@ -23,7 +23,7 @@ __C Qwen3::Model *Qwen3createModel(const Qwen3::Meta *meta,
 }
 
 /// @brief 销毁模型
-__C void Qwen3destroyModel(struct Qwen3::Model *model) {
+__INFINI_C void Qwen3destroyModel(struct Qwen3::Model *model) {
     destroyModel<Qwen3::Model>(model);
 }
 
@@ -31,26 +31,26 @@ __C void Qwen3destroyModel(struct Qwen3::Model *model) {
 ////////////////////////////////           KVCache API            ////////////////////////////////////////////
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////
 /// @brief 创建 KV Cache
-__C KVCache *Qwen3createKVCache(const Qwen3::Model *model) {
+__INFINI_C KVCache *Qwen3createKVCache(const Qwen3::Model *model) {
     return createKVCache<Qwen3::Model>(model);
 }
 
 /// @brief 复制 KV Cache
-__C KVCache *
+__INFINI_C KVCache *
 Qwen3duplicateKVCache(const Qwen3::Model *model,
                       const KVCache *kv_cache, uint32_t seq_len) {
     return duplicateKVCache<Qwen3::Model>(model, kv_cache, seq_len);
 }
 
 /// @brief 销毁 KV Cache
-__C void Qwen3dropKVCache(const Qwen3::Model *model, KVCache *kv_cache) {
+__INFINI_C void Qwen3dropKVCache(const Qwen3::Model *model, KVCache *kv_cache) {
     dropKVCache<Qwen3::Model>(model, kv_cache);
 }
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ////////////////////////////////           infer API            //////////////////////////////////////////////
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////
-__C void Qwen3inferBatch(struct Qwen3::Model *model,
+__INFINI_C void Qwen3inferBatch(struct Qwen3::Model *model,
                          const uint32_t *tokens, uint32_t ntok,
                          const uint32_t *req_lens, uint32_t nreq, const uint32_t *req_pos,
                          KVCache **kv_caches,
@@ -61,7 +61,7 @@ __C void Qwen3inferBatch(struct Qwen3::Model *model,
                              kv_caches, temperature, topk, topp, output);
 }
 
-__C void Qwen3forwardBatch(Qwen3::Model *model,
+__INFINI_C void Qwen3forwardBatch(Qwen3::Model *model,
                            const uint32_t *tokens, uint32_t ntok,
                            const uint32_t *req_lens, uint32_t nreq, const uint32_t *req_pos,
                            KVCache **kv_caches,
