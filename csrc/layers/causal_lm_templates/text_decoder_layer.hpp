@@ -35,19 +35,21 @@ public:
         mlp_ = this->register_module<MLP>("mlp", model_config, device);
     }
 
-    std::tuple<infinicore::Tensor, infinicore::Tensor> forward(infinicore::Tensor &hidden_states,
+    std::tuple<infinicore::Tensor, infinicore::Tensor> forward(const infinicore::Tensor &positions,
+                                                               infinicore::Tensor &hidden_states,
                                                                infinicore::Tensor &residual) {
         input_layernorm_->forward_inplace(hidden_states, residual);
-        hidden_states = self_attn_->forward(hidden_states);
+        hidden_states = self_attn_->forward(positions, hidden_states);
         post_attention_layernorm_->forward_inplace(hidden_states, residual);
         hidden_states = mlp_->forward(hidden_states);
         return std::make_tuple(hidden_states, residual);
     }
 
-    infinicore::Tensor forward(infinicore::Tensor &hidden_states) {
+    infinicore::Tensor forward(const infinicore::Tensor &positions,
+                               infinicore::Tensor &hidden_states) {
         auto residual = hidden_states;
         hidden_states = input_layernorm_->forward(hidden_states);
-        hidden_states = self_attn_->forward(hidden_states);
+        hidden_states = self_attn_->forward(positions, hidden_states);
         hidden_states = infinicore::op::add(residual, hidden_states);
 
         residual = hidden_states;
@@ -58,12 +60,6 @@ public:
     }
 
     size_t layer_idx() const { return layer_idx_; }
-
-    void set_rotary_emb(const std::shared_ptr<infinicore::nn::RoPE> &rotary_emb) {
-        if (self_attn_) {
-            self_attn_->set_rotary_emb(rotary_emb);
-        }
-    }
 
 protected:
     INFINICORE_NN_MODULE(infinicore::nn::RMSNorm, input_layernorm);

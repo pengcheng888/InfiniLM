@@ -68,7 +68,6 @@ void PagedCompiler::compile() {
 
             // Attention reads attn_metadata from thread-local forward context.
             infinilm::global_state::get_forward_context().attn_metadata = {
-                input.position_ids,
                 input.past_sequence_lengths,
                 input.total_sequence_lengths,
                 input.input_offsets,

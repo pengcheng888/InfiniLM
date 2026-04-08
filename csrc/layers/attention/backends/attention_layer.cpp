@@ -9,7 +9,7 @@ AttentionLayer::AttentionLayer(size_t num_heads,
                                size_t layer_idx,
                                infinicore::Tensor k_scale,
                                infinicore::Tensor v_scale,
-                               ::infinilm::backends::AttentionBackend attn_backend) : k_scale_(k_scale), v_scale_(v_scale), attn_backend_(attn_backend) {
+                               ::infinilm::backends::AttentionBackend attn_backend) : k_scale_(k_scale), v_scale_(v_scale), layer_idx_(layer_idx), attn_backend_(attn_backend) {
     switch (attn_backend) {
     case ::infinilm::backends::AttentionBackend::STATIC_ATTN:
         attn_backend_impl_ = std::make_shared<backends::StaticAttentionImpl>(num_heads, head_size, scale, num_kv_heads, layer_idx);
@@ -27,19 +27,10 @@ AttentionLayer::AttentionLayer(size_t num_heads,
 
 infinicore::Tensor AttentionLayer::forward(infinicore::Tensor &query,
                                            infinicore::Tensor &key,
-                                           infinicore::Tensor &value,
-                                           std::tuple<infinicore::Tensor, infinicore::Tensor> kv_cache,
-                                           const infinilm::global_state::AttentionMetadata &attn_metadata) const {
-    // switch (attn_backend_) {
-    // case ::infinilm::backends::AttentionBackend::STATIC_ATTN:
-    //     return std::get<std::shared_ptr<backends::StaticAttentionImpl>>(attn_backend_impl_)->forward(*this, query, key, value, kv_cache, attn_metadata);
-    // case ::infinilm::backends::AttentionBackend::PAGED_ATTN:
-    //     return std::get<std::shared_ptr<backends::PagedAttentionImpl>>(attn_backend_impl_)->forward(*this, query, key, value, kv_cache, attn_metadata);
-    // case ::infinilm::backends::AttentionBackend::FLASH_ATTN:
-    //     return std::get<std::shared_ptr<backends::FlashAttentionImpl>>(attn_backend_impl_)->forward(*this, query, key, value, kv_cache, attn_metadata);
-    // default:
-    //     throw std::runtime_error("infinilm::layers::attention::AttentionLayer::forward: unsupported attention backend");
-    // }
+                                           infinicore::Tensor &value) const {
+    auto &forward_context = infinilm::global_state::get_forward_context();
+    auto &attn_metadata = forward_context.attn_metadata;
+    auto &kv_cache = forward_context.kv_cache_vec[layer_idx_];
 
     return std::visit(
         [&](auto &impl_ptr) -> infinicore::Tensor {

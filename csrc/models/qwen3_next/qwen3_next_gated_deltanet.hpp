@@ -29,7 +29,8 @@ public:
                            size_t layer_idx,
                            const infinicore::Device &device);
 
-    infinicore::Tensor forward(const infinicore::Tensor &hidden_states) const;
+    infinicore::Tensor forward(const infinicore::Tensor &positions,
+                               const infinicore::Tensor &hidden_states) const;
 
 private:
     INFINICORE_NN_MODULE(infinilm::layers::linear::ReplicatedLinear, in_proj_qkvz);

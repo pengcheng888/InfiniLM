@@ -7,7 +7,6 @@
 #include "infinicore/tensor.hpp"
 
 #include <optional>
-#include <tuple>
 #include <vector>
 
 namespace infinilm {
@@ -50,7 +49,7 @@ public:
     }
 
 protected:
-    std::vector<std::tuple<infinicore::Tensor, infinicore::Tensor>> default_allocate_kv_cache_tensors(
+    std::vector<infinicore::Tensor> default_allocate_kv_cache_tensors(
         const cache::CacheConfig *cache_config,
         const std::shared_ptr<infinilm::config::ModelConfig> &text_config,
         const backends::AttentionBackend &attention_backend);
