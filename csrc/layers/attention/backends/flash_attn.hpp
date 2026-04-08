@@ -2,7 +2,6 @@
 
 #include "../../../global_state/global_state.hpp"
 #include "infinicore/tensor.hpp"
-#include <cstddef>
 #include <tuple>
 
 namespace infinilm::layers::attention {
@@ -28,19 +27,19 @@ public:
      * @param value: Value tensor, shape `[num_tokens, num_kv_heads, head_dim]`.
      * @param kv_cache: `(k_cache, v_cache)` paged KV tensors for this layer.
      * @param attn_metadata: Attention metadata.
-     * @return Attention output, shape `[num_tokens, num_heads * head_dim]`.
+     * @return Attention output, shape `[1, num_tokens, num_heads * head_dim]`.
      */
     infinicore::Tensor forward(const AttentionLayer &layer,
                                const infinicore::Tensor &query,
                                const infinicore::Tensor &key,
                                const infinicore::Tensor &value,
-                               std::tuple<infinicore::Tensor, infinicore::Tensor> kv_cache,
+                               infinicore::Tensor &kv_cache,
                                const infinilm::global_state::AttentionMetadata &attn_metadata) const;
 
     std::tuple<infinicore::Tensor, infinicore::Tensor> do_kv_cache_update(const AttentionLayer &layer,
                                                                           const infinicore::Tensor key,
                                                                           const infinicore::Tensor value,
-                                                                          std::tuple<infinicore::Tensor, infinicore::Tensor> kv_cache,
+                                                                          infinicore::Tensor &kv_cache,
                                                                           const infinicore::Tensor slot_mapping) const;
 
 private:

@@ -20,7 +20,7 @@ void InfinilmModel::reset_cache(const cache::CacheConfig *cache_config) {
     kv_cache_vec = std::move(default_allocate_kv_cache_tensors(cache_config, model_config_, attention_backend));
 }
 
-std::vector<std::tuple<infinicore::Tensor, infinicore::Tensor>> InfinilmModel::default_allocate_kv_cache_tensors(
+std::vector<infinicore::Tensor> InfinilmModel::default_allocate_kv_cache_tensors(
     const cache::CacheConfig *cache_config,
     const std::shared_ptr<infinilm::config::ModelConfig> &text_config,
     const backends::AttentionBackend &attention_backend) {
@@ -31,7 +31,7 @@ std::vector<std::tuple<infinicore::Tensor, infinicore::Tensor>> InfinilmModel::d
         throw std::runtime_error("infinilm::InfinilmModel::default_allocate_kv_cache_tensors: text_config is null");
     }
 
-    std::vector<std::tuple<infinicore::Tensor, infinicore::Tensor>> kv_cache_vec;
+    std::vector<infinicore::Tensor> kv_cache_vec;
     switch (attention_backend) {
     case backends::AttentionBackend::STATIC_ATTN: {
         auto static_kv_cache_config = dynamic_cast<const cache::StaticKVCacheConfig *>(cache_config);

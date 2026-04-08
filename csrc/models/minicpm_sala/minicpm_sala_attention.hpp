@@ -56,7 +56,8 @@ public:
                       size_t layer_idx,
                       const infinicore::Device &device);
 
-    infinicore::Tensor forward(const infinicore::Tensor &hidden_states) const;
+    infinicore::Tensor forward(const infinicore::Tensor &positions,
+                               const infinicore::Tensor &hidden_states) const;
 
 protected:
     bool use_output_gate_;
@@ -72,7 +73,8 @@ public:
                        size_t layer_idx,
                        const infinicore::Device &device);
 
-    infinicore::Tensor forward(const infinicore::Tensor &hidden_states) const;
+    infinicore::Tensor forward(const infinicore::Tensor &positions,
+                               const infinicore::Tensor &hidden_states) const;
 
 protected:
     bool qk_norm_;

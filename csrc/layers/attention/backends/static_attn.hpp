@@ -24,13 +24,13 @@ public:
                                infinicore::Tensor &q_reshaped, // query
                                infinicore::Tensor &k_permuted, // key
                                infinicore::Tensor &v_permuted, // value
-                               std::tuple<infinicore::Tensor, infinicore::Tensor> kv_cache,
+                               infinicore::Tensor &kv_cache,
                                const infinilm::global_state::AttentionMetadata &attn_metadata) const;
 
     std::tuple<infinicore::Tensor, infinicore::Tensor> do_kv_cache_update(const AttentionLayer &layer,
                                                                           const infinicore::Tensor key,
                                                                           const infinicore::Tensor value,
-                                                                          std::tuple<infinicore::Tensor, infinicore::Tensor> kv_cache,
+                                                                          infinicore::Tensor &kv_cache,
                                                                           const infinicore::Tensor past_sequence_lengths) const;
 
 private:

@@ -77,7 +77,7 @@ StaticKVCache::StaticKVCache(
         rank_info.device);
 }
 
-std::tuple<infinicore::Tensor, infinicore::Tensor> StaticKVCache::create_layer_kv_cache(
+infinicore::Tensor StaticKVCache::create_layer_kv_cache(
     const infinicore::Size k_dim,
     const infinicore::Size v_dim,
     const infinicore::Size num_k_heads,
@@ -85,34 +85,26 @@ std::tuple<infinicore::Tensor, infinicore::Tensor> StaticKVCache::create_layer_k
     const infinicore::Size max_positional_embedding,
     const infinicore::DataType dtype,
     const StaticKVCacheConfig &config) {
+    ASSERT((num_k_heads == num_v_heads) && (k_dim == v_dim));
 
     const engine::distributed::RankInfo &rank_info = infinilm::global_state::get_tensor_model_parallel_rank_info();
 
     size_t rank_batch_size = (config.max_batch_size());
-    size_t num_rank_k_heads = (num_k_heads / rank_info.tp_size);
-    size_t num_rank_v_heads = (num_v_heads / rank_info.tp_size);
-
+    size_t num_rank_kv_heads = (num_k_heads / rank_info.tp_size);
+    size_t kv_dim = k_dim;
     size_t cache_len = (config.max_cache_len() == std::numeric_limits<infinicore::Size>::max() || config.max_cache_len() == 0 ? max_positional_embedding : config.max_cache_len());
 
-    // Allocate K cache
-    infinicore::Tensor k_caches = infinicore::Tensor::empty(
-        {rank_batch_size,
-         num_rank_k_heads,
+    // Allocate KV cache
+    infinicore::Tensor kv_cache = infinicore::Tensor::empty(
+        {2,
+         rank_batch_size,
+         num_rank_kv_heads,
          cache_len,
-         k_dim},
+         kv_dim},
         dtype,
         rank_info.device);
 
-    // Allocate V cache
-    infinicore::Tensor v_caches = infinicore::Tensor::empty(
-        {rank_batch_size,
-         num_rank_v_heads,
-         cache_len,
-         v_dim},
-        dtype,
-        rank_info.device);
-
-    return {k_caches, v_caches};
+    return kv_cache;
 }
 
 std::tuple<infinicore::Tensor, infinicore::Tensor>
@@ -221,41 +213,34 @@ PagedKVCache::PagedKVCache(
         rank_info.device);
 }
 
-std::tuple<infinicore::Tensor, infinicore::Tensor> PagedKVCache::create_layer_kv_cache(
+infinicore::Tensor PagedKVCache::create_layer_kv_cache(
     infinicore::Size k_dim,
     infinicore::Size v_dim,
     infinicore::Size num_k_heads,
     infinicore::Size num_v_heads,
     infinicore::DataType dtype,
     const PagedKVCacheConfig &config) {
+    ASSERT((num_k_heads == num_v_heads) && (k_dim == v_dim));
 
     const engine::distributed::RankInfo &rank_info = infinilm::global_state::get_tensor_model_parallel_rank_info();
 
-    size_t num_rank_k_heads(num_k_heads / rank_info.tp_size);
-    size_t num_rank_v_heads(num_v_heads / rank_info.tp_size);
+    size_t num_rank_kv_heads(num_k_heads / rank_info.tp_size);
+    size_t kv_dim = k_dim;
 
     size_t num_blocks_per_layer = config.num_blocks();
     size_t block_size = config.block_size();
 
-    // [ num_blocks, num_rank_k_heads, block_size, k_dim]
-    infinicore::Tensor k_caches = infinicore::Tensor::empty(
-        {num_blocks_per_layer,
-         num_rank_k_heads,
+    // [1+1, num_blocks, num_rank_k_heads, block_size, k_dim]
+    infinicore::Tensor kv_cache = infinicore::Tensor::empty(
+        {2,
+         num_blocks_per_layer,
+         num_rank_kv_heads,
          block_size,
-         k_dim},
+         kv_dim},
         dtype,
         rank_info.device);
 
-    // [ num_blocks, num_rank_v_heads, block_size, v_dim]
-    infinicore::Tensor v_caches = infinicore::Tensor::empty(
-        {num_blocks_per_layer,
-         num_rank_v_heads,
-         block_size,
-         v_dim},
-        dtype,
-        rank_info.device);
-
-    return {k_caches, v_caches};
+    return kv_cache;
 }
 
 std::tuple<infinicore::Tensor, infinicore::Tensor> PagedKVCache::update(

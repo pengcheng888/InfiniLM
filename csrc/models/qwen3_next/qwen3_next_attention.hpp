@@ -10,7 +10,8 @@ public:
                        size_t layer_idx,
                        const infinicore::Device &device);
 
-    infinicore::Tensor forward(const infinicore::Tensor &hidden_states) const;
+    infinicore::Tensor forward(const infinicore::Tensor &positions,
+                               const infinicore::Tensor &hidden_states) const;
 
     size_t layer_idx() const { return layer_idx_; }
     size_t num_heads() const { return num_attention_heads_; }

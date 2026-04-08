@@ -51,7 +51,8 @@ Qwen3NextGatedDeltaNet::Qwen3NextGatedDeltaNet(std::shared_ptr<infinilm::config:
     INFINICORE_NN_MODULE_INIT(out_proj, value_dim, hidden_size, false, dtype, device);
 }
 
-infinicore::Tensor Qwen3NextGatedDeltaNet::forward(const infinicore::Tensor &hidden_states) const {
+infinicore::Tensor Qwen3NextGatedDeltaNet::forward(const infinicore::Tensor &positions,
+                                                   const infinicore::Tensor &hidden_states) const {
     spdlog::error("Qwen3NextGatedDeltaNet: forward not implemented");
     return hidden_states;
 }

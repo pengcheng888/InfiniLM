@@ -136,7 +136,6 @@ InferEngine::Input::to_model_input(infinicore::Device device) const {
     };
 
     infinilm::global_state::get_forward_context().attn_metadata = {
-        input.position_ids,
         input.past_sequence_lengths,
         input.total_sequence_lengths,
         input.input_offsets,

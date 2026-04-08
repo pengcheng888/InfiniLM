@@ -45,7 +45,7 @@ public:
         const StaticKVCacheConfig &config,
         const engine::distributed::RankInfo &rank_info);
 
-    static std::tuple<infinicore::Tensor, infinicore::Tensor> create_layer_kv_cache(
+    static infinicore::Tensor create_layer_kv_cache(
         const infinicore::Size k_dim,
         const infinicore::Size v_dim,
         const infinicore::Size num_k_heads,
@@ -118,7 +118,7 @@ public:
         const PagedKVCacheConfig &config,
         const engine::distributed::RankInfo &rank_info);
 
-    static std::tuple<infinicore::Tensor, infinicore::Tensor> create_layer_kv_cache(
+    static infinicore::Tensor create_layer_kv_cache(
         infinicore::Size k_dim,
         infinicore::Size v_dim,
         infinicore::Size num_k_heads,

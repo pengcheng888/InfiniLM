@@ -5,8 +5,6 @@
 namespace infinilm::global_state {
 
 struct AttentionMetadata {
-    /// Position IDs tensor of shape `[batch, seq_len]` or `[seq_len]`.
-    std::optional<infinicore::Tensor> position_ids;
     /// Past Lengths of cached sequence for each request, of shape `[num_requests]`.
     std::optional<infinicore::Tensor> past_sequence_lengths;
     /// ToTal Lengths for each request sequence, of shape `[num_requests]`.
@@ -22,22 +20,19 @@ struct AttentionMetadata {
 
     AttentionMetadata() = default;
 
-    AttentionMetadata(std::optional<infinicore::Tensor> position_ids,
-                      std::optional<infinicore::Tensor> past_sequence_lengths,
+    AttentionMetadata(std::optional<infinicore::Tensor> past_sequence_lengths,
                       std::optional<infinicore::Tensor> total_sequence_lengths,
                       std::optional<infinicore::Tensor> input_offsets,
                       std::optional<infinicore::Tensor> cu_seqlens,
                       std::optional<infinicore::Tensor> block_tables,
-                      std::optional<infinicore::Tensor> slot_mapping) : position_ids(position_ids),
-                                                                        past_sequence_lengths(past_sequence_lengths),
+                      std::optional<infinicore::Tensor> slot_mapping) : past_sequence_lengths(past_sequence_lengths),
                                                                         total_sequence_lengths(total_sequence_lengths),
                                                                         input_offsets(input_offsets),
                                                                         cu_seqlens(cu_seqlens),
                                                                         block_tables(block_tables),
                                                                         slot_mapping(slot_mapping) {}
 
-    AttentionMetadata(const infinilm::InfinilmModel::Input &input) : AttentionMetadata(input.position_ids,
-                                                                                       input.past_sequence_lengths,
+    AttentionMetadata(const infinilm::InfinilmModel::Input &input) : AttentionMetadata(input.past_sequence_lengths,
                                                                                        input.total_sequence_lengths,
                                                                                        input.input_offsets,
                                                                                        input.cu_seqlens,
@@ -47,7 +42,7 @@ struct AttentionMetadata {
 
 struct ForwardContext {
     AttentionMetadata attn_metadata;
-    std::vector<std::tuple<infinicore::Tensor, infinicore::Tensor>> kv_cache_vec;
+    std::vector<infinicore::Tensor> kv_cache_vec;
 };
 
 void initialize_forward_context(ForwardContext &forward_context);

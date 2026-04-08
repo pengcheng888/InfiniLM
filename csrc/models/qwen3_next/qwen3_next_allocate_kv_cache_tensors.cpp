@@ -7,7 +7,7 @@
 
 namespace infinilm::models::qwen3_next {
 
-std::vector<std::tuple<infinicore::Tensor, infinicore::Tensor>> qwen3_next_allocate_kv_cache_tensors(
+std::vector<infinicore::Tensor> qwen3_next_allocate_kv_cache_tensors(
     const cache::CacheConfig *cache_config,
     const std::shared_ptr<infinilm::config::ModelConfig> &text_config,
     const backends::AttentionBackend &attention_backend) {
@@ -18,7 +18,7 @@ std::vector<std::tuple<infinicore::Tensor, infinicore::Tensor>> qwen3_next_alloc
         throw std::runtime_error("infinilm::models::qwen3_next::qwen3_next_allocate_kv_cache_tensors: text_config is null");
     }
 
-    std::vector<std::tuple<infinicore::Tensor, infinicore::Tensor>> kv_cache_vec;
+    std::vector<infinicore::Tensor> kv_cache_vec;
     switch (attention_backend) {
     case backends::AttentionBackend::STATIC_ATTN: {
         auto static_kv_cache_config = dynamic_cast<const cache::StaticKVCacheConfig *>(cache_config);

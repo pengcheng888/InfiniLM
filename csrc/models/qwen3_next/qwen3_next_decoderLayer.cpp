@@ -2,7 +2,6 @@
 #include "infinicore/ops.hpp"
 #include <stdexcept>
 #include <string>
-#include <tuple>
 #include <vector>
 
 namespace infinilm::models::qwen3_next {
@@ -14,7 +13,6 @@ Qwen3NextDecoderLayer::Qwen3NextDecoderLayer(std::shared_ptr<infinilm::config::M
 
     const auto &dtype{model_config->get_dtype()};
     size_t hidden_size = model_config->get<size_t>("hidden_size");
-    size_t intermediate_size = model_config->get<size_t>("intermediate_size");
     double rms_norm_eps = model_config->get<double>("rms_norm_eps");
 
     INFINICORE_NN_MODULE_INIT(input_layernorm, hidden_size, rms_norm_eps, dtype, device);
@@ -32,13 +30,14 @@ Qwen3NextDecoderLayer::Qwen3NextDecoderLayer(std::shared_ptr<infinilm::config::M
     }
 }
 
-std::tuple<infinicore::Tensor, infinicore::Tensor> Qwen3NextDecoderLayer::forward(infinicore::Tensor &hidden_states,
+std::tuple<infinicore::Tensor, infinicore::Tensor> Qwen3NextDecoderLayer::forward(const infinicore::Tensor &positions,
+                                                                                  infinicore::Tensor &hidden_states,
                                                                                   infinicore::Tensor &residual) {
     input_layernorm_->forward_inplace(hidden_states, residual);
     if ("linear_attention" == layer_type_) {
-        hidden_states = linear_attn_->forward(hidden_states);
+        hidden_states = linear_attn_->forward(positions, hidden_states);
     } else if ("full_attention" == layer_type_) {
-        hidden_states = self_attn_->forward(hidden_states);
+        hidden_states = self_attn_->forward(positions, hidden_states);
     }
 
     post_attention_layernorm_->forward_inplace(hidden_states, residual);
@@ -46,14 +45,14 @@ std::tuple<infinicore::Tensor, infinicore::Tensor> Qwen3NextDecoderLayer::forwar
     return std::make_tuple(hidden_states, residual);
 }
 
-infinicore::Tensor Qwen3NextDecoderLayer::forward(infinicore::Tensor &hidden_states) {
-
+infinicore::Tensor Qwen3NextDecoderLayer::forward(const infinicore::Tensor &positions,
+                                                  infinicore::Tensor &hidden_states) {
     auto residual = hidden_states;
     hidden_states = input_layernorm_->forward(hidden_states);
     if ("linear_attention" == layer_type_) {
-        hidden_states = linear_attn_->forward(hidden_states);
+        hidden_states = linear_attn_->forward(positions, hidden_states);
     } else if ("full_attention" == layer_type_) {
-        hidden_states = self_attn_->forward(hidden_states);
+        hidden_states = self_attn_->forward(positions, hidden_states);
     }
     hidden_states = infinicore::op::add(residual, hidden_states);
 
