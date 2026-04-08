@@ -7,7 +7,6 @@
 #include "paged_attn.hpp"
 #include "static_attn.hpp"
 #include <memory>
-#include <tuple>
 #include <variant>
 
 namespace infinilm::layers::attention {
@@ -36,9 +35,7 @@ public:
 
     infinicore::Tensor forward(infinicore::Tensor &query,
                                infinicore::Tensor &key,
-                               infinicore::Tensor &value,
-                               std::tuple<infinicore::Tensor, infinicore::Tensor> kv_cache,
-                               const infinilm::global_state::AttentionMetadata &attn_metadata) const;
+                               infinicore::Tensor &value) const;
 
     inline infinicore::Tensor get_k_scale() const { return k_scale_; }
     inline infinicore::Tensor get_v_scale() const { return v_scale_; }
@@ -46,7 +43,7 @@ public:
 private:
     infinicore::Tensor k_scale_;
     infinicore::Tensor v_scale_;
-
+    size_t layer_idx_;
     AttentionImpl attn_backend_impl_;
     ::infinilm::backends::AttentionBackend attn_backend_;
 };

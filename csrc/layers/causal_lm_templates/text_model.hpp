@@ -17,7 +17,6 @@ namespace infinilm::layers::causal_lm_templates {
  * - Token embeddings
  * - Multiple decoder layers
  * - Final layer normalization
- * - Rotary Position Embeddings
  *
  * @tparam DecoderLayer The decoder layer type (e.g., Qwen3DecoderLayer)
  */
@@ -42,21 +41,11 @@ public:
         }
 
         norm_ = this->register_module<infinicore::nn::RMSNorm>("norm", hidden_size, rms_norm_eps, dtype, device);
-
-        rotary_emb_ = this->register_module<infinicore::nn::RoPE>(
-            "rotary_emb", model_config->get_head_dim(), max_position_embeddings,
-            rope_theta, infinicore::nn::RoPE::Algo::GPT_NEOX, dtype, device,
-            model_config->get_rope_scaling());
-
-        for (auto &layer : layers_) {
-            if (layer) {
-                layer->set_rotary_emb(rotary_emb_);
-            }
-        }
     }
 
     infinicore::Tensor forward(const infinilm::InfinilmModel::Input &input) const {
         auto input_ids = input.input_ids.value();
+        auto positions = input.position_ids.value();
         // 1. Embed tokens: input_ids -> [batch, seq_len, hidden_size]
         auto hidden_states = embed_tokens_->forward(input_ids);
 
@@ -65,6 +54,7 @@ public:
         infinicore::Tensor residual;
         for (size_t i = 0; i < num_layers; ++i) {
             layers_.at(i)->forward(
+                positions,
                 hidden_states,
                 residual);
         }
@@ -75,13 +65,12 @@ public:
 
     infinicore::Tensor forward_naive(const infinilm::InfinilmModel::Input &input) const {
         auto input_ids = input.input_ids.value();
+        auto positions = input.position_ids.value();
         auto hidden_states = embed_tokens_->forward(input_ids);
-
         size_t num_layers = layers_.size();
         for (size_t i = 0; i < num_layers; ++i) {
-            hidden_states = layers_.at(i)->forward(hidden_states);
+            hidden_states = layers_.at(i)->forward(positions, hidden_states);
         }
-
         hidden_states = norm_->forward(hidden_states);
         return hidden_states;
     }
@@ -90,7 +79,6 @@ protected:
     INFINICORE_NN_MODULE(infinicore::nn::Embedding, embed_tokens);
     INFINICORE_NN_MODULE_VEC(DecoderLayer, layers);
     INFINICORE_NN_MODULE(infinicore::nn::RMSNorm, norm);
-    INFINICORE_NN_MODULE(infinicore::nn::RoPE, rotary_emb);
 };
 
 } // namespace infinilm::layers::causal_lm_templates

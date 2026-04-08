@@ -1,6 +1,5 @@
 #include "flash_attn.hpp"
 
-#include "../../../global_state/global_state.hpp"
 #include "../../../utils.hpp"
 #include "infinicore/ops.hpp"
 #include "infinicore/ops/mha_kvcache.hpp"
@@ -31,7 +30,7 @@ infinicore::Tensor FlashAttentionImpl::forward(const AttentionLayer &layer,
                                                const infinicore::Tensor &query,
                                                const infinicore::Tensor &key,
                                                const infinicore::Tensor &value,
-                                               std::tuple<infinicore::Tensor, infinicore::Tensor> kv_cache,
+                                               infinicore::Tensor &kv_cache,
                                                const infinilm::global_state::AttentionMetadata &attn_metadata) const {
     auto total_sequence_lengths = attn_metadata.total_sequence_lengths;
     auto input_offsets = attn_metadata.input_offsets;
@@ -87,10 +86,10 @@ infinicore::Tensor FlashAttentionImpl::forward(const AttentionLayer &layer,
 std::tuple<infinicore::Tensor, infinicore::Tensor> FlashAttentionImpl::do_kv_cache_update(const AttentionLayer &layer,
                                                                                           const infinicore::Tensor key,
                                                                                           const infinicore::Tensor value,
-                                                                                          std::tuple<infinicore::Tensor, infinicore::Tensor> kv_cache,
+                                                                                          infinicore::Tensor &kv_cache,
                                                                                           const infinicore::Tensor slot_mapping) const {
-    auto k_cache_layer = std::get<0>(kv_cache);
-    auto v_cache_layer = std::get<1>(kv_cache);
+    auto k_cache_layer = kv_cache->narrow({{0, 0, 1}})->squeeze(0);
+    auto v_cache_layer = kv_cache->narrow({{0, 1, 1}})->squeeze(0);
     infinicore::op::paged_caching_(
         k_cache_layer,
         v_cache_layer,

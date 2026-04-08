@@ -1,5 +1,4 @@
 #include "static_attn.hpp"
-#include "../../../global_state/global_state.hpp"
 #include "../../../utils.hpp"
 #include "attention_layer.hpp"
 #include "infinicore/ops.hpp"
@@ -26,7 +25,7 @@ infinicore::Tensor StaticAttentionImpl::forward(const AttentionLayer &layer,
                                                 infinicore::Tensor &q_rope,
                                                 infinicore::Tensor &k_reshaped,
                                                 infinicore::Tensor &v_reshaped,
-                                                std::tuple<infinicore::Tensor, infinicore::Tensor> kv_cache,
+                                                infinicore::Tensor &kv_cache,
                                                 const infinilm::global_state::AttentionMetadata &attn_metadata) const {
 
     auto k_scale = layer.get_k_scale();
@@ -104,12 +103,13 @@ infinicore::Tensor StaticAttentionImpl::forward(const AttentionLayer &layer,
 std::tuple<infinicore::Tensor, infinicore::Tensor> StaticAttentionImpl::do_kv_cache_update(const AttentionLayer &layer,
                                                                                            const infinicore::Tensor key,
                                                                                            const infinicore::Tensor value,
-                                                                                           std::tuple<infinicore::Tensor, infinicore::Tensor> kv_cache,
+                                                                                           infinicore::Tensor &kv_cache,
                                                                                            const infinicore::Tensor past_sequence_lengths) const {
+
     auto batch_size = key->size(0);
     auto update_len = key->size(2);
-    auto k_cache_layer = std::get<0>(kv_cache);
-    auto v_cache_layer = std::get<1>(kv_cache);
+    auto k_cache_layer = kv_cache->narrow({{0, 0, 1}})->squeeze(0);
+    auto v_cache_layer = kv_cache->narrow({{0, 1, 1}})->squeeze(0);
 
     size_t max_batch_size = k_cache_layer->size(0);
     size_t max_seq_len = k_cache_layer->size(2);

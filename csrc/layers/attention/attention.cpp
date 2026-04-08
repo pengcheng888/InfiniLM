@@ -1,23 +1,19 @@
 #include "attention.hpp"
-#include "../../global_state/global_state.hpp"
 #include "../../utils.hpp"
+#include "../rotary_embedding/rotary_embedding.hpp"
 
 namespace infinilm::layers::attention {
-using infinilm::global_state::AttentionMetadata;
 
 Attention::Attention(std::shared_ptr<infinilm::config::ModelConfig> model_config,
                      size_t layer_idx,
                      const infinicore::Device &device) {
     layer_idx_ = layer_idx;
-
-    const auto &dtype{model_config->get_dtype()};
-    num_attention_heads_ = model_config->get<size_t>("num_attention_heads");
-    num_key_value_heads_ = model_config->get<size_t>("num_key_value_heads");
     hidden_size_ = model_config->get<size_t>("hidden_size");
     head_dim_ = model_config->get<size_t>("head_dim");
 
-    float scaling = 1.0f / std::sqrt(static_cast<float>(head_dim_));
-
+    const auto &dtype{model_config->get_dtype()};
+    size_t total_num_heads = model_config->get<size_t>("num_attention_heads");
+    size_t total_num_kv_heads = model_config->get<size_t>("num_key_value_heads");
     bool use_bias = model_config->get_or<bool>("attention_bias", true);
     bool use_output_bias = model_config->get_or<bool>("attention_output_bias", false);
     double rms_norm_eps = model_config->get<double>("rms_norm_eps");
@@ -26,28 +22,34 @@ Attention::Attention(std::shared_ptr<infinilm::config::ModelConfig> model_config
     const engine::distributed::RankInfo &rank_info = infinilm::global_state::get_tensor_model_parallel_rank_info();
     int tp_rank = infinilm::global_state::get_tensor_model_parallel_rank();
     int tp_size = infinilm::global_state::get_tensor_model_parallel_world_size();
+    if ((total_num_kv_heads < tp_size) || (0 != (total_num_kv_heads % tp_size))) {
+        throw std::runtime_error("infinilm::layers::attention::Attention: num_key_value_heads must be divisible by tp_size");
+    }
+
+    num_attention_heads_ = total_num_heads / tp_size;
+    num_key_value_heads_ = total_num_kv_heads / tp_size;
 
     auto quant_scheme = model_config->get_quant_scheme();
     auto quantization_method = model_config->get_quantization_method();
     switch (quant_scheme) {
     case infinicore::quantization::QuantScheme::NONE: {
-        INFINILM_QKV_LINEAR_INIT(qkv_proj, "q_proj", "k_proj", "v_proj", hidden_size_, head_dim_, num_attention_heads_, num_key_value_heads_,
+        INFINILM_QKV_LINEAR_INIT(qkv_proj, "q_proj", "k_proj", "v_proj", hidden_size_, head_dim_, total_num_heads, total_num_kv_heads,
                                  quantization_method, use_bias, dtype, device, rank_info);
-        INFINICORE_NN_MODULE_INIT(o_proj, num_attention_heads_ * head_dim_, hidden_size_, quantization_method,
+        INFINICORE_NN_MODULE_INIT(o_proj, total_num_heads * head_dim_, hidden_size_, quantization_method,
                                   use_output_bias, dtype, device, tp_rank, tp_size, rank_info.comm);
         break;
     }
     case infinicore::quantization::QuantScheme::COMPRESSED_TENSOR_W8A8I8: {
-        INFINILM_QKV_LINEAR_W8A8_INIT(qkv_proj, "q_proj", "k_proj", "v_proj", hidden_size_, head_dim_, num_attention_heads_, num_key_value_heads_,
+        INFINILM_QKV_LINEAR_W8A8_INIT(qkv_proj, "q_proj", "k_proj", "v_proj", hidden_size_, head_dim_, total_num_heads, total_num_kv_heads,
                                       quantization_method, use_bias, dtype, device, rank_info);
-        INFINICORE_NN_MODULE_INIT(o_proj, num_attention_heads_ * head_dim_, hidden_size_, quantization_method,
+        INFINICORE_NN_MODULE_INIT(o_proj, total_num_heads * head_dim_, hidden_size_, quantization_method,
                                   use_output_bias, dtype, device, tp_rank, tp_size, rank_info.comm);
         break;
     }
     case infinicore::quantization::QuantScheme::AWQ_W4A16: {
-        INFINILM_QKV_LINEAR_W4A16AWQ_INIT(qkv_proj, "q_proj", "k_proj", "v_proj", hidden_size_, head_dim_, num_attention_heads_, num_key_value_heads_,
+        INFINILM_QKV_LINEAR_W4A16AWQ_INIT(qkv_proj, "q_proj", "k_proj", "v_proj", hidden_size_, head_dim_, total_num_heads, total_num_kv_heads,
                                           quantization_method, use_bias, dtype, device, rank_info);
-        INFINICORE_NN_MODULE_INIT(o_proj, num_attention_heads_ * head_dim_, hidden_size_, quantization_method,
+        INFINICORE_NN_MODULE_INIT(o_proj, total_num_heads * head_dim_, hidden_size_, quantization_method,
                                   use_output_bias, dtype, device, tp_rank, tp_size, rank_info.comm);
         break;
     }
@@ -56,6 +58,12 @@ Attention::Attention(std::shared_ptr<infinilm::config::ModelConfig> model_config
         break;
     }
     }
+
+    rotary_emb_ = infinilm::layers::rotary_embedding::get_rope(model_config, device);
+
+    float scaling = 1.0f / std::sqrt(static_cast<float>(head_dim_));
+    attn_ = std::make_shared<AttentionLayer>(num_attention_heads_, head_dim_, scaling, num_key_value_heads_, layer_idx_,
+                                             kv_cache_k_scale_, kv_cache_v_scale_, attention_backend_);
 
     auto kv_quant_scheme = infinilm::global_state::get_infinilm_config().model_config->get_kv_quant_scheme();
     switch (kv_quant_scheme) {
@@ -72,40 +80,18 @@ Attention::Attention(std::shared_ptr<infinilm::config::ModelConfig> model_config
         break;
     }
     }
-
-    if ((num_key_value_heads_ < tp_size) || (0 != (num_key_value_heads_ % tp_size))) {
-        throw std::runtime_error("infinilm::layers::attention::Attention: num_key_value_heads must be divisible by tp_size");
-    }
-
-    size_t num_attention_heads_rank = num_attention_heads_ / tp_size;
-    size_t num_key_value_heads_rank = num_key_value_heads_ / tp_size;
-    attn_ = std::make_shared<AttentionLayer>(num_attention_heads_rank, head_dim_, scaling, num_key_value_heads_rank, layer_idx_,
-                                             kv_cache_k_scale_, kv_cache_v_scale_, attention_backend_);
-
-    num_attention_heads_ = num_attention_heads_rank;
-    num_key_value_heads_ = num_key_value_heads_rank;
 }
 
-infinicore::Tensor Attention::forward(const infinicore::Tensor &hidden_states) const {
-    if (!rotary_emb_) {
-        throw std::runtime_error("infinilm::layers::attention::Attention: rotary_emb not configured");
-    }
-
-    auto &forward_context = infinilm::global_state::get_forward_context();
-    AttentionMetadata &attn_metadata = forward_context.attn_metadata;
-    std::tuple<infinicore::Tensor, infinicore::Tensor> &kv_cache = forward_context.kv_cache_vec[layer_idx_];
-
+infinicore::Tensor Attention::forward(const infinicore::Tensor &positions,
+                                      const infinicore::Tensor &hidden_states) const {
     if (::infinilm::backends::AttentionBackend::STATIC_ATTN == attention_backend_) {
-        return forward_static_(hidden_states, attn_metadata, kv_cache);
+        return forward_static_(positions, hidden_states);
     }
-    return forward_paged_(hidden_states, attn_metadata, kv_cache);
+    return forward_paged_(positions, hidden_states);
 }
 
-infinicore::Tensor Attention::forward_static_(const infinicore::Tensor &hidden_states,
-                                              const infinilm::global_state::AttentionMetadata &attn_metadata,
-                                              std::tuple<infinicore::Tensor, infinicore::Tensor> &kv_cache) const {
-    auto position_ids = attn_metadata.position_ids.value();
-
+infinicore::Tensor Attention::forward_static_(const infinicore::Tensor &position_ids,
+                                              const infinicore::Tensor &hidden_states) const {
     // hidden_states shape: [batch, seq_len, hidden_size]
     auto hidden_states_mutable = hidden_states;
     auto shape = hidden_states->shape();
@@ -138,18 +124,15 @@ infinicore::Tensor Attention::forward_static_(const infinicore::Tensor &hidden_s
     rotary_emb_->forward(k_reshaped, pos_ids_for_rope, true);
 
     // 5. Attn Backend calculate
-    auto attn_output = attn_->forward(q_rope, k_reshaped, v_reshaped, kv_cache, attn_metadata);
+    auto attn_output = attn_->forward(q_rope, k_reshaped, v_reshaped);
 
     // 7. Project output
     auto output = o_proj_->forward(attn_output);
     return output;
 }
 
-infinicore::Tensor Attention::forward_paged_(const infinicore::Tensor &hidden_states,
-                                             const infinilm::global_state::AttentionMetadata &attn_metadata,
-                                             std::tuple<infinicore::Tensor, infinicore::Tensor> &kv_cache) const {
-    auto position_ids = attn_metadata.position_ids.value();
-
+infinicore::Tensor Attention::forward_paged_(const infinicore::Tensor &position_ids,
+                                             const infinicore::Tensor &hidden_states) const {
     // hidden_states shape: [batch, seq_len, hidden_size]
     auto hidden_states_mutable = hidden_states;
     auto shape = hidden_states->shape();
@@ -184,7 +167,7 @@ infinicore::Tensor Attention::forward_paged_(const infinicore::Tensor &hidden_st
     rotary_emb_->forward(k_reshaped, pos_ids_for_rope, true);
 
     // 5. Attn Backend calculate
-    auto attn_output = attn_->forward(q_reshaped, k_reshaped, v_reshaped, kv_cache, attn_metadata);
+    auto attn_output = attn_->forward(q_reshaped, k_reshaped, v_reshaped);
 
     // 6. Project output
     auto output = o_proj_->forward(attn_output);

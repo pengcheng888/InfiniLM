@@ -15,13 +15,14 @@ public:
                           size_t layer_idx,
                           const infinicore::Device &device);
 
-    std::tuple<infinicore::Tensor, infinicore::Tensor> forward(infinicore::Tensor &hidden_states, infinicore::Tensor &residual);
+    std::tuple<infinicore::Tensor, infinicore::Tensor> forward(const infinicore::Tensor &positions,
+                                                               infinicore::Tensor &hidden_states,
+                                                               infinicore::Tensor &residual);
 
-    infinicore::Tensor forward(infinicore::Tensor &hidden_states);
+    infinicore::Tensor forward(const infinicore::Tensor &positions,
+                               infinicore::Tensor &hidden_states);
 
     size_t layer_idx() const { return layer_idx_; }
-
-    void set_rotary_emb(const std::shared_ptr<infinicore::nn::RoPE> &rotary_emb);
 
 protected:
     INFINICORE_NN_MODULE(infinicore::nn::RMSNorm, input_layernorm);

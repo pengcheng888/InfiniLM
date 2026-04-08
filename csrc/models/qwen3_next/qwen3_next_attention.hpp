@@ -10,14 +10,14 @@ public:
                        size_t layer_idx,
                        const infinicore::Device &device);
 
-    infinicore::Tensor forward(const infinicore::Tensor &hidden_states) const;
+    infinicore::Tensor forward(const infinicore::Tensor &positions,
+                               const infinicore::Tensor &hidden_states) const;
 
     size_t layer_idx() const { return layer_idx_; }
     size_t num_heads() const { return num_attention_heads_; }
     size_t num_kv_heads() const { return num_key_value_heads_; }
     size_t head_dim() const { return head_dim_; }
     size_t hidden_size() const { return hidden_size_; }
-    void set_rotary_emb(const std::shared_ptr<infinicore::nn::RoPE> &rotary_emb) { rotary_emb_ = rotary_emb; }
 
 protected:
     INFINICORE_NN_MODULE(infinilm::layers::linear::QKVParallelLinear, qkv_proj);
