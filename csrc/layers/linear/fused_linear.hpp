@@ -82,6 +82,22 @@ public:
     bool has_v_bias() const;
 
 private:
+    static size_t calculate_kv_replicas(size_t num_k_head, size_t tp_size) {
+        if (num_k_head % tp_size == 0) {
+            return 1;
+        }
+        if (tp_size % num_k_head == 0) {
+            return (tp_size + num_k_head - 1) / num_k_head;
+        }
+        throw std::runtime_error("Invalid KV head configuration");
+    }
+
+    static size_t
+    calculate_out_feature_size(size_t num_q_head, size_t q_dim, size_t num_k_head, size_t k_dim, size_t num_v_head, size_t v_dim, engine::distributed::RankInfo rank_info) {
+        return num_q_head * q_dim + num_k_head * k_dim * calculate_kv_replicas(num_k_head, rank_info.tp_size) + num_v_head * v_dim * calculate_kv_replicas(num_v_head, rank_info.tp_size);
+    }
+
+private:
     size_t q_dim_;
     size_t k_dim_;
     size_t v_dim_;
@@ -94,6 +110,8 @@ private:
     size_t q_out_size_; // num_q_head * q_dim / tp_size
     size_t k_out_size_; // num_k_head * k_dim / tp_size
     size_t v_out_size_; // num_v_head * v_dim / tp_size
+
+    size_t num_kv_head_replicas_ = 1;
 };
 
 class GateUpParallelLinear : public infinicore::nn::ColumnParallelLinear {

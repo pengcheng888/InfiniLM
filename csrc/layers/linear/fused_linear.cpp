@@ -95,7 +95,7 @@ QKVParallelLinear::QKVParallelLinear(size_t hidden_size,
                                      engine::distributed::RankInfo rank_info)
     : infinicore::nn::ColumnParallelLinear(
           hidden_size,
-          num_q_head * q_dim + num_k_head * k_dim + num_v_head * v_dim,
+          calculate_out_feature_size(num_q_head, q_dim, num_k_head, k_dim, num_v_head, v_dim, rank_info),
           quantization,
           (q_bias || k_bias || v_bias),
           dtype,
@@ -110,18 +110,16 @@ QKVParallelLinear::QKVParallelLinear(size_t hidden_size,
       num_v_head_(num_v_head),
       q_bias_(q_bias),
       k_bias_(k_bias),
-      v_bias_(v_bias) {
-    if (num_q_head % tp_size_ != 0 || num_k_head % tp_size_ != 0 || num_v_head % tp_size_ != 0) {
-        throw std::runtime_error("QKVParallelLinear: num_[q|k|v]_head must be divisible by tp_size");
-    }
+      v_bias_(v_bias),
+      num_kv_head_replicas_(calculate_kv_replicas(num_k_head, rank_info.tp_size)) {
 
     if ((q_bias_ != k_bias_) || (k_bias_ != v_bias_)) {
         throw std::runtime_error("q_bias, k_bias, v_bias must all match");
     }
 
     q_out_size_ = num_q_head_ * q_dim_ / tp_size_;
-    k_out_size_ = num_k_head_ * k_dim_ / tp_size_;
-    v_out_size_ = num_v_head_ * v_dim_ / tp_size_;
+    k_out_size_ = num_kv_head_replicas_ * num_k_head_ * k_dim_ / tp_size_;
+    v_out_size_ = num_kv_head_replicas_ * num_v_head_ * v_dim_ / tp_size_;
 }
 
 std::tuple<infinicore::Tensor, infinicore::Tensor, infinicore::Tensor>
@@ -144,13 +142,13 @@ infinicore::nn::Parameter QKVParallelLinear::get_q_weight() const {
 infinicore::nn::Parameter QKVParallelLinear::get_k_weight() const {
     return infinicore::nn::Parameter(
         weight_->narrow({{0, q_out_size_, k_out_size_}}),
-        0, tp_rank_, tp_size_);
+        0, tp_rank_, tp_size_, num_k_head_);
 }
 
 infinicore::nn::Parameter QKVParallelLinear::get_v_weight() const {
     return infinicore::nn::Parameter(
         weight_->narrow({{0, q_out_size_ + k_out_size_, v_out_size_}}),
-        0, tp_rank_, tp_size_);
+        0, tp_rank_, tp_size_, num_v_head_);
 }
 
 infinicore::nn::Parameter QKVParallelLinear::get_q_weight_scale() const {

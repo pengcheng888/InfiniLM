@@ -49,13 +49,15 @@ StaticKVCache::StaticKVCache(
     : Cache(),
       k_dim_(k_dim),
       v_dim_(v_dim),
-      num_rank_k_heads_(num_k_heads / rank_info.tp_size),
-      num_rank_v_heads_(num_v_heads / rank_info.tp_size),
       rank_batch_size_(config.max_batch_size()),
       cache_len_(config.max_cache_len() == std::numeric_limits<infinicore::Size>::max() || config.max_cache_len() == 0 ? max_positional_embedding : config.max_cache_len()),
       rank_num_layers_(num_layers),
       dtype_(dtype) {
 
+    bool is_kv_replica = (num_k_heads < rank_info.tp_size && num_v_heads < rank_info.tp_size && num_k_heads == num_v_heads && rank_info.tp_size % num_k_heads == 0);
+
+    num_rank_k_heads_ = is_kv_replica ? 1 : (num_k_heads / rank_info.tp_size);
+    num_rank_v_heads_ = is_kv_replica ? 1 : (num_v_heads / rank_info.tp_size);
     // Allocate K cache
     k_caches_ = infinicore::Tensor::empty(
         {rank_num_layers_,
@@ -90,15 +92,20 @@ infinicore::Tensor StaticKVCache::create_layer_kv_cache(
     const engine::distributed::RankInfo &rank_info = infinilm::global_state::get_tensor_model_parallel_rank_info();
 
     size_t rank_batch_size = (config.max_batch_size());
-    size_t num_rank_kv_heads = (num_k_heads / rank_info.tp_size);
     size_t kv_dim = k_dim;
+
+    bool is_kv_replica = (num_k_heads < rank_info.tp_size && num_v_heads < rank_info.tp_size && num_k_heads == num_v_heads && rank_info.tp_size % num_k_heads == 0);
+
+    size_t num_rank_k_heads = is_kv_replica ? 1 : (num_k_heads / rank_info.tp_size);
+    size_t num_rank_v_heads = is_kv_replica ? 1 : (num_v_heads / rank_info.tp_size);
+
     size_t cache_len = (config.max_cache_len() == std::numeric_limits<infinicore::Size>::max() || config.max_cache_len() == 0 ? max_positional_embedding : config.max_cache_len());
 
     // Allocate KV cache
     infinicore::Tensor kv_cache = infinicore::Tensor::empty(
         {2,
          rank_batch_size,
-         num_rank_kv_heads,
+         num_rank_k_heads,
          cache_len,
          kv_dim},
         dtype,
@@ -186,12 +193,15 @@ PagedKVCache::PagedKVCache(
     : Cache(),
       k_dim_(k_dim),
       v_dim_(v_dim),
-      num_rank_k_heads_(num_k_heads / rank_info.tp_size),
-      num_rank_v_heads_(num_v_heads / rank_info.tp_size),
       rank_num_layers_(num_layers),
       dtype_(dtype),
       num_blocks_per_layer_(config.num_blocks()),
       block_size_(config.block_size()) {
+
+    bool is_kv_replica = (num_k_heads < rank_info.tp_size && num_v_heads < rank_info.tp_size && num_k_heads == num_v_heads && rank_info.tp_size % num_k_heads == 0);
+
+    num_rank_k_heads_ = is_kv_replica ? 1 : (num_k_heads / rank_info.tp_size);
+    num_rank_v_heads_ = is_kv_replica ? 1 : (num_v_heads / rank_info.tp_size);
     // [num_layers, num_blocks, num_rank_k_heads, block_size, k_dim]
     k_caches_ = infinicore::Tensor::empty(
         {rank_num_layers_,
@@ -224,8 +234,11 @@ infinicore::Tensor PagedKVCache::create_layer_kv_cache(
 
     const engine::distributed::RankInfo &rank_info = infinilm::global_state::get_tensor_model_parallel_rank_info();
 
-    size_t num_rank_kv_heads(num_k_heads / rank_info.tp_size);
     size_t kv_dim = k_dim;
+    bool is_kv_replica = (num_k_heads < rank_info.tp_size && num_v_heads < rank_info.tp_size && num_k_heads == num_v_heads && rank_info.tp_size % num_k_heads == 0);
+
+    size_t num_rank_k_heads = is_kv_replica ? 1 : (num_k_heads / rank_info.tp_size);
+    size_t num_rank_v_heads = is_kv_replica ? 1 : (num_v_heads / rank_info.tp_size);
 
     size_t num_blocks_per_layer = config.num_blocks();
     size_t block_size = config.block_size();
@@ -234,7 +247,7 @@ infinicore::Tensor PagedKVCache::create_layer_kv_cache(
     infinicore::Tensor kv_cache = infinicore::Tensor::empty(
         {2,
          num_blocks_per_layer,
-         num_rank_kv_heads,
+         num_rank_k_heads,
          block_size,
          kv_dim},
         dtype,
