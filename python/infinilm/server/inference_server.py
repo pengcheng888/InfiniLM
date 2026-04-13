@@ -109,6 +109,7 @@ class InferenceServer:
         port: int = 8000,
         enable_graph: bool = False,
         attn_backend: str = "default",
+        ignore_eos: bool = False,
     ):
         """Initialize inference server.
 
@@ -150,6 +151,7 @@ class InferenceServer:
         self.port = port
         self.enable_graph = enable_graph
         self.attn_backend = attn_backend
+        self.ignore_eos = ignore_eos
 
         self.engine: AsyncLLMEngine = None
 
@@ -331,6 +333,7 @@ class InferenceServer:
             top_k=int(pick("top_k", self.top_k)),
             max_tokens=int(max_tokens) if max_tokens is not None else None,
             stop=stop,
+            ignore_eos=self.ignore_eos,
         )
 
     async def _stream_chat(self, request_id: str, data: dict, http_request: Request):
@@ -382,7 +385,11 @@ class InferenceServer:
                 # Skip EOS token text for OpenAI API compatibility
                 # Check if this token is an EOS token by comparing token_id with eos_token_ids
                 eos_token_ids = self.engine.engine.eos_token_ids
-                is_eos_token = eos_token_ids and token_output.token_id in eos_token_ids
+                is_eos_token = (
+                    not sampling_params.ignore_eos
+                    and eos_token_ids
+                    and token_output.token_id in eos_token_ids
+                )
 
                 if not is_eos_token and token_output.token_text:
                     # Send token
@@ -631,6 +638,13 @@ def parse_args():
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
         help="Logging level",
     )
+    parser.add_argument(
+        "--ignore-eos",
+        action="store_true",
+        dest="ignore_eos",
+        default=False,
+        help="Ignore EOS token and continue generation",
+    )
 
     return parser.parse_args()
 
@@ -688,6 +702,7 @@ def main():
         port=args.port,
         enable_graph=args.enable_graph,
         attn_backend=args.attn,
+        ignore_eos=args.ignore_eos,
     )
     server.start()
 

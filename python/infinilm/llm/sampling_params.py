@@ -15,7 +15,10 @@ class SamplingParams:
     top_k: int = 1
     max_tokens: Optional[int] = None
     stop: Optional[List[str]] = None
-    stop_token_ids: Optional[List[int]] = None  # Placeholder for future usage, not currently handled
+    stop_token_ids: Optional[List[int]] = (
+        None  # Placeholder for future usage, not currently handled
+    )
+    ignore_eos: bool = False
 
     def __post_init__(self):
         if self.stop is None:
@@ -32,4 +35,5 @@ class SamplingParams:
             max_tokens=self.max_tokens,
             stop=self.stop.copy() if self.stop else None,
             stop_token_ids=self.stop_token_ids.copy() if self.stop_token_ids else None,
+            ignore_eos=self.ignore_eos,
         )
