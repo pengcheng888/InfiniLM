@@ -334,20 +334,22 @@ class LLMEngine:
             req.finish_reason = FinishReason.LENGTH
             return True
 
-        # Check EOS token
-        eos_ids = req.eos_token_ids or self.eos_token_ids
-        if eos_ids and token_id in eos_ids:
-            req.finish_reason = FinishReason.EOS_TOKEN
-            return True
-
-        # Check stop strings
-        # Remove stop string from generated_text if STOP_STRING finish reason
-        stop_strings = req.sampling_params.stop or []
-        for stop_str in stop_strings:
-            if req.generated_text.endswith(stop_str):
-                req.generated_text = req.generated_text[: -len(stop_str)]
-                req.finish_reason = FinishReason.STOP_STRING
+        if not req.sampling_params.ignore_eos:
+            # Check EOS token - only stop if ignore_eos is False
+            eos_ids = req.eos_token_ids or self.eos_token_ids
+            if eos_ids and token_id in eos_ids:
+                req.finish_reason = FinishReason.EOS_TOKEN
                 return True
+
+            # While ignoring EOS, stop strings are also ignored to avoid requiring additional arguments for benchmarking.
+            # Check stop strings
+            # Remove stop string from generated_text if STOP_STRING is the finishing reason
+            stop_strings = req.sampling_params.stop or []
+            for stop_str in stop_strings:
+                if req.generated_text.endswith(stop_str):
+                    req.generated_text = req.generated_text[: -len(stop_str)]
+                    req.finish_reason = FinishReason.STOP_STRING
+                    return True
 
         return False
 
