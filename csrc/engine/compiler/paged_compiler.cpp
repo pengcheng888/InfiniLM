@@ -18,10 +18,7 @@ inline void set_minus_one(infinicore::Tensor &tensor) {
 namespace infinilm::engine {
 PagedCompiler::PagedCompiler(const std::shared_ptr<InfinilmModel> &model, RankBarrier *barrier)
     : GraphCompiler(model, barrier) {
-    for (size_t b = 1; b < 32; b++) {
-        decode_batch_sizes_.push_back(b);
-    }
-    for (size_t b = 32; b < 64; b += 8) {
+    for (size_t b = 1; b < 64; ++b) {
         decode_batch_sizes_.push_back(b);
     }
     for (size_t b = 64; b < 128; b += 16) {
