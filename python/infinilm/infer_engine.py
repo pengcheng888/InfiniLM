@@ -96,6 +96,7 @@ class InferEngine(_infinilm.InferEngine):
         self,
         input_ids,
         *,
+        pixel_values=None,
         position_ids=None,
         past_kv_lengths=None,
         total_kv_lengths=None,
@@ -103,6 +104,8 @@ class InferEngine(_infinilm.InferEngine):
         cu_seqlens=None,
         block_tables=None,
         slot_mapping=None,
+        image_bound=None,
+        tgt_sizes=None,
         temperature=None,
         top_k=None,
         top_p=None,
@@ -110,6 +113,7 @@ class InferEngine(_infinilm.InferEngine):
         try:
             # TODO: Remove `_underlying` and simplify the corresponding code.
             input_ids = input_ids._underlying if input_ids is not None else None
+            pixel_values = pixel_values._underlying if pixel_values is not None else None
             position_ids = (
                 position_ids._underlying if position_ids is not None else None
             )
@@ -129,12 +133,15 @@ class InferEngine(_infinilm.InferEngine):
             slot_mapping = (
                 slot_mapping._underlying if slot_mapping is not None else None
             )
+            image_bound = image_bound._underlying if image_bound is not None else None
+            tgt_sizes = tgt_sizes._underlying if tgt_sizes is not None else None
 
             return infinicore.Tensor(
                 super()
                 .forward(
                     super().Input(
                         input_ids,
+                        pixel_values=pixel_values,
                         position_ids=position_ids,
                         past_sequence_lengths=past_kv_lengths,
                         total_sequence_lengths=total_kv_lengths,
@@ -142,6 +149,8 @@ class InferEngine(_infinilm.InferEngine):
                         cu_seqlens=cu_seqlens,
                         block_tables=block_tables,
                         slot_mapping=slot_mapping,
+                        image_bound=image_bound,
+                        tgt_sizes=tgt_sizes,
                         temperature=temperature,
                         top_k=top_k,
                         top_p=top_p,
@@ -158,6 +167,9 @@ class InferEngine(_infinilm.InferEngine):
         input_ids,
         generation_config,
         *,
+        pixel_values=None,
+        image_bound=None,
+        tgt_sizes=None,
         _measure_and_log_time=False,
     ):
         if generation_config.eos_token_id is None:
@@ -261,6 +273,7 @@ class InferEngine(_infinilm.InferEngine):
 
             output_id = self(
                 input_ids=input_ids,
+                pixel_values=pixel_values if iter == 0 else None,
                 position_ids=position_ids,
                 past_kv_lengths=past_kv_lengths,
                 total_kv_lengths=total_kv_lengths,
@@ -268,6 +281,8 @@ class InferEngine(_infinilm.InferEngine):
                 cu_seqlens=cu_seqlens,
                 block_tables=block_tables,
                 slot_mapping=slot_mapping,
+                image_bound=image_bound if iter == 0 else None,
+                tgt_sizes=tgt_sizes if iter == 0 else None,
                 temperature=generation_config.temperature,
                 top_k=generation_config.top_k,
                 top_p=generation_config.top_p,

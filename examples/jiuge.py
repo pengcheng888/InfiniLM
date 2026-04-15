@@ -14,6 +14,9 @@ from infinilm.cache import StaticKVCacheConfig, PagedKVCacheConfig
 from packaging import version
 from infinilm.base_config import BaseConfig
 
+from PIL import Image
+import torch
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../python"))
 
 _PAGED_KV_BLOCK_SIZE = 256
@@ -31,6 +34,7 @@ def test(
     top_p=1.0,
     temperature=1.0,
     attn_backend="default",
+    image_path=None,
 ):
     model_path = os.path.expanduser(model_path)
     # ---------------------------------------------------------------------------- #
@@ -56,6 +60,14 @@ def test(
     #                        create tokenizer
     # ---------------------------------------------------------------------------- #
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+    
+
+    processor = None
+    if image_path is not None:
+        if model.model_type == "minicpmv":
+            from transformers import AutoProcessor
+            processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
+
     if "llama" == model.model_type:
         backend = getattr(tokenizer, "backend_tokenizer", None)
         target = getattr(backend, "_tokenizer", backend)
@@ -80,6 +92,16 @@ def test(
     # prompt = "山东最高的山是？"
     if isinstance(prompts, str):
         prompts = [prompts]
+
+
+    if image_path is not None:
+        updated_prompts = []
+        for prompt in prompts:
+            if model.model_type == "minicpmv" and "<image>" not in prompt:
+                prompt = "<image>./</image>\n" + prompt
+            updated_prompts.append(prompt)
+        prompts = updated_prompts
+
     if hasattr(tokenizer, "chat_template") and tokenizer.chat_template is not None:
         input_contents = [
             tokenizer.apply_chat_template(
@@ -91,6 +113,35 @@ def test(
         ]
     else:
         input_contents = prompts
+
+    pixel_values = None
+    image_bound = None
+    tgt_sizes = None
+    if image_path is not None and processor is not None:
+        image = Image.open(image_path).convert("RGB")
+        if model.model_type == "minicpmv":
+            images = [[image] for _ in range(len(input_contents))]
+        else:
+            images = [image for _ in range(len(input_contents))]
+        if model.model_type == "minicpmv":
+            inputs = processor(
+                text=input_contents,
+                images=images,
+                return_tensors="pt",
+                max_slice_nums=1,
+                use_image_id=False,
+            )
+            input_ids = inputs["input_ids"]
+            input_ids_list = input_ids.tolist()
+            pixel_values = inputs["pixel_values"]
+            tgt_sizes = inputs["tgt_sizes"]
+            image_bound = inputs["image_bound"]
+        else:
+            raise ValueError(f"Unsupported multimodal model_type: {model.model_type}")
+    else:
+        input_ids_list = tokenizer.batch_encode_plus(input_contents)[
+            "input_ids"
+        ]  # List: [[1, 1128, 526, 366, 29892]]
 
     # input_ids_list = tokenizer.batch_encode_plus(input_contents)[
     #     "input_ids"
@@ -139,6 +190,42 @@ def test(
     print(input_contents[0], end="", flush=True)
     input_ids_infini = infinicore.from_list(input_ids_list)
 
+    pixel_values_infini = None
+    image_bound_infini = None
+    tgt_sizes_infini = None
+
+    if image_path is not None and processor is not None:
+        if model.model_type == "minicpmv":
+            torch_dtype = infinicore.utils.to_torch_dtype(model.dtype)
+            # Flatten pixel_values list-of-list; only support one slice per sample.
+            if isinstance(pixel_values, list):
+                pixel_values = [pv[0] if isinstance(pv, list) else pv for pv in pixel_values]
+                pixel_values = torch.stack(pixel_values, dim=0)
+            pixel_values_infini = infinicore.from_torch(
+                pixel_values.to(dtype=torch_dtype)
+            ).to(infini_device)
+
+            # Pick image_bound ranges matching query_num.
+            query_num = getattr(model.hf_config, "query_num", 64)
+            selected_bounds = []
+            for bounds in image_bound:
+                lengths = (bounds[:, 1] - bounds[:, 0]).tolist()
+                keep = [i for i, l in enumerate(lengths) if l == query_num]
+                if not keep:
+                    keep = [int(np.argmax(lengths))]
+                selected_bounds.append(bounds[keep])
+
+            max_ranges = max(len(b) for b in selected_bounds)
+            bound_np = np.zeros((len(selected_bounds), max_ranges, 2), dtype=np.int64)
+            for i, bnd in enumerate(selected_bounds):
+                if len(bnd) > 0:
+                    bound_np[i, : len(bnd), :] = bnd.numpy()
+            image_bound_infini = infinicore.from_numpy(bound_np)
+
+            # tgt_sizes: use first entry per sample.
+            tgt_np = np.stack([ts[0].numpy() for ts in tgt_sizes], axis=0).astype(np.int64)
+            tgt_sizes_infini = infinicore.from_numpy(tgt_np)
+
     t1 = time.time()
     print("=================== start generate ====================")
     output_ids = model.generate(
@@ -150,6 +237,9 @@ def test(
             top_p=top_p,
         ),
         _measure_and_log_time=True,
+        pixel_values=pixel_values_infini,
+        image_bound=image_bound_infini,
+        tgt_sizes=tgt_sizes_infini,
     )
     t2 = time.time()
 
@@ -199,4 +289,5 @@ if __name__ == "__main__":
         top_p=cfg.top_p,
         temperature=cfg.temperature,
         attn_backend=cfg.attn,
+        image_path=cfg.image,
     )

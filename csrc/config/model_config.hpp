@@ -83,6 +83,22 @@ public:
         }
     }
 
+    // Get reference to JSON value (non-const)
+    nlohmann::json& get_ref(const std::string &key) {
+        if (!config_json.contains(key)) {
+            throw std::out_of_range("Key '" + key + "' not found in config.");
+        }
+        return config_json.at(key);
+    }
+
+    // Get const reference to JSON value
+    const nlohmann::json& get_ref(const std::string &key) const {
+        if (!config_json.contains(key)) {
+            throw std::out_of_range("Key '" + key + "' not found in config.");
+        }
+        return config_json.at(key);
+    }
+
     // Stream output operator
     friend std::ostream &operator<<(std::ostream &os, const ModelConfig &config);
 

@@ -122,6 +122,29 @@ infinicore::Tensor LlamaModel::forward(const infinicore::Tensor &input_ids,
     return hidden_states;
 }
 
+infinicore::Tensor LlamaModel::forward_embeds(const infinicore::Tensor &inputs_embeds,
+                                              const infinicore::Tensor &position_ids,
+                                              std::optional<infinicore::Tensor> past_sequence_lengths,
+                                              std::optional<infinicore::Tensor> total_sequence_lengths,
+                                              std::optional<infinicore::Tensor> input_offsets,
+                                              std::optional<infinicore::Tensor> cu_seqlens,
+                                              std::optional<infinicore::Tensor> block_tables,
+                                              std::optional<infinicore::Tensor> slot_mapping) const {
+    auto hidden_states = inputs_embeds;
+    size_t num_layers = layers_.size();
+    infinicore::Tensor residual;
+    for (size_t i = 0; i < num_layers; ++i) {
+        layers_.at(i)->forward(hidden_states, residual, position_ids, kv_cache_, past_sequence_lengths, total_sequence_lengths, input_offsets, cu_seqlens, block_tables, slot_mapping);
+    }
+    norm_->forward_inplace(hidden_states, residual);
+
+    return hidden_states;
+}
+
+infinicore::Tensor LlamaModel::embed_tokens(const infinicore::Tensor &input_ids) const {
+    return embed_tokens_->forward(input_ids);
+}
+
 void LlamaModel::reset_cache(const cache::CacheConfig *cache_config) {
     if (cache_config == nullptr) {
         kv_cache_ = nullptr;

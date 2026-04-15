@@ -58,6 +58,8 @@ public:
      */
     Output forward(const Input &input) const;
 
+    infinicore::Tensor logits_from_hidden(const infinicore::Tensor &hidden_states) const;
+
     void reset_cache(const cache::CacheConfig *cache_config) override;
 
     const cache::CacheConfig *get_cache_config() const override;

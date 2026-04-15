@@ -126,6 +126,7 @@ InferEngine::Input::to_model_input(infinicore::Device device) const {
 
     infinilm::InfinilmModel::Input input = {
         to_device(input_ids), // @todo: on device in the future
+        to_device(pixel_values),
         to_device(position_ids),
         to_device(past_sequence_lengths), // @todo: on device in the future
         to_device(total_sequence_lengths),
@@ -133,6 +134,8 @@ InferEngine::Input::to_model_input(infinicore::Device device) const {
         to_device(cu_seqlens),
         to_device(block_tables),
         to_device(slot_mapping),
+        to_device(image_bound),
+        to_device(tgt_sizes),
     };
 
     infinilm::global_state::get_forward_context().attn_metadata = {
