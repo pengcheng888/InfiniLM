@@ -3,6 +3,7 @@ from transformers import AutoTokenizer
 from infinilm.modeling_utils import load_model_state_dict_by_file
 from infinilm.distributed import DistConfig
 from infinilm.infer_engine import GenerationConfig, InferEngine
+from infinilm.base_config import BaseConfig
 from infinilm.cache import StaticKVCacheConfig, PagedKVCacheConfig
 import argparse
 import sys
@@ -125,150 +126,6 @@ def get_test_cases(
 
     return case_dict
 
-
-def get_args():
-    parser = argparse.ArgumentParser(description="run Llama args")
-
-    parser.add_argument(
-        "--cpu",
-        action="store_true",
-        help="Run cpu test",
-    )
-    parser.add_argument(
-        "--nvidia",
-        action="store_true",
-        help="Run nvidia test",
-    )
-    parser.add_argument(
-        "--qy",
-        action="store_true",
-        help="Run qy test",
-    )
-    parser.add_argument(
-        "--metax",
-        action="store_true",
-        help="Run metax test",
-    )
-    parser.add_argument(
-        "--moore",
-        action="store_true",
-        help="Run moore test",
-    )
-    parser.add_argument(
-        "--iluvatar",
-        action="store_true",
-        help="Run iluvatar test",
-    )
-    parser.add_argument(
-        "--cambricon",
-        action="store_true",
-        help="Run cambricon test",
-    )
-    parser.add_argument(
-        "--ali",
-        action="store_true",
-        help="Run alippu test",
-    )
-    parser.add_argument(
-        "--hygon",
-        action="store_true",
-        help="Run hygon test",
-    )
-    parser.add_argument(
-        "--model",
-        type=str,
-        required=True,
-        help="model path",
-    )
-    parser.add_argument(
-        "--batch-size",
-        type=parse_list,
-        default=1,
-        help="number of prompts in a batch (can be an int or a list of ints, e.g., '1' or '[1,2,4]' or '1,2,4')",
-    )
-    parser.add_argument(
-        "--tensor-parallel-size",
-        "--tp",
-        type=int,
-        default=1,
-        help="total rank for tensor parallel",
-    )
-    parser.add_argument(
-        "--input-len",
-        type=parse_list,
-        default=10,
-        help="output tokens",
-    )
-
-    parser.add_argument(
-        "--output-len",
-        type=parse_list,
-        default=20,
-        help="output tokens",
-    )
-    parser.add_argument(
-        "--skip-load",
-        action="store_true",
-        help="skip loading model weights",
-    )
-    parser.add_argument(
-        "--top-k",
-        type=int,
-        default=1,
-        help="top k sampling",
-    )
-
-    parser.add_argument(
-        "--top-p",
-        type=float,
-        default=1.0,
-        help="top p sampling",
-    )
-
-    parser.add_argument(
-        "--temperature",
-        type=float,
-        default=1.0,
-        help="sampling temperature",
-    )
-    parser.add_argument(
-        "--enable-paged-attn",
-        action="store_true",
-        help="use paged cache",
-    )
-    parser.add_argument(
-        "--paged-kv-block-size",
-        type=int,
-        default=256,
-        help="num tokens each kv block can hold",
-    )
-    parser.add_argument(
-        "--enable-graph",
-        action="store_true",
-        help="enable graph compiling",
-    )
-    parser.add_argument(
-        "--warmup",
-        action="store_true",
-        help="Perform a warmup run before benchmarking/inference.",
-    )
-    parser.add_argument(
-        "--attn",
-        type=str,
-        default="default",
-        choices=["default", "paged-attn", "flash-attn"],
-        help="attention backend to use: 'default' or 'flash-attn'",
-    )
-    parser.add_argument(
-        "--kv-cache-dtype",
-        type=str,
-        default=None,
-        choices=["int8"],
-    )
-
-    return parser.parse_args()
-
-
 with open("examples/bench_prompt.md", "r") as f:
     prompt = f.read()
 
@@ -305,7 +162,7 @@ class TestModel:
             cache_config=cache_config,
             enable_graph_compiling=enable_graph,
             attention_backend=attn_backend,
-            kv_cache_dtype=args.kv_cache_dtype,
+            kv_cache_dtype=cfg.kv_cache_dtype,
         )
 
         # ---------------------------------------------------------------------------- #
@@ -396,52 +253,28 @@ class TestModel:
 
 
 if __name__ == "__main__":
-    args = get_args()
-    print(args)
+    cfg = BaseConfig()
+    
+    device_str = cfg.get_device_str(cfg.device)
 
-    # Parse command line arguments
-    device_str = "cpu"
-    if args.cpu:
-        device_str = "cpu"
-    elif args.nvidia:
-        device_str = "cuda"
-    elif args.qy:
-        device_str = "cuda"
-    elif args.metax:
-        device_str = "cuda"
-    elif args.moore:
-        device_str = "musa"
-    elif args.iluvatar:
-        device_str = "cuda"
-    elif args.cambricon:
-        device_str = "mlu"
-    elif args.ali:
-        device_str = "cuda"
-    elif args.hygon:
-        device_str = "cuda"
-    else:
-        print(
-            "python examples/bench.py --nvidia --model=~/TinyLlama-1.1B-Chat-v1.0/ --batch-size=2 --tp=1 --input-len=50 --output-len=50"
-        )
-        sys.exit(1)
-    _PAGED_KV_BLOCK_SIZE = args.paged_kv_block_size
+    _PAGED_KV_BLOCK_SIZE = cfg.paged_kv_block_size
     # -------------------------------------------------------- #
     #             解析参数
     # -------------------------------------------------------- #
-    model_path = args.model
+    model_path = cfg.model
 
     infini_device = infinicore.device(device_str, 0)
 
-    tp = args.tensor_parallel_size
+    tp = cfg.tp
 
-    skip_load = args.skip_load
+    skip_load = cfg.skip_load
 
-    batch_size = args.batch_size
-    input_len = args.input_len
-    output_len = args.output_len
-    enable_paged_attn = args.enable_paged_attn
-    enable_graph = args.enable_graph
-    attn_backend = args.attn
+    batch_size = cfg.batch_size
+    input_len = cfg.input_len
+    output_len = cfg.output_len
+    enable_paged_attn = cfg.enable_paged_attn
+    enable_graph = cfg.enable_graph
+    attn_backend = cfg.attn
 
     if isinstance(batch_size, int):
         batch_size = [batch_size]
@@ -488,7 +321,7 @@ if __name__ == "__main__":
     # ---------------------------------------------------------------------------- #
     #                                Warmup
     # ---------------------------------------------------------------------------- #
-    if args.warmup:
+    if cfg.warmup:
         warmup_steps = 1
 
         # warmup cache capacity
@@ -518,9 +351,9 @@ if __name__ == "__main__":
                 input_ids_infini,
                 GenerationConfig(
                     max_new_tokens=5,  # decode kernel warmup
-                    temperature=args.temperature,
-                    top_k=args.top_k,
-                    top_p=args.top_p,
+                    temperature=cfg.temperature,
+                    top_k=cfg.top_k,
+                    top_p=cfg.top_p,
                     stop_on_eos=False,
                 ),
                 _measure_and_log_time=False,
@@ -557,7 +390,7 @@ if __name__ == "__main__":
             batch_size=batch_size,
             input_len=input_len,
             output_len=output_len,
-            top_k=args.top_k,
-            top_p=args.top_p,
-            temperature=args.temperature,
+            top_k=cfg.top_k,
+            top_p=cfg.top_p,
+            temperature=cfg.temperature,
         )

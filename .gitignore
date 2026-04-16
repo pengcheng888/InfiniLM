@@ -9,6 +9,9 @@ python/infinilm/lib/*.so
 # Vscode
 .vscode/
 
+*.sh
+model_weight/
+
 # Python
 __pycache__/
 *.egg-info/

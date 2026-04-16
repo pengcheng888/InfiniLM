@@ -2,6 +2,7 @@ from .models import AutoLlamaModel
 from . import distributed
 from . import cache
 from . import llm
+from . import base_config
 
 from .llm import (
     LLM,
@@ -16,6 +17,7 @@ __all__ = [
     "distributed",
     "cache",
     "llm",
+    "base_config",
     # LLM classes
     "LLM",
     "AsyncLLMEngine",
