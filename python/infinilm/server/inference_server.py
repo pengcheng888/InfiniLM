@@ -550,8 +550,6 @@ def setup_logging(log_level: str = "INFO"):
     )
 
 
-
-
 def main():
     cfg = BaseConfig()
     setup_logging(cfg.log_level)
