@@ -3,13 +3,26 @@ from dataclasses import dataclass
 
 import infinicore
 
-from infinilm.auto_config import AutoConfig
 from infinilm.cache import StaticKVCacheConfig, PagedKVCacheConfig
 from infinilm.distributed import DistConfig
 from infinilm.lib import _infinilm
 
 from .modeling_utils import parse_dtype
 from .exception_utils import handle_oom_and_exit
+import json
+import os
+
+
+def read_hf_config(model_path):
+    config_path = os.path.join(model_path, "config.json")
+    with open(config_path, "r") as f:
+        config_dict = json.load(f)
+
+    if "model_type" not in config_dict:
+        raise ValueError(
+            f"`model_type` is not specified in the config file `{config_path}`."
+        )
+    return config_dict
 
 
 @dataclass
@@ -35,13 +48,14 @@ class InferEngine(_infinilm.InferEngine):
         attention_backend="default",
         kv_cache_dtype=None,
     ):
-        self.config = AutoConfig.from_pretrained(model_path)
+        self.hf_config = read_hf_config(model_path)
 
         if device is None:
             device = infinicore.device()
 
+        hf_config_str = json.dumps(self.hf_config)
         super().__init__(
-            model_path,
+            hf_config_str,
             distributed_config._underlying,
             device._underlying.type,
             cache_config,
@@ -56,6 +70,24 @@ class InferEngine(_infinilm.InferEngine):
         self.use_cache = False
 
         self.enable_paged_attn = isinstance(cache_config, PagedKVCacheConfig)
+
+    @property
+    def dtype(self):
+        torch_dtype = self.hf_config.get("torch_dtype")
+        if torch_dtype is None:
+            torch_dtype = self.hf_config.get("dtype")
+        return parse_dtype(torch_dtype)
+
+    @property
+    def model_type(self):
+        return self.hf_config["model_type"]
+
+    @property
+    def eos_token_id(self):
+        eos_token_id = self.hf_config["eos_token_id"]
+        if isinstance(eos_token_id, int):
+            eos_token_id = [eos_token_id]
+        return eos_token_id
 
     def __call__(self, *args, **kwargs):
         return self.forward(*args, **kwargs)
@@ -129,7 +161,7 @@ class InferEngine(_infinilm.InferEngine):
         _measure_and_log_time=False,
     ):
         if generation_config.eos_token_id is None:
-            eos_token_id = self.config.eos_token_id
+            eos_token_id = self.eos_token_id
         else:
             eos_token_id = generation_config.eos_token_id
 

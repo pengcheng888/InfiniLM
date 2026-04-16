@@ -42,7 +42,7 @@ def test(
     # ---------------------------------------------------------------------------- #
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
 
-    if "llama" == model.config.model_type:
+    if "llama" == model.model_type:
         backend = getattr(tokenizer, "backend_tokenizer", None)
         target = getattr(backend, "_tokenizer", backend)
         norm = getattr(target, "normalizer", None)
@@ -60,7 +60,7 @@ def test(
                 ]
             )
     else:
-        raise ValueError(f"Unsupported model type: {model.config.model_type}")
+        raise ValueError(f"Unsupported model type: {model.model_type}")
 
     # ---------------------------------------------------------------------------- #
     #                        token编码

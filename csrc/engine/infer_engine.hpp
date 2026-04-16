@@ -42,7 +42,7 @@ public:
         backends::AttentionBackend attention_backend = backends::AttentionBackend::Default);
 
     InferEngine(
-        const std::string &model_path = "",
+        const std::string &config_str,
         const distributed::DistConfig &distributed_config = distributed::DistConfig(),
         infinicore::Device::Type device_type = infinicore::context::getDevice().getType(),
         const cache::CacheConfig *cache_config = nullptr,
