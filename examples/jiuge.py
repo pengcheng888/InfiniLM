@@ -221,14 +221,17 @@ def test(
     # prompt = "山东最高的山是？"
     if isinstance(prompts, str):
         prompts = [prompts]
-    input_contents = [
-        tokenizer.apply_chat_template(
-            conversation=[{"role": "user", "content": prompt}],
-            add_generation_prompt=True,
-            tokenize=False,
-        )
-        for prompt in prompts
-    ]
+    if hasattr(tokenizer, 'chat_template') and tokenizer.chat_template is not None:
+        input_contents = [
+            tokenizer.apply_chat_template(
+                conversation=[{"role": "user", "content": prompt}],
+                add_generation_prompt=True,
+                tokenize=False,
+            )
+            for prompt in prompts
+        ]
+    else:
+        input_contents = prompts
 
     # input_ids_list = tokenizer.batch_encode_plus(input_contents)[
     #     "input_ids"
