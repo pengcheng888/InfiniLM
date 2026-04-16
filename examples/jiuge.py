@@ -19,7 +19,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../python"))
 _PAGED_KV_BLOCK_SIZE = 256
 
 
-
 def test(
     prompts: str | list[str],
     model_path,
@@ -81,7 +80,7 @@ def test(
     # prompt = "山东最高的山是？"
     if isinstance(prompts, str):
         prompts = [prompts]
-    if hasattr(tokenizer, 'chat_template') and tokenizer.chat_template is not None:
+    if hasattr(tokenizer, "chat_template") and tokenizer.chat_template is not None:
         input_contents = [
             tokenizer.apply_chat_template(
                 conversation=[{"role": "user", "content": prompt}],
@@ -164,7 +163,7 @@ def test(
 
 if __name__ == "__main__":
     cfg = BaseConfig()
-    
+
     device_str = cfg.get_device_str(cfg.device)
 
     prompts = [cfg.prompt for _ in range(cfg.batch_size)]
@@ -182,7 +181,7 @@ if __name__ == "__main__":
     enable_paged_attn = cfg.enable_paged_attn
 
     enable_graph = cfg.enable_graph
-    
+
     if backend != "cpp":
         raise ValueError(f"Unsupported backend: {backend}.")
 
@@ -199,6 +198,5 @@ if __name__ == "__main__":
         top_k=cfg.top_k,
         top_p=cfg.top_p,
         temperature=cfg.temperature,
-        attn_backend=cfg.attn
+        attn_backend=cfg.attn,
     )
-

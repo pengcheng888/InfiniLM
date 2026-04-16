@@ -79,38 +79,38 @@ python scripts/test_ppl.py --model-path MODEL_PATH [--ndev NDEV] [--max-batch MA
   - 单次推理测试
     - llama示例
     ```bash
-    python examples/jiuge.py [--cpu | --nvidia | --qy | --metax | --moore | --iluvatar | --ali | --cambricon | --hygon] --model_path=<path/to/model_dir>
+    python examples/jiuge.py --device [cpu | nvidia | qy | metax | moore | iluvatar | ali | cambricon | hygon] --model=<path/to/model_dir>
     ```
     - 例如：
     ```bash
-    python examples/jigue.py --nvidia --model_path=/models/TinyLlama-1.1B-Chat-v1.0
+    python examples/jigue.py --device=nvidia --model=/models/TinyLlama-1.1B-Chat-v1.0
     ```
   - 分布式推理测试
       - 9g示例
       ```bash
-    python examples/jiuge.py [---nvidia] --model_path=<path/to/model_dir> --backend=cpp --tp=NDEV --batch_size=MAX_BATCH
+    python examples/jiuge.py [-- device nvidia] --model=<path/to/model> --backend=cpp --tp=NDEV --batch-size=MAX_BATCH
     ```
 
     - 例如： 9G7B模型，cpp后端，batch_size为16，4卡分布式
     ```bash
-    python examples/jiuge.py --nvidia --model_path=/models/9G7B_MHA/ --backend=cpp --tp=4 --batch_size=16
+    python examples/jiuge.py --device nvidia --model=/models/9G7B_MHA/ --backend=cpp --tp=4 --batch-size=16
     ```
 
 
   - 推理服务测试
     - 启动推理服务
       ```bash
-      python python/infinilm/server/inference_server.py [--cpu | --nvidia | --metax | --moore | --iluvatar | --cambricon] --model_path=<path/to/model_dir> --max_tokens=MAX_TOKENS --max_batch_size=MAX_BATCH --tp=NDEV --temperature=TEMP --top_p=TOP_P --top_k=TOP_K --host=HOST --port=PORT
+      python python/infinilm/server/inference_server.py --device [cpu | nvidia | qy | metax | moore | iluvatar | ali | cambricon | hygon] --model=<path/to/model-dir> --max-tokens=MAX_TOKENS --max-batch-size=MAX_BATCH --tp=NDEV --temperature=TEMP --top-p=TOP_P --top-k=TOP_K --host=HOST --port=PORT
       ```
     
     - 单卡示例：
       ```bash
-      CUDA_VISIBLE_DEVICES=0 python python/infinilm/server/inference_server.py --nvidia --model_path=/models/9G7B_MHA/ --max_tokens=100 --max_batch_size=32 --tp=1 --temperature=1.0 --top_p=0.8 --top_k=1
+      CUDA_VISIBLE_DEVICES=0 python python/infinilm/server/inference_server.py --device nvidia --model-path=/models/9G7B_MHA/ --max-tokens=100 --max-batch-size=32 --tp=1 --temperature=1.0 --top-p=0.8 --top-k=1
       ```
     
     - 多卡分布式示例：
       ```bash
-      CUDA_VISIBLE_DEVICES=0,1,2,3 python python/infinilm/server/inference_server.py --nvidia --model_path=/models/9G7B_MHA/ --max_tokens=100 --max_batch_size=32 --tp=4 --temperature=1.0 --top_p=0.8 --top_k=1
+      CUDA_VISIBLE_DEVICES=0,1,2,3 python python/infinilm/server/inference_server.py --device nvidia --model=/models/9G7B_MHA/ --max-tokens=100 --max-batch-size=32 --tp=4 --temperature=1.0 --top-p=0.8 --top-k=1
       ```
     
     - 测试推理服务性能：
@@ -121,62 +121,62 @@ python scripts/test_ppl.py --model-path MODEL_PATH [--ndev NDEV] [--max-batch MA
   - 运行推理基准测试（C-Eval/MMLU）
 
     ```bash
-    python test/bench/test_benchmark.py [--cpu | --nvidia | --cambricon | --ascend | --metax | --moore | --iluvatar | --kunlun | --hygon | --ali] <path/to/model_dir> --bench {ceval|mmlu} [--backend cpp] [--ndev N] [--subject SUBJECT] [--num_samples N] [--max_new_tokens N] [--output_csv PATH] [--cache_dir PATH]
+    python test/bench/test_benchmark.py --device [cpu | nvidia | qy | metax | moore | iluvatar | ali | cambricon | hygon] --model <path/to/model_dir> --bench {ceval|mmlu} [--backend cpp] [--tp N] [--subject SUBJECT] [--num-samples N] [--max-new-tokens N] [--output-csv PATH] [--cache-dir PATH]
     ```
 
     - 参数说明：
       - `--subject`: 指定科目，支持单个科目、多个科目（逗号分隔）或 `all`（默认值，加载全部科目）
-      - `--output_csv`: 可选，指定CSV输出文件路径。如未指定则不生成CSV文件。CSV包含每个科目的结果和总体结果
-      - `--cache_dir`: 可选，指定数据集缓存目录的父目录。应指向包含 `ceval___ceval-exam` 和 `cais___mmlu` 等数据集子目录的父目录（例如 `~/.cache/huggingface/datasets/`）。设置后脚本优先使用本地 CSV（`pandas.read_csv`）离线加载数据，避免 `load_dataset` 的网络请求
+      - `--output-csv`: 可选，指定CSV输出文件路径。如未指定则不生成CSV文件。CSV包含每个科目的结果和总体结果
+      - `--cache-dir`: 可选，指定数据集缓存目录的父目录。应指向包含 `ceval___ceval-exam` 和 `cais___mmlu` 等数据集子目录的父目录（例如 `~/.cache/huggingface/datasets/`）。设置后脚本优先使用本地 CSV（`pandas.read_csv`）离线加载数据，避免 `load_dataset` 的网络请求
 
     - C-Eval示例：
       - 单个科目：
         ```bash
-        python test/bench/test_benchmark.py --nvidia /models/9G7B_MHA --bench ceval --subject middle_school_mathematics --num_samples 100 --backend cpp --ndev 1
+        python test/bench/test_benchmark.py --device nvidia /models/9G7B_MHA --bench ceval --subject middle_school_mathematics --num-samples 100 --backend cpp --tp 1
         ```
       - 多个科目（逗号分隔）：
         ```bash
-        python test/bench/test_benchmark.py --nvidia /models/9G7B_MHA --bench ceval --subject middle_school_mathematics,high_school_physics --backend cpp --ndev 1 --output_csv results.csv
+        python test/bench/test_benchmark.py --device nvidia /models/9G7B_MHA --bench ceval --subject middle_school_mathematics,high_school_physics --backend cpp --tp 1 --output-csv results.csv
         ```
       - 全部科目并输出CSV：
         ```bash
-        python test/bench/test_benchmark.py --nvidia /models/9G7B_MHA --bench ceval --subject all --backend cpp --ndev 1 --output_csv results.csv
+        python test/bench/test_benchmark.py --device nvidia /models/9G7B_MHA --bench ceval --subject all --backend cpp --tp 1 --output-csv results.csv
         ```
       - 使用缓存目录加速加载：
         ```bash
-        python test/bench/test_benchmark.py --nvidia /models/9G7B_MHA --bench ceval --subject middle_school_mathematics --backend cpp --ndev 1 --cache_dir ~/.cache/huggingface/datasets/
+        python test/bench/test_benchmark.py --device nvidia /models/9G7B_MHA --bench ceval --subject middle_school_mathematics --backend cpp --tp 1 --cache-dir ~/.cache/huggingface/datasets/
         ```
-        > 注意：`--cache_dir` 应指向包含 `ceval___ceval-exam` 和 `cais___mmlu` 等数据集子目录的父目录，而不是直接指向这些子目录
+        > 注意：`--cache-dir` 应指向包含 `ceval___ceval-exam` 和 `cais___mmlu` 等数据集子目录的父目录，而不是直接指向这些子目录
 
     - MMLU示例：
       - 单个科目：
         ```bash
-        python test/bench/test_benchmark.py --nvidia /models/9G7B_MHA --bench mmlu --subject abstract_algebra --backend cpp --ndev 1
+        python test/bench/test_benchmark.py --device nvidia /models/9G7B_MHA --bench mmlu --subject abstract_algebra --backend cpp --tp 1
         ```
       - 多个科目（逗号分隔）：
         ```bash
-        python test/bench/test_benchmark.py --nvidia /models/9G7B_MHA --bench mmlu --subject abstract_algebra,anatomy,astronomy --backend cpp --ndev 1 --output_csv results.csv
+        python test/bench/test_benchmark.py --device nvidia /models/9G7B_MHA --bench mmlu --subject abstract_algebra,anatomy,astronomy --backend cpp --tp 1 --output-csv results.csv
         ```
       - 使用缓存目录加速加载：
         ```bash
-        python test/bench/test_benchmark.py --nvidia /models/9G7B_MHA --bench mmlu --subject abstract_algebra --backend cpp --ndev 1 --cache_dir ~/.cache/huggingface/datasets/
+        python test/bench/test_benchmark.py --device nvidia /models/9G7B_MHA --bench mmlu --subject abstract_algebra --backend cpp --tp 1 --cache-dir ~/.cache/huggingface/datasets/
         ```
-        > 注意：`--cache_dir` 应指向包含 `ceval___ceval-exam` 和 `cais___mmlu` 等数据集子目录的父目录，而不是直接指向这些子目录
+        > 注意：`--cache-dir` 应指向包含 `ceval___ceval-exam` 和 `cais___mmlu` 等数据集子目录的父目录，而不是直接指向这些子目录
 
   - 试验中功能
     - Warm Up
       ```bash
-      python examples/bench.py --nvidia --model=<model-path> --warmup
+      python examples/bench.py --device nvidia --model=<model-path> --warmup
       ```
     - Paged Attention
       ```bash
-      python examples/bench.py --nvidia --model=<model-path> --enable-paged-attn
+      python examples/bench.py --device nvidia --model=<model-path> --enable-paged-attn
       ```
     - CUDA Graph
       ```bash
-      python examples/bench.py --nvidia --model=<model-path> --enable-paged-attn --enable-graph
+      python examples/bench.py --device nvidia --model=<model-path> --enable-paged-attn --enable-graph
       ```
     - 选择attention后端 (使用flash attention后端需要先在InfiniCore完成相关配置和编译)
       ```bash
-      python examples/bench.py --nvidia --model=<model-path> --enable-paged-attn [--attn=default | --attn=flash-attn]
+      python examples/bench.py --device nvidia --model=<model-path> --enable-paged-attn [--attn=default | --attn=flash-attn]
       ```

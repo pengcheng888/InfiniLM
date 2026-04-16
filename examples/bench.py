@@ -126,6 +126,7 @@ def get_test_cases(
 
     return case_dict
 
+
 with open("examples/bench_prompt.md", "r") as f:
     prompt = f.read()
 
@@ -254,7 +255,7 @@ class TestModel:
 
 if __name__ == "__main__":
     cfg = BaseConfig()
-    
+
     device_str = cfg.get_device_str(cfg.device)
 
     _PAGED_KV_BLOCK_SIZE = cfg.paged_kv_block_size
