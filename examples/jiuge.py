@@ -12,152 +12,12 @@ import os
 import numpy as np
 from infinilm.cache import StaticKVCacheConfig, PagedKVCacheConfig
 from packaging import version
+from infinilm.base_config import BaseConfig
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../python"))
 
 _PAGED_KV_BLOCK_SIZE = 256
 
-
-def get_args():
-    parser = argparse.ArgumentParser(description="run Llama args")
-
-    parser.add_argument(
-        "--cpu",
-        action="store_true",
-        help="Run cpu test",
-    )
-    parser.add_argument(
-        "--nvidia",
-        action="store_true",
-        help="Run nvidia test",
-    )
-    parser.add_argument(
-        "--qy",
-        action="store_true",
-        help="Run qy test",
-    )
-    parser.add_argument(
-        "--metax",
-        action="store_true",
-        help="Run metax test",
-    )
-    parser.add_argument(
-        "--moore",
-        action="store_true",
-        help="Run moore test",
-    )
-    parser.add_argument(
-        "--iluvatar",
-        action="store_true",
-        help="Run iluvatar test",
-    )
-    parser.add_argument(
-        "--cambricon",
-        action="store_true",
-        help="Run cambricon test",
-    )
-    parser.add_argument(
-        "--ali",
-        action="store_true",
-        help="Run alippu test",
-    )
-    parser.add_argument(
-        "--hygon",
-        action="store_true",
-        help="Run hygon test",
-    )
-    parser.add_argument(
-        "--model-path",
-        type=str,
-        required=True,
-        help="model_path",
-    )
-    parser.add_argument(
-        "--max-new-tokens",
-        type=int,
-        default=100,
-        help="max_new_tokens",
-    )
-    parser.add_argument(
-        "--backend",
-        type=str,
-        default="cpp",
-        help="python or cpp model",
-    )
-    parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=1,
-        help="number of prompts in a batch",
-    )
-    parser.add_argument(
-        "--prompt",
-        type=str,
-        default="How are you",
-        help="input prompt",
-    )
-    parser.add_argument(
-        "--tp",
-        type=int,
-        default=1,
-        help="total rank for tensor parallel",
-    )
-    parser.add_argument(
-        "--enable-paged-attn",
-        action="store_true",
-        help="use paged cache",
-    )
-
-    parser.add_argument(
-        "--paged-kv-block-size",
-        type=int,
-        default=256,
-        help="num tokens each kv block can hold",
-    )
-
-    parser.add_argument(
-        "--enable-graph",
-        action="store_true",
-        help="enable graph compiling",
-    )
-
-    parser.add_argument(
-        "--top-k",
-        type=int,
-        default=1,
-        help="top k sampling",
-    )
-
-    parser.add_argument(
-        "--top-p",
-        type=float,
-        default=1.0,
-        help="top p sampling",
-    )
-
-    parser.add_argument(
-        "--temperature",
-        type=float,
-        default=1.0,
-        help="sampling temperature",
-    )
-
-    parser.add_argument(
-        "--attn",
-        type=str,
-        default="default",
-        choices=["default", "paged-attn", "flash-attn"],
-        help="attention backend to use: 'default' or 'flash-attn'",
-    )
-
-    parser.add_argument(
-        "--kv-cache-dtype",
-        type=str,
-        default=None,
-        choices=["int8"],
-    )
-
-    return parser.parse_args()
 
 
 def test(
@@ -186,7 +46,7 @@ def test(
         distributed_config=DistConfig(tp),
         enable_graph_compiling=enable_graph,
         attention_backend=attn_backend,
-        kv_cache_dtype=args.kv_cache_dtype,
+        kv_cache_dtype=cfg.kv_cache_dtype,
     )
     # ---------------------------------------------------------------------------- #
     #                        Load Weights
@@ -303,44 +163,26 @@ def test(
 
 
 if __name__ == "__main__":
-    args = get_args()
-    print(args)
+    cfg = BaseConfig()
+    
+    device_str = cfg.get_device_str(cfg.device)
 
-    # Parse command line arguments
-    device_str = "cpu"
-    if args.cpu:
-        device_str = "cpu"
-    elif args.nvidia:
-        device_str = "cuda"
-    elif args.qy:
-        device_str = "cuda"
-    elif args.metax:
-        device_str = "cuda"
-    elif args.moore:
-        device_str = "musa"
-    elif args.iluvatar:
-        device_str = "cuda"
-    elif args.cambricon:
-        device_str = "mlu"
-    elif args.ali:
-        device_str = "cuda"
-    elif args.hygon:
-        device_str = "cuda"
-    else:
-        print(
-            "Usage:  python examples/jiuge.py [--cpu | --nvidia | --qy | --metax | --moore | --iluvatar | --cambricon | --ali | --hygon] --model_path=<path/to/model_dir>\n"
-            "such as, python examples/jiuge.py --nvidia --model_path=~/TinyLlama-1.1B-Chat-v1.0"
-        )
-        sys.exit(1)
-    prompts = [args.prompt for _ in range(args.batch_size)]
-    _PAGED_KV_BLOCK_SIZE = args.paged_kv_block_size
+    prompts = [cfg.prompt for _ in range(cfg.batch_size)]
 
-    model_path = args.model_path
-    max_new_tokens = args.max_new_tokens
-    backend = args.backend
-    tp = args.tp
-    enable_paged_attn = args.enable_paged_attn
-    enable_graph = args.enable_graph
+    _PAGED_KV_BLOCK_SIZE = cfg.paged_kv_block_size
+
+    model_path = cfg.model
+
+    max_new_tokens = cfg.max_new_tokens
+
+    backend = cfg.backend
+
+    tp = cfg.tp
+
+    enable_paged_attn = cfg.enable_paged_attn
+
+    enable_graph = cfg.enable_graph
+    
     if backend != "cpp":
         raise ValueError(f"Unsupported backend: {backend}.")
 
@@ -354,8 +196,9 @@ if __name__ == "__main__":
         tp=tp,
         enable_paged_attn=enable_paged_attn,
         enable_graph=enable_graph,
-        top_k=args.top_k,
-        top_p=args.top_p,
-        temperature=args.temperature,
-        attn_backend=args.attn,
+        top_k=cfg.top_k,
+        top_p=cfg.top_p,
+        temperature=cfg.temperature,
+        attn_backend=cfg.attn
     )
+

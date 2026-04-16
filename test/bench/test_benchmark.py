@@ -8,7 +8,7 @@ import json
 import numpy as np
 from datasets import load_dataset, Dataset
 from abc import ABC, abstractmethod
-
+from infinilm.base_config import BaseConfig
 
 TOTAL_TOKENS = 0
 TOTAL_TIME = 0.0
@@ -826,121 +826,7 @@ def parse_list(value: str):
         )
 
 
-def parse_arguments():
-    """Parse command line arguments using argparse"""
-    parser = argparse.ArgumentParser(
-        description="Benchmark evaluation for language models on CEval and MMLU datasets",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  python test_benchmark.py --cpu /path/to/model --bench ceval --backend cpp
-  python test_benchmark.py --nvidia /path/to/model --bench mmlu --backend vllm --ndev 2
-  python test_benchmark.py --cpu /path/to/model --bench ceval --subject "accountant" --num_samples 10 --output_csv results.csv
-        """,
-    )
 
-    # Device flags (mutually exclusive)
-    device_group = parser.add_mutually_exclusive_group(required=True)
-    device_group.add_argument("--cpu", action="store_true", help="Use CPU device")
-    device_group.add_argument(
-        "--nvidia", action="store_true", help="Use NVIDIA GPU device"
-    )
-    device_group.add_argument(
-        "--cambricon", action="store_true", help="Use Cambricon MLU device"
-    )
-    device_group.add_argument("--ascend", action="store_true", help="Use Ascend device")
-    device_group.add_argument("--metax", action="store_true", help="Use Metax device")
-    device_group.add_argument("--moore", action="store_true", help="Use Moore device")
-    device_group.add_argument(
-        "--iluvatar", action="store_true", help="Use Iluvatar device"
-    )
-    device_group.add_argument("--kunlun", action="store_true", help="Use Kunlun device")
-    device_group.add_argument("--hygon", action="store_true", help="Use Hygon device")
-    device_group.add_argument("--ali", action="store_true", help="Use Ali device")
-
-    # Positional argument for model path
-    parser.add_argument("model_path", type=str, help="Path to the model directory")
-
-    # Required benchmark argument
-    parser.add_argument(
-        "--bench",
-        required=True,
-        choices=["ceval", "mmlu"],
-        help="Benchmark to evaluate (ceval or mmlu)",
-    )
-
-    # Optional arguments
-    parser.add_argument(
-        "--backend",
-        type=str,
-        default="cpp",
-        choices=["python", "cpp", "torch", "vllm"],
-        help="Backend to use for inference (default: cpp)",
-    )
-    parser.add_argument(
-        "--ndev",
-        type=int,
-        default=1,
-        help="Number of devices for tensor parallelism (default: 1)",
-    )
-    parser.add_argument(
-        "--subject",
-        type=str,
-        default="all",
-        help="Subject(s) to evaluate, comma-separated or 'all' (default: all)",
-    )
-    parser.add_argument(
-        "--split",
-        type=str,
-        default="test",
-        choices=["test", "val", "all"],
-        help="Dataset split to use: test, val, or all (default: test)",
-    )
-    parser.add_argument(
-        "--num-samples",
-        type=int,
-        default=None,
-        help="Number of samples to evaluate per subject (default: all)",
-    )
-    parser.add_argument(
-        "--max-new-tokens",
-        type=int,
-        default=500,
-        help="Maximum number of new tokens to generate (default: 500)",
-    )
-    parser.add_argument(
-        "--output-csv",
-        type=str,
-        default=None,
-        help="Path to output CSV file for results",
-    )
-    parser.add_argument(
-        "--cache-dir",
-        type=str,
-        default=None,
-        help="Directory to use for dataset cache (offline mode when specified)",
-    )
-
-    # InfiniLM specific options
-    parser.add_argument(
-        "--enable-paged-attn",
-        action="store_true",
-        help="Enable paged attention for InfiniLM backend",
-    )
-    parser.add_argument(
-        "--enable-graph",
-        action="store_true",
-        help="Enable graph compilation for InfiniLM backend",
-    )
-    parser.add_argument(
-        "--attn",
-        type=str,
-        default="default",
-        choices=["default", "paged-attn", "flash-attn"],
-        help="Attention backend for InfiniLM (default: default)",
-    )
-
-    return parser.parse_args()
 
 
 def load_dataset_samples(args):
@@ -1222,34 +1108,13 @@ def load_dataset_samples(args):
 
 def main():
     """Main function"""
-    args = parse_arguments()
+    cfg = BaseConfig()
 
-    # Map device flags to device type string
-    device_type_str = "cpu"
-    if args.cpu:
-        device_type_str = "cpu"
-    elif args.nvidia:
-        device_type_str = "nvidia"
-    elif args.cambricon:
-        device_type_str = "cambricon"
-    elif args.ascend:
-        device_type_str = "ascend"
-    elif args.metax:
-        device_type_str = "metax"
-    elif args.moore:
-        device_type_str = "moore"
-    elif args.iluvatar:
-        device_type_str = "iluvatar"
-    elif args.kunlun:
-        device_type_str = "kunlun"
-    elif args.hygon:
-        device_type_str = "hygon"
-    elif args.ali:
-        device_type_str = "ali"
+    device_type_str = cfg.device
 
     # Normalize cache_dir and force offline when provided
-    if args.cache_dir:
-        args.cache_dir = os.path.expanduser(args.cache_dir)
+    if cfg.cache_dir:
+        cfg.cache_dir = os.path.expanduser(cfg.cache_dir)
         os.environ["HF_DATASETS_OFFLINE"] = "1"
         os.environ["HF_HUB_OFFLINE"] = "1"
 
@@ -1258,7 +1123,7 @@ def main():
     print("STEP 1: LOADING DATASET")
     print("=" * 60 + "\n")
 
-    subject_samples = load_dataset_samples(args)
+    subject_samples = load_dataset_samples(cfg)
 
     if not subject_samples:
         print("No samples loaded. Exiting.")
@@ -1269,21 +1134,21 @@ def main():
     print("STEP 2: LOADING MODEL")
     print("=" * 60 + "\n")
 
-    if args.backend == "torch":
-        assert args.ndev == 1, "Torch backend only supports single-device evaluation"
-        model = TorchBenchmark(args.model_path, device_type_str, args.bench)
-    elif args.backend == "vllm":
-        model = VLLMBenchmark(args.model_path, device_type_str, args.ndev, args.bench)
+    if cfg.backend == "torch":
+        assert cfg.tp == 1, "Torch backend only supports single-device evaluation"
+        model = TorchBenchmark(cfg.model, device_type_str, cfg.bench)
+    elif cfg.backend == "vllm":
+        model = VLLMBenchmark(cfg.model_path, device_type_str, cfg.tp, cfg.bench)
     else:  # cpp backend
         model = InfiniLMBenchmark(
-            args.model_path,
+            cfg.model,
             device_type_str,
-            args.ndev,
-            args.backend,
-            args.bench,
-            args.enable_paged_attn,
-            args.enable_graph,
-            args.attn,
+            cfg.tp,
+            cfg.backend,
+            cfg.bench,
+            cfg.enable_paged_attn,
+            cfg.enable_graph,
+            cfg.attn,
         )
 
     # Step 3: Evaluate each subject
@@ -1300,7 +1165,7 @@ def main():
 
         # Evaluate samples for this subject
         result = evaluate_samples(
-            model, samples, args.bench, args.max_new_tokens, subject_name
+            model, samples, cfg.bench, cfg.max_new_tokens, subject_name
         )
         all_results.append(result)
         print(
@@ -1326,7 +1191,7 @@ def main():
     overall_accuracy = overall_correct / overall_total if overall_total > 0 else 0.0
 
     print(f"{'=' * 60}")
-    if args.bench == "ceval":
+    if cfg.bench == "ceval":
         print(
             f"Overall 成绩: {overall_correct}/{overall_total} = {overall_accuracy:.2%}"
         )
@@ -1341,9 +1206,9 @@ def main():
         print(f"Overall Throughput: {TOTAL_TOKENS / TOTAL_TIME:.2f} tokens/s")
 
     # Write CSV if output path is specified
-    if args.output_csv:
-        print(f"\nWriting results to CSV: {args.output_csv}")
-        with open(args.output_csv, "w", newline="", encoding="utf-8") as csvfile:
+    if cfg.output_csv:
+        print(f"\nWriting results to CSV: {cfg.output_csv}")
+        with open(cfg.output_csv, "w", newline="", encoding="utf-8") as csvfile:
             writer = csv.writer(csvfile)
             writer.writerow(["Subject", "Correct", "Total", "Accuracy"])
             for result in all_results:
@@ -1358,7 +1223,7 @@ def main():
             writer.writerow(
                 ["Overall", overall_correct, overall_total, f"{overall_accuracy:.4f}"]
             )
-        print(f"CSV file written successfully: {args.output_csv}")
+        print(f"CSV file written successfully: {cfg.output_csv}")
 
 
 if __name__ == "__main__":
