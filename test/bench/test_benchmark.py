@@ -149,7 +149,7 @@ class InfiniLMBenchmark(BaseBenchmark):
         load_model_state_dict_by_file(
             self.model,
             model_dir_path,
-            dtype=self.model.config.dtype,
+            dtype=self.model.dtype,
         )
         print("Model loaded successfully")
 

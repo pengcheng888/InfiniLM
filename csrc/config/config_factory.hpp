@@ -8,7 +8,7 @@ namespace infinilm::config {
 
 class ConfigFactory {
 public:
-    static std::shared_ptr<infinilm::config::ModelConfig> createConfig(const std::string &model_path);
+    static std::shared_ptr<infinilm::config::ModelConfig> createConfig(const std::string &config_str);
 };
 
 } // namespace infinilm::config

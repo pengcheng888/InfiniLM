@@ -50,13 +50,13 @@ def test(
     # ---------------------------------------------------------------------------- #
     #                        Load Weights
     # ---------------------------------------------------------------------------- #
-    load_model_state_dict_by_file(model, model_path, dtype=model.config.dtype)
+    load_model_state_dict_by_file(model, model_path, dtype=model.dtype)
 
     # ---------------------------------------------------------------------------- #
     #                        create tokenizer
     # ---------------------------------------------------------------------------- #
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-    if "llama" == model.config.model_type:
+    if "llama" == model.model_type:
         backend = getattr(tokenizer, "backend_tokenizer", None)
         target = getattr(backend, "_tokenizer", backend)
         norm = getattr(target, "normalizer", None)

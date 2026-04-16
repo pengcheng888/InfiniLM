@@ -170,7 +170,7 @@ class TestModel:
         #                        加载权重
         # ---------------------------------------------------------------------------- #
         if not skip_load:
-            load_model_state_dict_by_file(model, model_path, dtype=model.config.dtype)
+            load_model_state_dict_by_file(model, model_path, dtype=model.dtype)
 
         # ---------------------------------------------------------------------------- #
         #                        创建 tokenizer

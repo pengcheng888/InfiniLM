@@ -4,8 +4,9 @@
 
 namespace infinilm::config {
 
-std::shared_ptr<infinilm::config::ModelConfig> ConfigFactory::createConfig(const std::string &model_path) {
-    auto model_config = std::make_shared<infinilm::config::ModelConfig>(model_path + "/config.json");
+std::shared_ptr<infinilm::config::ModelConfig> ConfigFactory::createConfig(const std::string &config_str) {
+    const nlohmann::json config_json = nlohmann::json::parse(config_str);
+    auto model_config = std::make_shared<infinilm::config::ModelConfig>(config_json);
     if (nullptr == model_config) {
         throw std::runtime_error("infinilm::config::ConfigFactory::createConfig: model_config is not initialized");
     }

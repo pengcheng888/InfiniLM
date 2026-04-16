@@ -51,7 +51,7 @@ InferEngine::InferEngine(
 }
 
 InferEngine::InferEngine(
-    const std::string &model_path,
+    const std::string &config_str,
     const distributed::DistConfig &distributed_config,
     infinicore::Device::Type device_type,
     const cache::CacheConfig *cache_config,
@@ -64,7 +64,7 @@ InferEngine::InferEngine(
     }
 
     // Load model config if model_path is provided, model_path must be valid, and config.json exists
-    this->model_config_ = infinilm::config::ConfigFactory::createConfig(model_path);
+    this->model_config_ = infinilm::config::ConfigFactory::createConfig(config_str);
     auto infinilm_config = std::make_shared<infinilm::global_state::InfinilmConfig>(attention_backend, this->model_config_);
 
     // Only support offline int8 kv cache quantization in this version

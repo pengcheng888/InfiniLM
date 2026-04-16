@@ -96,7 +96,7 @@ class LLMEngine:
 
         # Load model weights
         load_model_state_dict_by_file(
-            self.model_engine, config.model_path, dtype=self.model_engine.config.dtype
+            self.model_engine, config.model_path, dtype=self.model_engine.dtype
         )
 
         # Initialize tokenizer
@@ -131,7 +131,7 @@ class LLMEngine:
         self.cache_type = config.cache_type
 
         # Get EOS token IDs from model config
-        self.eos_token_ids = self.model_engine.config.eos_token_id or []
+        self.eos_token_ids = self.model_engine.eos_token_id or []
         if isinstance(self.eos_token_ids, int):
             self.eos_token_ids = [self.eos_token_ids]
 
@@ -168,7 +168,7 @@ class LLMEngine:
 
     def _fix_tokenizer_decoder(self):
         """Fix tokenizer decoder for llama models."""
-        if "llama" in self.model_engine.config.model_type.lower():
+        if "llama" in self.model_engine.model_type.lower():
             backend = getattr(self.tokenizer, "backend_tokenizer", None)
             target = getattr(backend, "_tokenizer", backend)
             norm = getattr(target, "normalizer", None)
