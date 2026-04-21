@@ -223,7 +223,7 @@ if __name__ == "__main__":
 
     device_str = cfg.get_device_str(cfg.device)
 
-    _PAGED_KV_BLOCK_SIZE = cfg.paged_kv_block_size
+    _PAGED_KV_BLOCK_SIZE = cfg.block_size
     # -------------------------------------------------------- #
     #             解析参数
     # -------------------------------------------------------- #

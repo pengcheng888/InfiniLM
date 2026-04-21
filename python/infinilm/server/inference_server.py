@@ -561,7 +561,7 @@ def main():
         dtype=cfg.dtype,
         tensor_parallel_size=cfg.tp,
         cache_type=cfg.cache_type,
-        max_tokens=cfg.max_tokens,
+        max_tokens=cfg.max_new_tokens,
         max_batch_size=cfg.max_batch_size,
         num_blocks=cfg.num_blocks,
         block_size=cfg.block_size,

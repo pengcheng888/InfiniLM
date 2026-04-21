@@ -1135,7 +1135,7 @@ def main():
         assert cfg.tp == 1, "Torch backend only supports single-device evaluation"
         model = TorchBenchmark(cfg.model, device_type_str, cfg.bench)
     elif cfg.backend == "vllm":
-        model = VLLMBenchmark(cfg.model_path, device_type_str, cfg.tp, cfg.bench)
+        model = VLLMBenchmark(cfg.model, device_type_str, cfg.tp, cfg.bench)
     else:  # cpp backend
         model = InfiniLMBenchmark(
             cfg.model,

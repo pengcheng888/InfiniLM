@@ -168,7 +168,7 @@ if __name__ == "__main__":
 
     prompts = [cfg.prompt for _ in range(cfg.batch_size)]
 
-    _PAGED_KV_BLOCK_SIZE = cfg.paged_kv_block_size
+    _PAGED_KV_BLOCK_SIZE = cfg.block_size
 
     model_path = cfg.model
 
