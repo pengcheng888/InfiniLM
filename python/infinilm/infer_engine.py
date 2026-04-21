@@ -113,7 +113,9 @@ class InferEngine(_infinilm.InferEngine):
         try:
             # TODO: Remove `_underlying` and simplify the corresponding code.
             input_ids = input_ids._underlying if input_ids is not None else None
-            pixel_values = pixel_values._underlying if pixel_values is not None else None
+            pixel_values = (
+                pixel_values._underlying if pixel_values is not None else None
+            )
             position_ids = (
                 position_ids._underlying if position_ids is not None else None
             )

@@ -84,7 +84,7 @@ public:
     }
 
     // Get reference to JSON value (non-const)
-    nlohmann::json& get_ref(const std::string &key) {
+    nlohmann::json &get_ref(const std::string &key) {
         if (!config_json.contains(key)) {
             throw std::out_of_range("Key '" + key + "' not found in config.");
         }
@@ -92,7 +92,7 @@ public:
     }
 
     // Get const reference to JSON value
-    const nlohmann::json& get_ref(const std::string &key) const {
+    const nlohmann::json &get_ref(const std::string &key) const {
         if (!config_json.contains(key)) {
             throw std::out_of_range("Key '" + key + "' not found in config.");
         }

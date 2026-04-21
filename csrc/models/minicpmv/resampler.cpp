@@ -36,12 +36,16 @@ void write_pos_embed(void *dst, infinicore::DataType dtype, const float *src, si
     }
     if (dtype == infinicore::DataType::F16) {
         auto *out = reinterpret_cast<uint16_t *>(dst);
-        for (size_t i = 0; i < n; ++i) out[i] = f32_to_f16(src[i]);
+        for (size_t i = 0; i < n; ++i) {
+            out[i] = f32_to_f16(src[i]);
+        }
         return;
     }
     if (dtype == infinicore::DataType::BF16) {
         auto *out = reinterpret_cast<uint16_t *>(dst);
-        for (size_t i = 0; i < n; ++i) out[i] = f32_to_bf16(src[i]);
+        for (size_t i = 0; i < n; ++i) {
+            out[i] = f32_to_bf16(src[i]);
+        }
         return;
     }
     throw std::runtime_error("Unsupported dtype in write_pos_embed");

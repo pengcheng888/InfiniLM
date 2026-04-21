@@ -201,9 +201,9 @@ def test(
 
             # 1. Pixel values
             all_pixel_values = []
-            assert len(pixel_values) == 1, (
-                "Only batch_size=1 is supported yet for image inputs."
-            )
+            assert (
+                len(pixel_values) == 1
+            ), "Only batch_size=1 is supported yet for image inputs."
             for pv in pixel_values:
                 all_pixel_values.extend(
                     [i.flatten(end_dim=1).permute(1, 0) for i in pv]

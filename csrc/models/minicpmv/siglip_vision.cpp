@@ -30,8 +30,7 @@ SiglipVisionEmbeddings::SiglipVisionEmbeddings(const nlohmann::json &config,
                                                const infinicore::Device &device)
     : hidden_size_(config.value("hidden_size", 768)),
       patch_size_(config.value("patch_size", 16)),
-      num_positions_((config.value("image_size", 224) / config.value("patch_size", 16)) * 
-                     (config.value("image_size", 224) / config.value("patch_size", 16))) {
+      num_positions_((config.value("image_size", 224) / config.value("patch_size", 16)) * (config.value("image_size", 224) / config.value("patch_size", 16))) {
     INFINICORE_NN_MODULE_INIT(patch_embedding, 3, hidden_size_, patch_size_, dtype, device);
     INFINICORE_NN_MODULE_INIT(position_embedding, num_positions_, hidden_size_, std::nullopt, dtype, device);
 }

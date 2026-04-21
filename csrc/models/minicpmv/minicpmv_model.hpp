@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../../config/model_config.hpp"
 #include "../infinilm_model.hpp"
 #include "../llama_legacy/llama_for_causal_lm.hpp"
 #include "../../config/model_config.hpp"

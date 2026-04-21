@@ -1,10 +1,10 @@
 #pragma once
 
+#include "../../config/model_config.hpp"
 #include "infinicore/nn/layer_norm.hpp"
 #include "infinicore/nn/linear.hpp"
 #include "infinicore/nn/module.hpp"
 #include "infinicore/tensor.hpp"
-#include "../../config/model_config.hpp"
 
 #include <optional>
 #include <vector>
