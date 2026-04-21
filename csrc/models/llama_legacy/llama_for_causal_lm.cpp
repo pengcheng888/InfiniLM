@@ -2,7 +2,7 @@
 #include "infinicore/context/context.hpp"
 #include "infinicore/nn/linear.hpp"
 #include "infinicore/ops.hpp"
-namespace infinilm::models::llama {
+namespace infinilm::models::llama_legacy {
 /**
  * @deprecated This function is deprecated and will be REMOVED in the next major release (v0.2.0).
  *
@@ -19,7 +19,7 @@ LlamaForCausalLM::LlamaForCausalLM(const LlamaConfig &config,
                                    const infinicore::Device &device,
                                    engine::distributed::RankInfo rank_info,
                                    backends::AttentionBackend attention_backend) {
-    spdlog::warn("infinilm::models::llama: LlamaForCausalLM is no longer supported, please use the new model instead.");
+    spdlog::warn("infinilm::models::llama_legacy: LlamaForCausalLM is no longer supported, please use the new model instead.");
 
     // Initialize module's device_ member
     device_ = device;
@@ -38,7 +38,7 @@ LlamaForCausalLM::LlamaForCausalLM(std::shared_ptr<infinilm::config::ModelConfig
                                    const infinicore::Device &device,
                                    engine::distributed::RankInfo rank_info,
                                    backends::AttentionBackend attention_backend) {
-    spdlog::warn("infinilm::models::llama: LlamaForCausalLM is no longer supported, please use the new model instead.");
+    spdlog::warn("infinilm::models::llama_legacy: LlamaForCausalLM is no longer supported, please use the new model instead.");
 
     // Initialize module's device_ member
     device_ = device;
@@ -82,4 +82,4 @@ const cache::CacheConfig *LlamaForCausalLM::get_cache_config() const {
     return cache_config_.get();
 }
 
-} // namespace infinilm::models::llama
+} // namespace infinilm::models::llama_legacy

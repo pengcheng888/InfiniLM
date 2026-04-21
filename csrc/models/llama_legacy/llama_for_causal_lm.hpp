@@ -10,7 +10,7 @@
 
 #include "../../engine/distributed/distributed.hpp"
 
-namespace infinilm::models::llama {
+namespace infinilm::models::llama_legacy {
 
 /**
  * @brief Llama model for Causal Language Modeling
@@ -76,4 +76,4 @@ protected:
     std::unique_ptr<cache::CacheConfig> cache_config_;
 };
 
-} // namespace infinilm::models::llama
+} // namespace infinilm::models::llama_legacy

@@ -2,7 +2,7 @@
 #include "infinicore/nn/linear.hpp"
 #include "infinicore/ops.hpp"
 
-namespace infinilm::models::llama {
+namespace infinilm::models::llama_legacy {
 /**
  * @deprecated This function is deprecated and will be REMOVED in the next major release (v0.2.0).
  *
@@ -86,4 +86,4 @@ infinicore::Tensor LlamaMLP::forward(const infinicore::Tensor &hidden_states) co
     return output;
 }
 
-} // namespace infinilm::models::llama
+} // namespace infinilm::models::llama_legacy

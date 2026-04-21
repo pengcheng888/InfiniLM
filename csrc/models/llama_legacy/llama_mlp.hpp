@@ -12,7 +12,7 @@
 
 #include "../../engine/distributed/distributed.hpp"
 
-namespace infinilm::models::llama {
+namespace infinilm::models::llama_legacy {
 
 /**
  * @brief MLP (Feed-Forward Network) module for Llama
@@ -78,4 +78,4 @@ protected:
     std::shared_ptr<infinilm::config::ModelConfig> model_config_;
 };
 
-} // namespace infinilm::models::llama
+} // namespace infinilm::models::llama_legacy
