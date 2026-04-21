@@ -1,6 +1,42 @@
 import argparse
-import sys
+import json
 import os
+import sys
+
+
+def parse_list(value: str):
+    """Parse parse_list argument: can be a single int or a list of ints.
+
+    Examples:
+        "1" -> 1
+        "[1,2,4]" -> [1, 2, 4]
+        "1,2,4" -> [1, 2, 4]
+    """
+    value = value.strip()
+    # Try to parse as JSON list first
+    if value.startswith("[") and value.endswith("]"):
+        try:
+            result = json.loads(value)
+            if isinstance(result, list):
+                return [int(x) for x in result]
+            return int(result)
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+    # Try to parse as comma-separated values
+    if "," in value:
+        try:
+            return [int(x.strip()) for x in value.split(",")]
+        except ValueError:
+            pass
+
+    # Try to parse as a single integer
+    try:
+        return int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"batch-size must be an int or list[int], got: {value}"
+        )
 
 
 class BaseConfig:
@@ -122,10 +158,10 @@ class BaseConfig:
             help="maximum batch size for server",
         )
         self.parser.add_argument(
-            "--input-len", type=int, default=10, help="input sequence length"
+            "--input-len", type=parse_list, default=10, help="input sequence length"
         )
         self.parser.add_argument(
-            "--output-len", type=int, default=20, help="output sequence length"
+            "--output-len", type=parse_list, default=20, help="output sequence length"
         )
         self.parser.add_argument(
             "--max-new-tokens",
