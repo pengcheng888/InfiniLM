@@ -36,41 +36,6 @@ def read_json_file(file_path):
         return json.load(file)
 
 
-def parse_list(value: str):
-    """Parse parse_list argument: can be a single int or a list of ints.
-
-    Examples:
-        "1" -> 1
-        "[1,2,4]" -> [1, 2, 4]
-        "1,2,4" -> [1, 2, 4]
-    """
-    value = value.strip()
-    # Try to parse as JSON list first
-    if value.startswith("[") and value.endswith("]"):
-        try:
-            result = json.loads(value)
-            if isinstance(result, list):
-                return [int(x) for x in result]
-            return int(result)
-        except (json.JSONDecodeError, ValueError):
-            pass
-
-    # Try to parse as comma-separated values
-    if "," in value:
-        try:
-            return [int(x.strip()) for x in value.split(",")]
-        except ValueError:
-            pass
-
-    # Try to parse as a single integer
-    try:
-        return int(value)
-    except ValueError:
-        raise argparse.ArgumentTypeError(
-            f"batch-size must be an int or list[int], got: {value}"
-        )
-
-
 def get_test_cases(
     model_path: str,
     batch_size_list: list[int],
