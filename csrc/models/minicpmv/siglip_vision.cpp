@@ -19,25 +19,6 @@ SiglipPatchEmbedding::SiglipPatchEmbedding(size_t in_channels,
 }
 
 infinicore::Tensor SiglipPatchEmbedding::forward(const infinicore::Tensor &pixel_values) const {
-    auto shape = pixel_values->shape();
-    if (shape.size() == 4 && shape[2] == patch_size_ && (shape[3] % patch_size_ == 0)) {
-        // MiniCPM-V preprocessor packs patches into [B, C, P, L * P].
-        size_t batch_size = shape[0];
-        size_t channels = shape[1];
-        size_t num_patches = shape[3] / patch_size_;
-
-        auto patches = pixel_values->view({batch_size, channels, patch_size_, num_patches, patch_size_})
-                           ->permute({0, 3, 1, 2, 4})
-                           ->contiguous();
-        auto patches2d = patches->view({batch_size * num_patches, channels * patch_size_ * patch_size_});
-        auto weight2d = weight_->view({weight_->size(0), channels * patch_size_ * patch_size_});
-        auto out2d = infinicore::op::linear(
-            patches2d, weight2d, std::make_optional<infinicore::Tensor>(bias_));
-        auto out = out2d->view({batch_size, num_patches, weight_->size(0)})->permute({0, 2, 1});
-        out = out->view({batch_size, weight_->size(0), 1, num_patches});
-        return out->contiguous();
-    }
-
     std::vector<infinicore::Size> pads{0, 0};
     std::vector<infinicore::Size> strides{patch_size_, patch_size_};
     std::vector<infinicore::Size> dilations{1, 1};

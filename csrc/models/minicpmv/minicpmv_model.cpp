@@ -1,8 +1,8 @@
 #include "minicpmv_model.hpp"
 
-#include "infinicore/ops.hpp"
-#include "../models_registry.hpp"
 #include "../../global_state/global_state.hpp"
+#include "../models_registry.hpp"
+#include "infinicore/ops.hpp"
 
 #include <algorithm>
 #include <stdexcept>
@@ -20,23 +20,22 @@ MiniCPMVModel::MiniCPMVModel(std::shared_ptr<infinilm::config::ModelConfig> mode
     INFINICORE_NN_MODULE_INIT(llm, model_config, device, rank_info_);
 
     // Use get_ref instead of get to get a reference
-    auto& vision_cfg = model_config->get_ref("vision_config");
+    auto &vision_cfg = model_config->get_ref("vision_config");
 
-    if (model_config->get<bool>("drop_vision_last_layer") && 
-        vision_cfg.value("num_hidden_layers", 0) > 0) {
+    if (model_config->get<bool>("drop_vision_last_layer") && vision_cfg.value("num_hidden_layers", 0) > 0) {
         vision_cfg["num_hidden_layers"] = vision_cfg.value("num_hidden_layers", 0) - 1;
     }
-    
+
     INFINICORE_NN_MODULE_INIT(vpm, vision_cfg, dtype, device, false);
 
     size_t embed_dim = model_config->get<size_t>("hidden_size");
     size_t num_heads = embed_dim / 128;
-    INFINICORE_NN_MODULE_INIT(resampler, 
-                              model_config->get<size_t>("query_num"), 
-                              embed_dim, 
-                              num_heads, 
-                              vision_cfg.value("hidden_size", 768), 
-                              dtype, 
+    INFINICORE_NN_MODULE_INIT(resampler,
+                              model_config->get<size_t>("query_num"),
+                              embed_dim,
+                              num_heads,
+                              vision_cfg.value("hidden_size", 768),
+                              dtype,
                               device);
 }
 
@@ -47,32 +46,21 @@ infinicore::Tensor MiniCPMVModel::replace_embeddings(const infinicore::Tensor &i
     out->copy_from(inputs_embeds);
 
     auto bounds_cpu = image_bound->to(infinicore::Device::cpu());
-    auto batch_size = bounds_cpu->size(0);
-    auto num_ranges = bounds_cpu->size(1);
-    auto *bound_ptr = reinterpret_cast<const int64_t *>(bounds_cpu->data());
+    auto batch_size = inputs_embeds->size(0);
 
-    for (size_t b = 0; b < batch_size; ++b) {
-        auto vision_slice = vision_hidden->narrow({{0, b, 1}});
-        auto vision_len = vision_slice->size(1);
-        size_t offset = 0;
-        for (size_t r = 0; r < num_ranges; ++r) {
-            auto start = bound_ptr[(b * num_ranges + r) * 2];
-            auto end = bound_ptr[(b * num_ranges + r) * 2 + 1];
-            if (end <= start) {
-                continue;
-            }
-            size_t len = static_cast<size_t>(end - start);
-            if (offset + len > vision_len) {
-                throw std::runtime_error("MiniCPMVModel: image_bound length exceeds vision tokens");
-            }
-            auto src = vision_slice->narrow({{1, offset, len}});
-            if (src->shape().size() == 2) {
-                src = src->unsqueeze(0);
-            }
-            auto dst = out->narrow({{0, b, 1}, {1, static_cast<size_t>(start), len}});
-            dst->copy_from(src);
-            offset += len;
-        }
+    ASSERT_EQ(batch_size, 1);
+    ASSERT_EQ(bounds_cpu->size(0), 1);
+    auto out_slice = out->squeeze(0);
+    auto bound_slice = bounds_cpu->squeeze(0);
+    auto vision_len = vision_hidden->size(0);
+    for (size_t patch = 0; patch < vision_len; ++patch) {
+        auto patch_embed = vision_hidden->narrow({{0, patch, 1}})->squeeze(0);
+        auto bound = bound_slice->narrow({{0, patch, 1}});
+        auto bound_ptr = reinterpret_cast<const int64_t *>(bound->data());
+        auto start = bound_ptr[0];
+        auto end = bound_ptr[1];
+
+        out_slice->narrow({{0, size_t(start), size_t(end - start)}})->copy_from(patch_embed);
     }
 
     return out;
@@ -141,9 +129,7 @@ std::shared_ptr<infinilm::config::ModelConfig> create_minicpmv_model_config(
     return model_config;
 }
 
-
 } // namespace infinilm::models::minicpmv
-
 
 namespace {
 INFINILM_REGISTER_CAUSAL_LM_MODEL(

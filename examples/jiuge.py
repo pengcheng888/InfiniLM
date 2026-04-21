@@ -60,13 +60,16 @@ def test(
     #                        create tokenizer
     # ---------------------------------------------------------------------------- #
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-    
 
     processor = None
     if image_path is not None:
         if model.model_type == "minicpmv":
             from transformers import AutoProcessor
-            processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
+
+            processor = AutoProcessor.from_pretrained(
+                model_path, trust_remote_code=True
+            )
+            tokenizer = processor.tokenizer
 
     if "llama" == model.model_type:
         backend = getattr(tokenizer, "backend_tokenizer", None)
@@ -93,12 +96,11 @@ def test(
     if isinstance(prompts, str):
         prompts = [prompts]
 
-
     if image_path is not None:
         updated_prompts = []
         for prompt in prompts:
             if model.model_type == "minicpmv" and "<image>" not in prompt:
-                prompt = "<image>./</image>\n" + prompt
+                prompt = "(<image>./</image>)\n" + prompt
             updated_prompts.append(prompt)
         prompts = updated_prompts
 
@@ -128,8 +130,6 @@ def test(
                 text=input_contents,
                 images=images,
                 return_tensors="pt",
-                max_slice_nums=1,
-                use_image_id=False,
             )
             input_ids = inputs["input_ids"]
             input_ids_list = input_ids.tolist()
@@ -143,24 +143,24 @@ def test(
             "input_ids"
         ]  # List: [[1, 1128, 526, 366, 29892]]
 
-    # input_ids_list = tokenizer.batch_encode_plus(input_contents)[
-    #     "input_ids"
-    # ]  # List: [[1, 1128, 526, 366, 29892]]
-    if version.parse(transformers.__version__) < version.parse("5.0.0"):
-        # Ideally this is solved by upgrading transformers. However, doing so causes version mismatch between transformers and mlu pytorch on devices with Phytium CPU. So a branch is temporarily used.
-        input_ids_list = [
-            tokenizer.encode_plus(
-                text, truncation=True, max_length=2048, add_special_tokens=True
-            )["input_ids"]
-            for text in input_contents
-        ]
-    else:
-        input_ids_list = [
-            tokenizer._encode_plus(
-                text, truncation=True, max_length=2048, add_special_tokens=True
-            )["input_ids"]
-            for text in input_contents
-        ]
+        # input_ids_list = tokenizer.batch_encode_plus(input_contents)[
+        #     "input_ids"
+        # ]  # List: [[1, 1128, 526, 366, 29892]]
+        if version.parse(transformers.__version__) < version.parse("5.0.0"):
+            # Ideally this is solved by upgrading transformers. However, doing so causes version mismatch between transformers and mlu pytorch on devices with Phytium CPU. So a branch is temporarily used.
+            input_ids_list = [
+                tokenizer.encode_plus(
+                    text, truncation=True, max_length=2048, add_special_tokens=True
+                )["input_ids"]
+                for text in input_contents
+            ]
+        else:
+            input_ids_list = [
+                tokenizer._encode_plus(
+                    text, truncation=True, max_length=2048, add_special_tokens=True
+                )["input_ids"]
+                for text in input_contents
+            ]
 
     # ---------------------------------------------------------------------------- #
     #                       Create KVCache
@@ -190,41 +190,54 @@ def test(
     print(input_contents[0], end="", flush=True)
     input_ids_infini = infinicore.from_list(input_ids_list)
 
+    # Process multimodal inputs if needed
     pixel_values_infini = None
     image_bound_infini = None
     tgt_sizes_infini = None
-
     if image_path is not None and processor is not None:
+        # TODO: Factor out this part per future multimodal model support.
         if model.model_type == "minicpmv":
             torch_dtype = infinicore.utils.to_torch_dtype(model.dtype)
-            # Flatten pixel_values list-of-list; only support one slice per sample.
-            if isinstance(pixel_values, list):
-                pixel_values = [pv[0] if isinstance(pv, list) else pv for pv in pixel_values]
-                pixel_values = torch.stack(pixel_values, dim=0)
-            pixel_values_infini = infinicore.from_torch(
-                pixel_values.to(dtype=torch_dtype)
-            ).to(infini_device)
 
-            # Pick image_bound ranges matching query_num.
-            query_num = getattr(model.hf_config, "query_num", 64)
-            selected_bounds = []
-            for bounds in image_bound:
-                lengths = (bounds[:, 1] - bounds[:, 0]).tolist()
-                keep = [i for i, l in enumerate(lengths) if l == query_num]
-                if not keep:
-                    keep = [int(np.argmax(lengths))]
-                selected_bounds.append(bounds[keep])
+            # 1. Pixel values
+            all_pixel_values = []
+            assert len(pixel_values) == 1, (
+                "Only batch_size=1 is supported yet for image inputs."
+            )
+            for pv in pixel_values:
+                all_pixel_values.extend(
+                    [i.flatten(end_dim=1).permute(1, 0) for i in pv]
+                )
 
-            max_ranges = max(len(b) for b in selected_bounds)
-            bound_np = np.zeros((len(selected_bounds), max_ranges, 2), dtype=np.int64)
-            for i, bnd in enumerate(selected_bounds):
+            pixel_values_tensor = torch.nn.utils.rnn.pad_sequence(
+                all_pixel_values, batch_first=True, padding_value=0.0
+            ).to(dtype=torch_dtype)
+            B, L, _ = pixel_values_tensor.shape
+            pixel_values_tensor = (
+                pixel_values_tensor.permute(0, 2, 1).reshape(B, 3, -1, L).contiguous()
+            )
+            pixel_values_infini = infinicore.from_torch(pixel_values_tensor)
+
+            # 2. tgt_sizes
+            all_tgt_sizes = [
+                tgt_size for tgt_size in tgt_sizes if isinstance(tgt_size, torch.Tensor)
+            ]
+
+            tgt_sizes_tensor = torch.vstack(all_tgt_sizes).to(torch.int64)
+
+            tgt_sizes_infini = infinicore.from_torch(tgt_sizes_tensor)
+
+            # 3. image_bound
+            batch_size = len(image_bound)
+            max_ranges = max(len(b) for b in image_bound)
+
+            bound_np = np.zeros((batch_size, max_ranges, 2), dtype=np.int64)
+
+            for i, bnd in enumerate(image_bound):
                 if len(bnd) > 0:
-                    bound_np[i, : len(bnd), :] = bnd.numpy()
-            image_bound_infini = infinicore.from_numpy(bound_np)
+                    bound_np[i, : len(bnd), :] = bnd.cpu().numpy()
 
-            # tgt_sizes: use first entry per sample.
-            tgt_np = np.stack([ts[0].numpy() for ts in tgt_sizes], axis=0).astype(np.int64)
-            tgt_sizes_infini = infinicore.from_numpy(tgt_np)
+            image_bound_infini = infinicore.from_numpy(bound_np)
 
     t1 = time.time()
     print("=================== start generate ====================")
