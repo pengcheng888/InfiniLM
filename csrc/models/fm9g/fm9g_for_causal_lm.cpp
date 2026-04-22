@@ -19,16 +19,6 @@ namespace {
 #ifndef USE_CLASSIC_LLAMA
 
 INFINILM_REGISTER_CAUSAL_LM_MODEL(
-    llama,
-    infinilm::models::fm9g::FM9GForCausalLM,
-    infinilm::models::fm9g::create_fm9g_model_config);
-
-INFINILM_REGISTER_CAUSAL_LM_MODEL(
-    qwen2,
-    infinilm::models::fm9g::FM9GForCausalLM,
-    infinilm::models::fm9g::create_fm9g_model_config);
-
-INFINILM_REGISTER_CAUSAL_LM_MODEL(
     fm9g,
     infinilm::models::fm9g::FM9GForCausalLM,
     infinilm::models::fm9g::create_fm9g_model_config);
