@@ -30,6 +30,11 @@ std::vector<infinicore::Tensor> InfinilmModel::default_allocate_kv_cache_tensors
     if (nullptr == text_config) {
         throw std::runtime_error("infinilm::InfinilmModel::default_allocate_kv_cache_tensors: text_config is null");
     }
+    size_t head_dim = text_config->get<size_t>("head_dim");
+    size_t num_key_value_heads = text_config->get<size_t>("num_key_value_heads");
+    size_t max_position_embeddings = text_config->get<size_t>("max_position_embeddings");
+    const auto &dtype = model_config_->get_kv_cache_dtype();
+    const size_t num_hidden_layers = text_config->get<size_t>("num_hidden_layers");
 
     std::vector<infinicore::Tensor> kv_cache_vec;
     switch (attention_backend) {
@@ -38,13 +43,8 @@ std::vector<infinicore::Tensor> InfinilmModel::default_allocate_kv_cache_tensors
         if (nullptr == static_kv_cache_config) {
             throw std::runtime_error("infinilm::InfinilmModel::default_allocate_kv_cache_tensors: invalid static kv cache config type");
         }
-        const size_t num_hidden_layers = text_config->get<size_t>("num_hidden_layers");
         kv_cache_vec.reserve(num_hidden_layers);
 
-        size_t head_dim = text_config->get<size_t>("head_dim");
-        size_t num_key_value_heads = text_config->get<size_t>("num_key_value_heads");
-        size_t max_position_embeddings = text_config->get<size_t>("max_position_embeddings");
-        const auto &dtype = model_config_->get_kv_cache_dtype();
         for (size_t layer_idx = 0; layer_idx < num_hidden_layers; ++layer_idx) {
             auto kv_cache = cache::StaticKVCache::create_layer_kv_cache(
                 head_dim,
@@ -67,12 +67,8 @@ std::vector<infinicore::Tensor> InfinilmModel::default_allocate_kv_cache_tensors
             throw std::runtime_error(
                 "infinilm::InfinilmModel::default_allocate_kv_cache_tensors: invalid paged kv cache config type");
         }
-        const size_t num_hidden_layers = text_config->get<size_t>("num_hidden_layers");
         kv_cache_vec.reserve(num_hidden_layers);
 
-        size_t head_dim = text_config->get<size_t>("head_dim");
-        size_t num_key_value_heads = text_config->get<size_t>("num_key_value_heads");
-        const auto &dtype = model_config_->get_kv_cache_dtype();
         for (size_t layer_idx = 0; layer_idx < num_hidden_layers; ++layer_idx) {
             auto kv_cache = cache::PagedKVCache::create_layer_kv_cache(
                 head_dim,
