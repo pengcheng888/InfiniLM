@@ -53,8 +53,8 @@ infinicore::Tensor FlashAttentionImpl::forward(const AttentionLayer &layer,
         infinicore::op::mha_varlen_(
             attn_output,
             query,
-            k_total->permute({0, 2, 1, 3}),
-            v_total->permute({0, 2, 1, 3}),
+            k_total,
+            v_total,
             input_offsets.value(),
             cu_seqlens.value(),
             block_tables.value(),
@@ -66,13 +66,12 @@ infinicore::Tensor FlashAttentionImpl::forward(const AttentionLayer &layer,
         // FA2 decode path: flash::mha_fwd_kvcache
         // In paged-attn mode, seq_len = actual batch_size (one query token per sequence).
         // q_reshaped: [seq_len, num_heads, head_dim] → [seq_len, 1, num_heads, head_dim]
-        // k/v cache:  [num_blocks, num_kv_heads, block_size, head_dim]
-        //           → permute {0,2,1,3} → [num_blocks, block_size, num_kv_heads, head_dim]
+        // k/v cache:  [num_blocks, block_size, num_kv_heads, head_dim]
         auto q_for_fa = query->view({seq_len, 1, num_heads_, head_dim_});
         auto attn_out_4d = infinicore::op::mha_kvcache(
             q_for_fa,
-            k_total->permute({0, 2, 1, 3}), // [num_blocks, block_size, num_kv_heads, head_dim]
-            v_total->permute({0, 2, 1, 3}),
+            k_total, // [num_blocks, block_size, num_kv_heads, head_dim]
+            v_total,
             total_sequence_lengths.value(), // [seq_len] int32 (one entry per sequence)
             block_tables.value(),           // [seq_len, max_num_blocks_per_seq] int32
             std::nullopt,
@@ -91,8 +90,8 @@ std::tuple<infinicore::Tensor, infinicore::Tensor> FlashAttentionImpl::do_kv_cac
     auto k_cache_layer = kv_cache->narrow({{0, 0, 1}})->squeeze(0);
     auto v_cache_layer = kv_cache->narrow({{0, 1, 1}})->squeeze(0);
     infinicore::op::paged_caching_(
-        k_cache_layer,
-        v_cache_layer,
+        k_cache_layer->permute({0, 2, 1, 3}), // permute to BHSD for paged_caching_
+        v_cache_layer->permute({0, 2, 1, 3}),
         key,
         value,
         slot_mapping);
