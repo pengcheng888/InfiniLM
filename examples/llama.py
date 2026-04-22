@@ -8,6 +8,7 @@ import sys
 import time
 import os
 from infinilm.base_config import BaseConfig
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../python"))
 
 
@@ -102,7 +103,7 @@ def test(
 
 if __name__ == "__main__":
     cfg = BaseConfig()
-    
+
     device_str = cfg.get_device_str(cfg.device)
 
     prompts = [cfg.prompt for _ in range(cfg.batch_size)]

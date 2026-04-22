@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 import sys
+import warnings
 
 
 def parse_list(value: str):
@@ -48,6 +49,12 @@ class BaseConfig:
         self._add_common_args()
         self.args, self.extra = self.parser.parse_known_args()
 
+        if self.extra:
+            warnings.warn(
+                f"Unrecognized arguments: {self.extra}. These arguments are not defined in BaseConfig.",
+                UserWarning,
+            )
+
         self.model = self.args.model
         self.device = self.args.device
         self.tp = self.args.tp
@@ -56,7 +63,6 @@ class BaseConfig:
         self.enable_graph = self.args.enable_graph
         self.cache_type = self.args.cache_type
         self.enable_paged_attn = self.args.enable_paged_attn
-        self.paged_kv_block_size = self.args.paged_kv_block_size
         self.num_blocks = self.args.num_blocks
         self.block_size = self.args.block_size
         self.max_cache_len = self.args.max_cache_len
@@ -64,12 +70,10 @@ class BaseConfig:
         self.skip_load = self.args.skip_load
 
         self.batch_size = self.args.batch_size
-        self.max_batch = self.args.max_batch
         self.max_batch_size = self.args.max_batch_size
         self.input_len = self.args.input_len
         self.output_len = self.args.output_len
         self.max_new_tokens = self.args.max_new_tokens
-        self.max_tokens = self.args.max_tokens
         self.prompt = self.args.prompt
         self.top_k = self.args.top_k
         self.top_p = self.args.top_p
@@ -82,7 +86,6 @@ class BaseConfig:
         # Evaluation parameters
         self.bench = self.args.bench
         self.backend = self.args.backend
-        self.tp = self.args.tp
         self.subject = self.args.subject
         self.split = self.args.split
         self.num_samples = self.args.num_samples
@@ -125,7 +128,6 @@ class BaseConfig:
             action="store_true",
             help="use paged cache",
         )
-        self.parser.add_argument("--paged-kv-block-size", type=int, default=256)
         self.parser.add_argument(
             "--num-blocks", type=int, default=512, help="number of KV cache blocks"
         )
@@ -149,9 +151,6 @@ class BaseConfig:
         # --- Length and infer parameters ---
         self.parser.add_argument("--batch-size", type=int, default=1)
         self.parser.add_argument(
-            "--max-batch", type=int, default=3, help="maximum batch size"
-        )
-        self.parser.add_argument(
             "--max-batch-size",
             type=int,
             default=8,
@@ -166,11 +165,8 @@ class BaseConfig:
         self.parser.add_argument(
             "--max-new-tokens",
             type=int,
-            default=500,
+            default=512,
             help="maximum number of new tokens to generate",
-        )
-        self.parser.add_argument(
-            "--max-tokens", type=int, default=512, help="maximum tokens"
         )
         self.parser.add_argument(
             "--prompt", type=str, default="How are you", help="default prompt text"
