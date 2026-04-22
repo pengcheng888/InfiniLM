@@ -18,7 +18,7 @@
 #include <memory>
 #include <utility>
 
-namespace infinilm::models::llama {
+namespace infinilm::models::llama_legacy {
 
 /**
  * @brief Multi-head self-attention module for Llama
@@ -146,4 +146,4 @@ private:
     backends::AttentionBackend attention_backend_;
 };
 
-} // namespace infinilm::models::llama
+} // namespace infinilm::models::llama_legacy

@@ -18,7 +18,7 @@
 #include <stdexcept>
 #include <vector>
 
-namespace infinilm::models::llama {
+namespace infinilm::models::llama_legacy {
 
 /**
  * @deprecated This function is deprecated and will be REMOVED in the next major release (v0.2.0).
@@ -422,4 +422,4 @@ void LlamaAttention::set_rotary_emb(const std::shared_ptr<infinicore::nn::RoPE> 
     rotary_emb_ = rotary_emb;
 }
 
-} // namespace infinilm::models::llama
+} // namespace infinilm::models::llama_legacy

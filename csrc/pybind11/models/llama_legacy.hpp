@@ -2,8 +2,8 @@
 
 #include "../../cache/kv_cache.hpp"
 #include "../../models/debug_utils/hooks.hpp"
-#include "../../models/llama/llama.hpp"
-#include "../../models/llama/llama_attention.hpp"
+#include "../../models/llama_legacy/llama.hpp"
+#include "../../models/llama_legacy/llama_attention.hpp"
 #include "infinicore/device.hpp"
 #include "infinicore/nn/module.hpp"
 #include "infinicore/nn/rope.hpp"
@@ -16,7 +16,7 @@ namespace py = pybind11;
 using infinicore::Device;
 using infinilm::models::debug_utils::HookRegistry;
 
-namespace infinilm::models::llama {
+namespace infinilm::models::llama_legacy {
 
 inline void bind_llama(py::module &m) {
     // TODO: HookRegistry should be moved out from Llama-specific bindings to InfiniCore as common utils in future work
@@ -213,4 +213,4 @@ inline void bind_llama(py::module &m) {
     // Note: Device is already bound in InfiniCore bindings, so we don't need to bind it here
 }
 
-} // namespace infinilm::models::llama
+} // namespace infinilm::models::llama_legacy

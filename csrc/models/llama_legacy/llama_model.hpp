@@ -15,7 +15,7 @@
 
 #include "../../engine/distributed/distributed.hpp"
 
-namespace infinilm::models::llama {
+namespace infinilm::models::llama_legacy {
 
 /**
  * @brief Main Llama model architecture (without language modeling head)
@@ -107,4 +107,4 @@ private:
     std::shared_ptr<infinilm::config::ModelConfig> model_config_;
 };
 
-} // namespace infinilm::models::llama
+} // namespace infinilm::models::llama_legacy

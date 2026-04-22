@@ -9,7 +9,7 @@
 
 #include <infinicore/nn/rope.hpp>
 
-namespace infinilm::models::llama {
+namespace infinilm::models::llama_legacy {
 
 /**
  * @brief Configuration structure for Llama model architecture
@@ -92,4 +92,4 @@ struct LlamaConfig : public InfinilmModel::Config {
     }
 };
 
-} // namespace infinilm::models::llama
+} // namespace infinilm::models::llama_legacy

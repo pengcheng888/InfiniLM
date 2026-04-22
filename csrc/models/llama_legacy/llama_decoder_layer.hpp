@@ -10,7 +10,7 @@
 
 #include "../../engine/distributed/distributed.hpp"
 
-namespace infinilm::models::llama {
+namespace infinilm::models::llama_legacy {
 
 /**
  * @brief Single decoder layer (transformer block) for Llama
@@ -105,4 +105,4 @@ private:
     size_t layer_idx_; // Layer index for cache management and debugging
 };
 
-} // namespace infinilm::models::llama
+} // namespace infinilm::models::llama_legacy
