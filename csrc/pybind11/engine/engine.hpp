@@ -127,6 +127,7 @@ inline void bind_infer_engine(py::module &m) {
         .def(
             py::init([](
                          std::optional<infinicore::Tensor> input_ids,
+                         std::optional<infinicore::Tensor> pixel_values,
                          std::optional<infinicore::Tensor> position_ids,
                          std::optional<infinicore::Tensor> past_sequence_lengths,
                          std::optional<infinicore::Tensor> total_sequence_lengths,
@@ -134,9 +135,12 @@ inline void bind_infer_engine(py::module &m) {
                          std::optional<infinicore::Tensor> cu_seqlens,
                          std::optional<infinicore::Tensor> block_tables,
                          std::optional<infinicore::Tensor> slot_mapping,
+                         std::optional<infinicore::Tensor> image_bound,
+                         std::optional<infinicore::Tensor> tgt_sizes,
                          py::kwargs kwargs) {
                 InferEngine::Input input{
                     std::move(input_ids),
+                    std::move(pixel_values),
                     std::move(position_ids),
                     std::move(past_sequence_lengths),
                     std::move(total_sequence_lengths),
@@ -144,6 +148,8 @@ inline void bind_infer_engine(py::module &m) {
                     std::move(cu_seqlens),
                     std::move(block_tables),
                     std::move(slot_mapping),
+                    std::move(image_bound),
+                    std::move(tgt_sizes),
                 };
 
                 // Explicit defaults
@@ -178,14 +184,18 @@ inline void bind_infer_engine(py::module &m) {
                 return input;
             }),
             py::arg("input_ids") = std::nullopt,
+            py::arg("pixel_values") = std::nullopt,
             py::arg("position_ids") = std::nullopt,
             py::arg("past_sequence_lengths") = std::nullopt,
             py::arg("total_sequence_lengths") = std::nullopt,
             py::arg("input_offsets") = std::nullopt,
             py::arg("cu_seqlens") = std::nullopt,
             py::arg("block_tables") = std::nullopt,
-            py::arg("slot_mapping") = std::nullopt)
+            py::arg("slot_mapping") = std::nullopt,
+            py::arg("image_bound") = std::nullopt,
+            py::arg("tgt_sizes") = std::nullopt)
         .def_readwrite("input_ids", &InferEngine::Input::input_ids)
+        .def_readwrite("pixel_values", &InferEngine::Input::pixel_values)
         .def_readwrite("position_ids", &InferEngine::Input::position_ids)
         .def_readwrite("past_sequence_lengths", &InferEngine::Input::past_sequence_lengths)
         .def_readwrite("total_sequence_lengths", &InferEngine::Input::total_sequence_lengths)
@@ -193,6 +203,8 @@ inline void bind_infer_engine(py::module &m) {
         .def_readwrite("cu_seqlens", &InferEngine::Input::cu_seqlens)
         .def_readwrite("block_tables", &InferEngine::Input::block_tables)
         .def_readwrite("slot_mapping", &InferEngine::Input::slot_mapping)
+        .def_readwrite("image_bound", &InferEngine::Input::image_bound)
+        .def_readwrite("tgt_sizes", &InferEngine::Input::tgt_sizes)
         .def_readwrite("temperature", &InferEngine::Input::temperature)
         .def_readwrite("top_k", &InferEngine::Input::top_k)
         .def_readwrite("top_p", &InferEngine::Input::top_p);

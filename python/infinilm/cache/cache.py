@@ -1,5 +1,6 @@
 from infinilm.lib import _infinilm
 
+
 class CacheConfig(_infinilm.CacheConfig):
     def __init__(self):
         raise NotImplementedError(
@@ -13,17 +14,9 @@ class StaticKVCacheConfig(CacheConfig, _infinilm.StaticKVCacheConfig):
         max_batch_size: int = 1,
         max_cache_len: int = 0,
     ):
-        _infinilm.StaticKVCacheConfig.__init__(
-            self, max_batch_size, max_cache_len
-        )
+        _infinilm.StaticKVCacheConfig.__init__(self, max_batch_size, max_cache_len)
 
 
 class PagedKVCacheConfig(CacheConfig, _infinilm.PagedKVCacheConfig):
-    def __init__(
-        self,
-        num_blocks: int,
-        block_size: int = 256
-    ):
-        _infinilm.PagedKVCacheConfig.__init__(
-            self, num_blocks, block_size
-        )
+    def __init__(self, num_blocks: int, block_size: int = 256):
+        _infinilm.PagedKVCacheConfig.__init__(self, num_blocks, block_size)

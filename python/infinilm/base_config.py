@@ -103,6 +103,9 @@ class BaseConfig:
         self.endpoint = self.args.endpoint
         self.ignore_eos = self.args.ignore_eos
 
+        # Multimodal parameters
+        self.image = self.args.image
+
         if self.enable_paged_attn and self.attn == "default":
             self.attn = "paged-attn"
 
@@ -261,6 +264,14 @@ class BaseConfig:
             dest="ignore_eos",
             default=False,
             help="Ignore EOS token and continue generation",
+        )
+
+        # --- Multimodal parameters ---
+        self.parser.add_argument(
+            "--image",
+            type=str,
+            default=None,
+            help="image path for multimodal models",
         )
 
     def get_device_str(self, device):

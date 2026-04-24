@@ -73,6 +73,10 @@ LlamaForCausalLM::Output LlamaForCausalLM::forward(const Input &input) const {
     return {logits};
 }
 
+infinicore::Tensor LlamaForCausalLM::logits_from_hidden(const infinicore::Tensor &hidden_states) const {
+    return lm_head_->forward(const_cast<infinicore::Tensor &>(hidden_states));
+}
+
 void LlamaForCausalLM::reset_cache(const cache::CacheConfig *cache_config) {
     cache_config_ = cache_config->unique_copy();
     model_->reset_cache(cache_config_.get());

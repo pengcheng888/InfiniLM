@@ -35,5 +35,16 @@ class AutoConfig:
             return LlamaConfig(**config_dict)
         elif config_dict["model_type"] == "fm9g7b":
             return LlamaConfig(**config_dict)
+        elif config_dict["model_type"] in [
+            "qwen3_next",
+            "minicpm_sala",
+            "qwen3_vl",
+            "qwen3_moe",
+        ]:
+            return LlamaConfig(**config_dict)
+        elif config_dict["model_type"] == "minicpmv":
+            cfg = LlamaConfig(**config_dict)
+            cfg.model_type = "minicpmv"
+            return cfg
 
         raise ValueError(f"Unsupported model type `{config_dict['model_type']}`.")

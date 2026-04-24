@@ -20,6 +20,9 @@ public:
     struct Input {
         /// Token IDs tensor of shape `[batch, seq_len]`.
         std::optional<infinicore::Tensor> input_ids;
+        /// Image pixel values for multi-modal models.
+        /// Shape is model-specific (e.g. LLaVA: [batch, 3, H, W], MiniCPM-V: [batch, 3, patch, seq_len * patch]).
+        std::optional<infinicore::Tensor> pixel_values;
         /// Position IDs tensor of shape `[batch, seq_len]` or `[seq_len]`.
         std::optional<infinicore::Tensor> position_ids;
         /// Past Lengths of cached sequence for each request, of shape `[num_requests]`.
@@ -34,6 +37,12 @@ public:
         std::optional<infinicore::Tensor> block_tables;
         /// Slot ids for each token `[seq]`. Used for paged cache.
         std::optional<infinicore::Tensor> slot_mapping;
+        /// Image placeholder bounds for MiniCPM-V style replacement.
+        /// Tensor shape: [batch, max_ranges, 2] (start, end).
+        std::optional<infinicore::Tensor> image_bound;
+        /// Target patch sizes for each image (MiniCPM-V).
+        /// Tensor shape: [batch, 2] or [batch, max_slices, 2] if pre-flattened.
+        std::optional<infinicore::Tensor> tgt_sizes;
     };
 
     struct Output {
