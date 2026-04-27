@@ -61,7 +61,6 @@ class BaseConfig:
 
         self.attn = self.args.attn
         self.enable_graph = self.args.enable_graph
-        self.cache_type = self.args.cache_type
         self.enable_paged_attn = self.args.enable_paged_attn
         self.num_blocks = self.args.num_blocks
         self.block_size = self.args.block_size
@@ -123,9 +122,6 @@ class BaseConfig:
             choices=["default", "paged-attn", "flash-attn"],
         )
         self.parser.add_argument("--enable-graph", action="store_true")
-        self.parser.add_argument(
-            "--cache-type", type=str, default="paged", choices=["paged", "static"]
-        )
         self.parser.add_argument(
             "--enable-paged-attn",
             action="store_true",
