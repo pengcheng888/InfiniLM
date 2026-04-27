@@ -15,9 +15,7 @@ MiniCPMVModel::MiniCPMVModel(std::shared_ptr<infinilm::config::ModelConfig> mode
 
     const auto &dtype{model_config->get_dtype()};
 
-    rank_info_ = infinilm::global_state::get_tensor_model_parallel_rank_info();
-
-    INFINICORE_NN_MODULE_INIT(llm, model_config, device, rank_info_);
+    INFINICORE_NN_MODULE_INIT(llm, model_config, device);
 
     // Use get_ref instead of get to get a reference
     auto &vision_cfg = model_config->get_ref("vision_config");
@@ -101,13 +99,7 @@ InfinilmModel::Output MiniCPMVModel::forward(const InfinilmModel::Input &input) 
 
         auto hidden_states = llm_->model().forward_embeds(
             merged_embeds,
-            position_ids,
-            input.past_sequence_lengths,
-            input.total_sequence_lengths,
-            input.input_offsets,
-            input.cu_seqlens,
-            input.block_tables,
-            input.slot_mapping);
+            position_ids);
 
         auto logits = llm_->logits_from_hidden(hidden_states);
         return {logits};
@@ -126,6 +118,15 @@ std::shared_ptr<infinilm::config::ModelConfig> create_minicpmv_model_config(
     if ("minicpmv" != model_type) {
         throw std::runtime_error("infinilm::models::minicpmv::create_minicpmv_model_config: model_type is not minicpmv");
     }
+
+    nlohmann::json &config_json = model_config->get_config_json();
+
+    if (!config_json.contains("head_dim")) {
+        size_t head_dim = model_config->get<size_t>("hidden_size")
+                        / model_config->get<size_t>("num_attention_heads");
+        config_json["head_dim"] = head_dim;
+    }
+
     return model_config;
 }
 
