@@ -560,7 +560,7 @@ def main():
         device=device,
         dtype=cfg.dtype,
         tensor_parallel_size=cfg.tp,
-        cache_type=cfg.cache_type,
+        cache_type="paged" if cfg.enable_paged_attn else "static",
         max_tokens=cfg.max_new_tokens,
         max_batch_size=cfg.max_batch_size,
         num_blocks=cfg.num_blocks,
