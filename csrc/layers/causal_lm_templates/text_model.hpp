@@ -75,6 +75,29 @@ public:
         return hidden_states;
     }
 
+    infinicore::Tensor forward_embeds(const infinicore::Tensor &inputs_embeds,
+                                      const infinicore::Tensor &position_ids) const {
+
+        auto hidden_states = inputs_embeds;
+
+        //  Process through all decoder layers
+        size_t num_layers = layers_.size();
+        infinicore::Tensor residual;
+        for (size_t i = 0; i < num_layers; ++i) {
+            layers_.at(i)->forward(
+                position_ids,
+                hidden_states,
+                residual);
+        }
+
+        norm_->forward_inplace(hidden_states, residual);
+        return hidden_states;
+    }
+
+    infinicore::Tensor embed_tokens(const infinicore::Tensor &input_ids) const {
+        return embed_tokens_->forward(input_ids);
+    }
+
 protected:
     INFINICORE_NN_MODULE(infinicore::nn::Embedding, embed_tokens);
     INFINICORE_NN_MODULE_VEC(DecoderLayer, layers);

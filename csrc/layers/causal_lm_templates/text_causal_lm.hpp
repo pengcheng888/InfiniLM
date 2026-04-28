@@ -48,6 +48,12 @@ public:
         return {logits};
     }
 
+    infinicore::Tensor logits_from_hidden(const infinicore::Tensor &hidden_states) const {
+        return lm_head_->forward(const_cast<infinicore::Tensor &>(hidden_states));
+    }
+
+    Model &model() { return *model_; }
+
 protected:
     INFINICORE_NN_MODULE(Model, model);
     INFINICORE_NN_MODULE(infinilm::layers::linear::ReplicatedLinear, lm_head);

@@ -2,8 +2,7 @@
 
 #include "../../config/model_config.hpp"
 #include "../infinilm_model.hpp"
-#include "../llama_legacy/llama_for_causal_lm.hpp"
-#include "../../config/model_config.hpp"
+#include "../qwen2/qwen2_for_causal_lm.hpp"
 #include "resampler.hpp"
 #include "siglip_vision.hpp"
 
@@ -29,9 +28,8 @@ private:
                                           const infinicore::Tensor &image_bound) const;
 
     std::shared_ptr<infinilm::config::ModelConfig> config_;
-    engine::distributed::RankInfo rank_info_;
 
-    INFINICORE_NN_MODULE(llama_legacy::LlamaForCausalLM, llm);
+    INFINICORE_NN_MODULE(infinilm::models::qwen2::Qwen2ForCausalLM, llm);
     INFINICORE_NN_MODULE(SiglipVisionModel, vpm);
     INFINICORE_NN_MODULE(Resampler, resampler);
 };
