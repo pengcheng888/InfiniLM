@@ -30,6 +30,7 @@ def read_hf_config(model_path):
         )
     return config_dict
 
+
 # config.json (required) defines model architecture, while generation_config.json
 # (optional) defines generation behavior. They are kept as separate readers
 # because: 1) config.json must exist and requires model_type validation,
@@ -42,6 +43,7 @@ def read_hf_generation_config(model_path):
         with open(gen_config_path, "r") as f:
             return json.load(f)
     return {}
+
 
 @dataclass
 class GenerationConfig:
@@ -375,10 +377,29 @@ class InferEngine(_infinilm.InferEngine):
         super().reset_cache(cache_config)
 
     def state_dict_keyname(self):
-        return sorted({name for state_dict in super().state_dict() for name in state_dict.keys()})
+        return sorted(
+            {name for state_dict in super().state_dict() for name in state_dict.keys()}
+        )
 
     def load_state_dict(self, state_dict, strict=None):
-        super().load_params({name: param._underlying for name, param in state_dict.items()})
+        super().load_params(
+            {name: param._underlying for name, param in state_dict.items()}
+        )
 
     def process_weights_after_loading(self):
         super().process_weights_after_loading()
+
+    def get_kv_cache(self) -> list[list[infinicore.Tensor]]:
+        """
+        get per-rank kv cache.
+        """
+        kv_cache_list = super().get_kv_cache()
+        infinicore.sync_device()
+
+        result = []
+        for rank_idx, kv_caches_per_rank in enumerate(kv_cache_list):
+            result_rank = []
+            for layer_idx, layer_kv in enumerate(kv_caches_per_rank):
+                result_rank.append(infinicore.Tensor(layer_kv))
+            result.append(result_rank)
+        return result
