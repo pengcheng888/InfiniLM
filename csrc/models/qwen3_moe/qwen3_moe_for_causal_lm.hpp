@@ -1,12 +1,12 @@
 #pragma once
 
-#include "../qwen3/qwen3_attention.hpp"
 #include "qwen3_moe_sparse_moe_block.hpp"
 #include <memory>
+#include "../../layers/common_modules.hpp"
 
 namespace infinilm::models::qwen3_moe {
 
-using Qwen3MoeAttention = qwen3::Qwen3Attention;
+using Qwen3MoeAttention = infinilm::layers::attention::Attention;
 
 using Qwen3MoeDecoderLayer = infinilm::layers::causal_lm_templates::TextDecoderLayer<Qwen3MoeAttention, Qwen3MoeSparseMoeBlock>;
 
