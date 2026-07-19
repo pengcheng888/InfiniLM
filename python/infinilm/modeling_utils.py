@@ -743,6 +743,11 @@ def _remap_qwen3_5(state_dict, config):
     return state_dict
 
 
+def _remap_qwen3(state_dict, config=None):
+    """Drop non-parameter rotary cache tensors from dense Qwen3 checkpoints."""
+    return drop_keys(state_dict, ["rotary_emb.inv_freq", "rotary_emb.cos_cached", "rotary_emb.sin_cached"])
+
+
 _WEIGHT_REMAPPER = {
     "glm4": _remap_glm4,
     "chatglm": _remap_chatglm,
@@ -750,5 +755,6 @@ _WEIGHT_REMAPPER = {
     "gpt2": _remap_gpt2,
     "mamba": _remap_mamba,
     "videonsa": _remap_videonsa,
+    "qwen3": _remap_qwen3,
     "qwen3_5": _remap_qwen3_5,
 }

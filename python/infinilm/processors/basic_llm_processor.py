@@ -1,3 +1,6 @@
+import json
+import os
+
 from transformers import AutoTokenizer
 from typing_extensions import override
 
@@ -12,6 +15,19 @@ class BasicLLMProcessor(InfinilmProcessor):
         self.tokenizer = AutoTokenizer.from_pretrained(
             model_dir_path, trust_remote_code=True
         )
+        self.model_type = self._read_model_type(model_dir_path)
+
+    def _read_model_type(self, model_dir_path: str) -> str | None:
+        config_path = os.path.join(model_dir_path, "config.json")
+        if not os.path.exists(config_path):
+            return None
+        with open(config_path, "r") as f:
+            return json.load(f).get("model_type")
+
+    def _position_ids_dtype(self):
+        import infinicore
+
+        return infinicore.int32 if self.model_type == "qwen3" else infinicore.int64
 
     @override
     def __call__(self, prompt: str, return_tensors: str = None, **kwargs) -> dict:
@@ -138,7 +154,7 @@ class BasicLLMProcessor(InfinilmProcessor):
 
         return {
             "input_ids": infinicore.from_list(input_ids, dtype=infinicore.int64),
-            "position_ids": infinicore.from_list(position_ids, dtype=infinicore.int64),
+            "position_ids": infinicore.from_list(position_ids, dtype=self._position_ids_dtype()),
             "past_kv_lengths": infinicore.from_list(
                 [past_kv_len], dtype=infinicore.int32
             ),
@@ -248,7 +264,7 @@ class BasicLLMProcessor(InfinilmProcessor):
 
         return {
             "input_ids": infinicore.from_list([tokens], dtype=infinicore.int64),
-            "position_ids": infinicore.from_list(position_ids, dtype=infinicore.int64),
+            "position_ids": infinicore.from_list(position_ids, dtype=self._position_ids_dtype()),
             "past_kv_lengths": infinicore.from_list(
                 cached_lens, dtype=infinicore.int32
             ),
