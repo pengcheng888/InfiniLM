@@ -1,4 +1,5 @@
-add_requires("pybind11 2.13.6", {system = false})
+-- add_requires("pybind11 2.13.6", {system = false})
+add_requires("pybind11")
 
 local INFINI_ROOT = os.getenv("INFINI_ROOT") or (os.getenv(is_host("windows") and "HOMEPATH" or "HOME") .. "/.infini")
 

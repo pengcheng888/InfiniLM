@@ -61,6 +61,14 @@ def _is_internal_moe_packed_weight(key: str) -> bool:
     # are expected missing keys during non-strict checkpoint loading.
     return key.endswith(".mlp.experts.w13_weight") or key.endswith(
         ".mlp.experts.w2_weight"
+    ) or key.endswith(
+        ".ffn.experts.w13_weight"
+    ) or key.endswith(
+        ".ffn.experts.w13_weight_scale"
+    ) or key.endswith(
+        ".ffn.experts.w2_weight"
+    ) or key.endswith(
+        ".ffn.experts.w2_weight_scale"
     )
 
 
@@ -748,6 +756,29 @@ def _remap_qwen3(state_dict, config=None):
     return drop_keys(state_dict, ["rotary_emb.inv_freq", "rotary_emb.cos_cached", "rotary_emb.sin_cached"])
 
 
+def _remap_deepseek_v4(state_dict, config=None):
+    """Adapt Hygon DeepSeek V4 checkpoint names to the InfiniLM module tree."""
+    remapped = {}
+    for key, tensor in state_dict.items():
+        if key == "embed.weight":
+            new_key = "model.embed_tokens.weight"
+        elif key == "head.weight":
+            new_key = "lm_head.weight"
+        elif key == "norm.weight":
+            new_key = "model.norm.weight"
+        elif key.startswith("hc_head_"):
+            new_key = "model." + key
+        elif key.startswith("layers."):
+            new_key = "model." + key
+        else:
+            new_key = key
+
+        if new_key.endswith(".scale"):
+            new_key = new_key.removesuffix(".scale") + ".weight_scale"
+        remapped[new_key] = tensor
+    return remapped
+
+
 _WEIGHT_REMAPPER = {
     "glm4": _remap_glm4,
     "chatglm": _remap_chatglm,
@@ -757,4 +788,5 @@ _WEIGHT_REMAPPER = {
     "videonsa": _remap_videonsa,
     "qwen3": _remap_qwen3,
     "qwen3_5": _remap_qwen3_5,
+    "deepseek_v4": _remap_deepseek_v4,
 }
