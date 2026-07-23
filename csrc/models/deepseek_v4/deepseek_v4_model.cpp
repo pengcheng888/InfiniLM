@@ -1,8 +1,10 @@
 #include "deepseek_v4_model.hpp"
 
+#include "deepseek_v4_utils.hpp"
 #include "infinicore/ops/deepseek_v4_mhc.hpp"
 
 #include <stdexcept>
+#include <string>
 #include <tuple>
 
 namespace infinilm::models::deepseek_v4 {
@@ -20,6 +22,7 @@ DeepseekV4Model::DeepseekV4Model(std::shared_ptr<infinilm::config::ModelConfig> 
     hc_mult_ = hc_mult;
     rms_norm_eps_ = rms_norm_eps;
     hc_eps_ = model_config->get_or<double>("hc_eps", 1e-6);
+    mhc_head_kernel_backend_enabled_ = utils::mhc_kernel_backend_enabled("INFINILM_DSV4_MHC_HEAD");
 
     INFINICORE_NN_MODULE_INIT(embed_tokens, vocab_size, hidden_size, std::nullopt, dtype, device);
     layers_.reserve(num_hidden_layers);
@@ -69,14 +72,25 @@ infinicore::Tensor DeepseekV4Model::forward(const infinilm::InfinilmModel::Input
         std::tie(hidden_states, residual) = layer->forward(input.position_ids.value(), hidden_states, residual, flat_input_ids);
     }
     auto collapsed = infinicore::Tensor::empty({hidden_states->size(0), hidden_size_}, hidden_states->dtype(), hidden_states->device());
-    infinicore::op::deepseek_v4_mhc_head_naive_(
-        collapsed,
-        hidden_states,
-        hc_head_fn_,
-        hc_head_scale_,
-        hc_head_base_,
-        rms_norm_eps_,
-        hc_eps_);
+    if (mhc_head_kernel_backend_enabled_) {
+        infinicore::op::deepseek_v4_mhc_head_kernel_(
+            collapsed,
+            hidden_states,
+            hc_head_fn_,
+            hc_head_scale_,
+            hc_head_base_,
+            rms_norm_eps_,
+            hc_eps_);
+    } else {
+        infinicore::op::deepseek_v4_mhc_head_naive_(
+            collapsed,
+            hidden_states,
+            hc_head_fn_,
+            hc_head_scale_,
+            hc_head_base_,
+            rms_norm_eps_,
+            hc_eps_);
+    }
     return norm_->forward(collapsed);
 }
 

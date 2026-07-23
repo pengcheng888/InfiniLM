@@ -73,6 +73,7 @@ def test(
     weight_load_mode="async",
     skip_legacy_moe=False,
     input_ids=None,
+    warmup=False,
 ):
     model_path = os.path.expanduser(model_path)
     # ---------------------------------------------------------------------------- #
@@ -103,6 +104,7 @@ def test(
         skip_load=skip_load,
         weight_load_mode=weight_load_mode,
         skip_legacy_moe=skip_legacy_moe,
+        warmup=warmup,
     )
 
     conversations = [
@@ -216,4 +218,5 @@ if __name__ == "__main__":
         weight_load_mode=cfg.weight_load_mode,
         skip_legacy_moe=cfg.skip_legacy_moe,
         input_ids=input_ids,
+        warmup=cfg.warmup,
     )

@@ -236,3 +236,233 @@ python examples/test_infer.py --device hygon \
 - TP=8 decode 阶段 moe.forward 平均耗时为 9.156967 ms，相比旧报告中的 36.430740 ms 明显下降；主要来自 moe.experts 从旧报告 33.280227 ms 降到最新 7.599573 ms。
 - TP=8 decode 阶段 moe.allreduce 平均耗时为 0.819577 ms，通信开销存在但已经不是主要瓶颈。
 - TP=8 prefill 的若干 MHC/Norm 项偏大，仍需结合重复运行或去除首次 ATen/stream 初始化影响后再做生产性能判断。
+
+## 2026-07-23 当前版本补充：MHC kernel 与 routed expert 新后端
+
+### 测试配置
+
+- Profile 测试时间：2026-07-23 10:43-10:48
+- 当前正确性回归时间：2026-07-23 13:49-13:51
+- 模型：`/data/shared/hygon_DeepSeek-V4-Flash-Channel-INT8-w8a8-layer0-4`
+- 采样参数：`temperature=1.0`，`top_p=0.8`，`top_k=1`，`max_new_tokens=16`
+- Attention 状态：InfiniLM DeepSeek V4 attention forward 仍跳过。
+- Profile 开关：`INFINILM_DSV4_PROFILE=1`
+- MHC 后端：`INFINILM_DSV4_MHC_PRE=kernel`，`INFINILM_DSV4_MHC_POST=kernel`，`INFINILM_DSV4_MHC_HEAD=kernel`
+- 未使用 `--enable-graph`。
+
+### 运行命令
+
+```bash
+# TP=1 fused expert 尝试，当前不支持该 shape
+INFINILM_DSV4_PROFILE=1 \
+INFINILM_DSV4_ROUTED_EXPERT_BACKEND=fused_experts_int8_marlin \
+INFINILM_DSV4_MHC_PRE=kernel \
+INFINILM_DSV4_MHC_POST=kernel \
+INFINILM_DSV4_MHC_HEAD=kernel \
+python3 examples/test_infer.py --device hygon \
+  --model=/data/shared/hygon_DeepSeek-V4-Flash-Channel-INT8-w8a8-layer0-4 \
+  --temperature 1.0 --top-p 0.8 --top-k 1 --max-new-tokens 16 \
+  --enable-paged-attn --attn paged-attn --tp 1
+
+# TP=1 correctness baseline
+INFINILM_DSV4_PROFILE=1 \
+INFINILM_DSV4_ROUTED_EXPERT_BACKEND=naive \
+INFINILM_DSV4_MHC_PRE=kernel \
+INFINILM_DSV4_MHC_POST=kernel \
+INFINILM_DSV4_MHC_HEAD=kernel \
+python3 examples/test_infer.py --device hygon \
+  --model=/data/shared/hygon_DeepSeek-V4-Flash-Channel-INT8-w8a8-layer0-4 \
+  --temperature 1.0 --top-p 0.8 --top-k 1 --max-new-tokens 16 \
+  --enable-paged-attn --attn paged-attn --tp 1
+
+# TP=8 fast path
+INFINILM_DSV4_PROFILE=1 \
+INFINILM_DSV4_ROUTED_EXPERT_BACKEND=fused_experts_int8_marlin \
+INFINILM_DSV4_MHC_PRE=kernel \
+INFINILM_DSV4_MHC_POST=kernel \
+INFINILM_DSV4_MHC_HEAD=kernel \
+python3 examples/test_infer.py --device hygon \
+  --model=/data/shared/hygon_DeepSeek-V4-Flash-Channel-INT8-w8a8-layer0-4 \
+  --temperature 1.0 --top-p 0.8 --top-k 1 --max-new-tokens 16 \
+  --enable-paged-attn --attn paged-attn --tp 8
+
+# TP=8 correctness baseline
+INFINILM_DSV4_PROFILE=1 \
+INFINILM_DSV4_ROUTED_EXPERT_BACKEND=naive \
+INFINILM_DSV4_MHC_PRE=kernel \
+INFINILM_DSV4_MHC_POST=kernel \
+INFINILM_DSV4_MHC_HEAD=kernel \
+python3 examples/test_infer.py --device hygon \
+  --model=/data/shared/hygon_DeepSeek-V4-Flash-Channel-INT8-w8a8-layer0-4 \
+  --temperature 1.0 --top-p 0.8 --top-k 1 --max-new-tokens 16 \
+  --enable-paged-attn --attn paged-attn --tp 8
+```
+
+### 运行摘要
+
+| 运行配置 | routed expert 后端 | 权重加载耗时 ms | 生成总耗时 ms | prompt token ids | generated token ids | 结论 | 原始日志 |
+|---|---|---:|---:|---|---|---|---|
+| TP=1 | `fused_experts_int8_marlin` | - | - | - | - | 失败：当前 TP=1 shape 不支持 Marlin repack | `csrc/models/deepseek_v4/profile_logs/deepseek_v4_layer0_4_tp1_profile_20260723.log` |
+| TP=1 | `naive` | 11095.645 | 2945.21 | `[0, 128803, 4117, 477, 440, 128804, 128822]` | `[57329, 1486, 41381, 113780, 113780, 113780, 113780, 113780, 113780, 113780, 113780, 113780, 113780, 113780, 113780, 113780]` | 与旧报告一致 | `csrc/models/deepseek_v4/profile_logs/deepseek_v4_layer0_4_tp1_naive_profile_20260723.log` |
+| TP=8 | `fused_experts_int8_marlin` | 10017.941 | 5140.09 | `[0, 128803, 4117, 477, 440, 128804, 128822]` | `[69146, 25689, 57085, 57502, 113787, 119061, 119061, 119061, 119061, 119061, 119061, 119061, 119061, 119061, 119061, 119061]` | 旧 profile 快照：当时 token 不一致，已定位为 MoE shared/routed 顺序问题；当前版本见下方正确性回归 | `csrc/models/deepseek_v4/profile_logs/deepseek_v4_layer0_4_tp8_fused_experts_int8_marlin_profile_20260723.log` |
+| TP=8 | `naive` | 8301.535 | 7688.33 | `[0, 128803, 4117, 477, 440, 128804, 128822]` | `[57329, 1486, 41381, 113780, 113780, 113780, 113780, 113780, 113780, 113780, 113780, 113780, 113780, 113780, 113780, 113780]` | 与 TP=1 naive/旧报告一致 | `csrc/models/deepseek_v4/profile_logs/deepseek_v4_layer0_4_tp8_naive_profile_20260723.log` |
+
+TP=1 `fused_experts_int8_marlin` 失败报错：
+
+```text
+DeepseekV4PackedExperts: routed expert backend fused_experts_int8_marlin does not support Marlin repack for this shape
+```
+
+### 当前正确性回归补充
+
+本节原始 TP=8 `fused_experts_int8_marlin` profile 记录中的 token 不一致，已定位为 InfiniLM `DeepseekV4MoE::forward` 的计算顺序问题：routed experts 使用 `inplace=true` 时会覆盖连续的 `hidden_states`，而旧代码在 routed 之后才计算 shared experts，导致 shared experts 读到被 routed 覆盖后的输入。当前版本已将 shared experts 提前到 routed experts 之前计算，与 SGLang 使用 `inplace=True` 的前提一致。
+
+| 回归配置 | MHC 后端 | 输入 token ids | InfiniLM generated token ids | SGLang attention-off 标准 | 结论 |
+|---|---|---|---|---|---|
+| TP=8 `fused_experts_int8_marlin` | `naive` | `[117160]` | `[60574]` | `[60574]` | 单步一致 |
+| TP=8 `fused_experts_int8_marlin` | `naive` | `[104937]` | `[117160, 60574, 106018, 11977, 65804, 97768, 117465, 101261]` | `[117160, 60574, 106018, 11977, 65804, 97768, 117465, 101261]` | 8 token 一致 |
+
+当前回归命令使用 `INFINILM_DSV4_ROUTED_EXPERT_BACKEND=fused_experts_int8_marlin`，并暂用 `INFINILM_DSV4_MHC_PRE=naive`、`INFINILM_DSV4_MHC_POST=naive`、`INFINILM_DSV4_MHC_HEAD=naive` 排除 MHC kernel 变量；MHC kernel 性能数据仍参考下方 profile 快照。SGLang 运行时日志确认其 W8A8 TP-MoE 路径调用的是 `torch.ops.sglang.fused_experts_impl_int8_marlin`。
+
+
+### ModelRunner 阶段耗时摘要
+
+| 运行配置 | 后端 | prefill total_ms | decode step 1 total_ms | decode steady total_ms 范围 | 备注 |
+|---|---|---:|---:|---:|---|
+| TP=1 | `naive` | 1253.952 | 113.254 | 110.994-111.994 | token 与旧报告一致 |
+| TP=8 | `fused_experts_int8_marlin` | 4931.746 | 19.040 | 11.744-12.308 | 旧 profile 快照；性能可参考，旧 token 不一致问题已在当前版本修复 |
+| TP=8 | `naive` | 4724.951 | 206.948 | 191.754-200.222 | token 与旧报告一致 |
+
+### TP=1 naive Prefill 阶段
+
+| 模块 | 调用次数 | 总耗时 ms | 平均耗时 ms |
+|---|---:|---:|---:|
+| `decoder.layer` | 5 | 1123.786 | 224.757200 |
+| `decoder.attn_hc_pre` | 5 | 2.369 | 0.473800 |
+| `decoder.attn_norm` | 5 | 1.311 | 0.262200 |
+| `decoder.attn_hc_post` | 5 | 0.234 | 0.046800 |
+| `decoder.ffn_hc_pre` | 5 | 0.593 | 0.118600 |
+| `decoder.ffn_norm` | 5 | 0.214 | 0.042800 |
+| `decoder.moe` | 5 | 1118.216 | 223.643200 |
+| `decoder.ffn_hc_post` | 5 | 0.201 | 0.040200 |
+| `moe.forward` | 5 | 1118.167 | 223.633400 |
+| `moe.topk` | 5 | 779.444 | 155.888800 |
+| `moe.experts` | 5 | 299.584 | 59.916800 |
+| `moe.shared_experts` | 5 | 37.592 | 7.518400 |
+| `moe.add_shared` | 5 | 1.288 | 0.257600 |
+
+### TP=1 naive Decode 阶段
+
+| 模块 | 调用次数 | 总耗时 ms | 平均耗时 ms |
+|---|---:|---:|---:|
+| `decoder.layer` | 75 | 1644.899 | 21.931987 |
+| `decoder.attn_hc_pre` | 75 | 9.223 | 0.122973 |
+| `decoder.attn_norm` | 75 | 2.881 | 0.038413 |
+| `decoder.attn_hc_post` | 75 | 2.444 | 0.032587 |
+| `decoder.ffn_hc_pre` | 75 | 8.636 | 0.115147 |
+| `decoder.ffn_norm` | 75 | 2.661 | 0.035480 |
+| `decoder.moe` | 75 | 1612.083 | 21.494440 |
+| `decoder.ffn_hc_post` | 75 | 2.652 | 0.035360 |
+| `moe.forward` | 75 | 1611.562 | 21.487493 |
+| `moe.topk` | 75 | 19.801 | 0.264013 |
+| `moe.experts` | 75 | 1568.780 | 20.917067 |
+| `moe.shared_experts` | 75 | 16.772 | 0.223627 |
+| `moe.add_shared` | 75 | 3.858 | 0.051440 |
+
+### TP=8 fused_experts_int8_marlin Prefill 阶段
+
+| 模块 | 调用次数 | 总耗时 ms | 平均耗时 ms |
+|---|---:|---:|---:|
+| `decoder.layer` | 40 | 31601.362 | 790.034050 |
+| `decoder.attn_hc_pre` | 40 | 87.470 | 2.186750 |
+| `decoder.attn_norm` | 40 | 57.927 | 1.448175 |
+| `decoder.attn_hc_post` | 40 | 35.857 | 0.896425 |
+| `decoder.ffn_hc_pre` | 40 | 106.593 | 2.664825 |
+| `decoder.ffn_norm` | 40 | 60.050 | 1.501250 |
+| `decoder.moe` | 40 | 31241.458 | 781.036450 |
+| `decoder.ffn_hc_post` | 40 | 3.420 | 0.085500 |
+| `moe.forward` | 40 | 31240.982 | 781.024550 |
+| `moe.topk` | 40 | 25521.606 | 638.040150 |
+| `moe.experts` | 40 | 1812.540 | 45.313500 |
+| `moe.experts.contiguous` | 40 | 0.160 | 0.004000 |
+| `moe.experts.fused_call` | 40 | 1811.269 | 45.281725 |
+| `moe.shared_experts` | 40 | 2101.141 | 52.528525 |
+| `moe.add_shared` | 40 | 155.835 | 3.895875 |
+| `moe.allreduce` | 40 | 1647.379 | 41.184475 |
+
+### TP=8 fused_experts_int8_marlin Decode 阶段
+
+| 模块 | 调用次数 | 总耗时 ms | 平均耗时 ms |
+|---|---:|---:|---:|
+| `decoder.layer` | 600 | 1255.665 | 2.092775 |
+| `decoder.attn_hc_pre` | 600 | 99.361 | 0.165602 |
+| `decoder.attn_norm` | 600 | 28.145 | 0.046908 |
+| `decoder.attn_hc_post` | 600 | 33.354 | 0.055590 |
+| `decoder.ffn_hc_pre` | 600 | 88.863 | 0.148105 |
+| `decoder.ffn_norm` | 600 | 26.455 | 0.044092 |
+| `decoder.moe` | 600 | 887.173 | 1.478622 |
+| `decoder.ffn_hc_post` | 600 | 43.057 | 0.071762 |
+| `moe.forward` | 600 | 878.467 | 1.464112 |
+| `moe.topk` | 600 | 225.887 | 0.376478 |
+| `moe.experts` | 600 | 238.776 | 0.397960 |
+| `moe.experts.contiguous` | 600 | 2.411 | 0.004018 |
+| `moe.experts.fused_call` | 600 | 224.499 | 0.374165 |
+| `moe.shared_experts` | 600 | 218.675 | 0.364458 |
+| `moe.add_shared` | 600 | 45.705 | 0.076175 |
+| `moe.allreduce` | 600 | 121.366 | 0.202277 |
+
+### TP=8 naive Prefill 阶段
+
+| 模块 | 调用次数 | 总耗时 ms | 平均耗时 ms |
+|---|---:|---:|---:|
+| `decoder.layer` | 40 | 30299.962 | 757.499050 |
+| `decoder.attn_hc_pre` | 40 | 86.577 | 2.164425 |
+| `decoder.attn_norm` | 40 | 55.366 | 1.384150 |
+| `decoder.attn_hc_post` | 40 | 52.272 | 1.306800 |
+| `decoder.ffn_hc_pre` | 40 | 176.057 | 4.401425 |
+| `decoder.ffn_norm` | 40 | 112.762 | 2.819050 |
+| `decoder.moe` | 40 | 29803.774 | 745.094350 |
+| `decoder.ffn_hc_post` | 40 | 3.660 | 0.091500 |
+| `moe.forward` | 40 | 29803.244 | 745.081100 |
+| `moe.topk` | 40 | 19817.448 | 495.436200 |
+| `moe.experts` | 40 | 8286.039 | 207.150975 |
+| `moe.shared_experts` | 40 | 671.382 | 16.784550 |
+| `moe.add_shared` | 40 | 27.813 | 0.695325 |
+| `moe.allreduce` | 40 | 997.845 | 24.946125 |
+
+### TP=8 naive Decode 阶段
+
+| 模块 | 调用次数 | 总耗时 ms | 平均耗时 ms |
+|---|---:|---:|---:|
+| `decoder.layer` | 600 | 23318.753 | 38.864588 |
+| `decoder.attn_hc_pre` | 600 | 98.352 | 0.163920 |
+| `decoder.attn_norm` | 600 | 29.701 | 0.049502 |
+| `decoder.attn_hc_post` | 600 | 32.819 | 0.054698 |
+| `decoder.ffn_hc_pre` | 600 | 88.923 | 0.148205 |
+| `decoder.ffn_norm` | 600 | 26.922 | 0.044870 |
+| `decoder.moe` | 600 | 22949.105 | 38.248508 |
+| `decoder.ffn_hc_post` | 600 | 41.383 | 0.068972 |
+| `moe.forward` | 600 | 22940.861 | 38.234768 |
+| `moe.topk` | 600 | 231.034 | 0.385057 |
+| `moe.experts` | 600 | 21251.495 | 35.419158 |
+| `moe.shared_experts` | 600 | 183.653 | 0.306088 |
+| `moe.add_shared` | 600 | 42.264 | 0.070440 |
+| `moe.allreduce` | 600 | 1201.488 | 2.002480 |
+
+### TP=8 fast path 与 naive 对比
+
+| 指标 | TP=8 fused_experts_int8_marlin avg_ms | TP=8 naive avg_ms | 加速比 |
+|---|---:|---:|---:|
+| decode `decoder.layer` | 2.092775 | 38.864588 | 18.57x |
+| decode `moe.forward` | 1.464112 | 38.234768 | 26.11x |
+| decode `moe.experts` | 0.397960 | 35.419158 | 89.00x |
+| decode `moe.allreduce` | 0.202277 | 2.002480 | 9.90x |
+
+### 当前观察
+
+- TP=1 `fused_experts_int8_marlin` 当前不支持该 shape，加载后 repack 阶段会失败；TP=1 应继续使用 `naive` 或其它可支持 TP=1 shape 的路径。
+- TP=1 `naive` 与 TP=8 `naive` 的 generated token ids 均为 `[57329, 1486, 41381, 113780, ...]`，与旧报告一致。
+- TP=8 `fused_experts_int8_marlin` 的旧 profile decode 性能明显优于 TP=8 `naive`：`moe.forward` 平均 1.464112 ms vs 38.234768 ms，`moe.experts` 平均 0.397960 ms vs 35.419158 ms。
+- 旧 profile 中 TP=8 `fused_experts_int8_marlin` token 不一致不是单算子精度问题，而是 InfiniLM MoE forward 数据流问题：`inplace=true` 覆盖 `hidden_states` 后才计算 shared experts。当前版本已修复 shared/routed 顺序，并通过 `[117160]` 单步和 `[104937]` 8 token attention-off 回归。
+- MHC kernel 生效后，TP=1 prefill `decoder.attn_hc_pre` 从旧报告最新值 135.614800 ms 降到 0.473800 ms；TP=1 decode `decoder.attn_hc_pre` 从 1.463973 ms 降到 0.122973 ms。
+- TP=8 prefill 的 `moe.topk` 在 profile 同步计时下仍然很大，且 profile 本身会在每个计时作用域前后同步 GPU stream；当前机器存在其它 TP=8 `test_infer.py` 进程，本节暂未重跑完整 16-token MHC-kernel profile，后续空闲时应刷新该 profile 快照。

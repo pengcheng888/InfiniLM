@@ -2,7 +2,7 @@
 
 #include "../../config/model_config.hpp"
 #include "deepseek_v4_attention.hpp"
-#include "deepseek_v4_mlp.hpp"
+#include "deepseek_v4_moe.hpp"
 #include "deepseek_v4_rms_norm.hpp"
 #include "infinicore/nn/module.hpp"
 #include "infinicore/tensor.hpp"
@@ -49,6 +49,9 @@ private:
     double rms_norm_eps_{1e-6};
     double hc_eps_{1e-6};
     int hc_sinkhorn_iters_{20};
+    bool mhc_pre_kernel_backend_enabled_{false};
+    bool mhc_post_kernel_backend_enabled_{false};
+    bool debug_dump_enabled_{false};
 };
 
 } // namespace infinilm::models::deepseek_v4

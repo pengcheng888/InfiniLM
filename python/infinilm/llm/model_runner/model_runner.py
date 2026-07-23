@@ -1,4 +1,5 @@
 import logging
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Generator
@@ -45,6 +46,7 @@ class ModelRunner:
     def __init__(self, config: EngineConfig):
         self.config = config
         self.kv_transfer_config = config.kv_transfer_config
+        self._decode_step_index = 0
         logger.info(f"kv_transfer_config: {self.kv_transfer_config}")
 
         self._init_device()
@@ -186,6 +188,8 @@ class ModelRunner:
         )
 
     def _model_forward(self, scheduler_output):
+        step_start = time.perf_counter()
+
         # Build model inputs
         model_input = self.processor.build_model_inputs(
             scheduler_output,
@@ -193,15 +197,67 @@ class ModelRunner:
             self.config.top_p,
             self.config.top_k,
         )
+        build_ms = (time.perf_counter() - step_start) * 1000.0
+
+        is_prefill = scheduler_output.is_prefill
+        token_count = self._get_scheduled_token_count(scheduler_output)
+        request_count = scheduler_output.num_requests
+        if is_prefill:
+            self._decode_step_index = 0
+            phase = "prefill"
+            step_label = ""
+        else:
+            self._decode_step_index += 1
+            phase = "decode"
+            step_label = f" step={self._decode_step_index}"
 
         if self.speculative_runner is not None:
-            return self._model_forward_with_speculative(scheduler_output, model_input)
+            infinicore.sync_stream()
+            forward_start = time.perf_counter()
+            sampled_tokens_list = self._model_forward_with_speculative(
+                scheduler_output, model_input
+            )
+            infinicore.sync_stream()
+            forward_ms = (time.perf_counter() - forward_start) * 1000.0
+            total_ms = (time.perf_counter() - step_start) * 1000.0
+            print(
+                f"[INFINILM_MODEL_RUNNER_TIME] {phase}{step_label} "
+                f"requests={request_count} tokens={token_count} "
+                f"build_ms={build_ms:.3f} forward_ms={forward_ms:.3f} "
+                f"total_ms={total_ms:.3f}",
+                flush=True,
+            )
+            return sampled_tokens_list
 
         # Run inference
+        infinicore.sync_stream()
+        forward_start = time.perf_counter()
         sampled_tokens = self.model_engine.forward(**model_input)
+        infinicore.sync_stream()
+        forward_ms = (time.perf_counter() - forward_start) * 1000.0
         sampled_tokens_list = sampled_tokens.to_numpy().tolist()
+        total_ms = (time.perf_counter() - step_start) * 1000.0
+
+        print(
+            f"[INFINILM_MODEL_RUNNER_TIME] {phase}{step_label} "
+            f"requests={request_count} tokens={token_count} "
+            f"build_ms={build_ms:.3f} forward_ms={forward_ms:.3f} "
+            f"total_ms={total_ms:.3f}",
+            flush=True,
+        )
 
         return sampled_tokens_list
+
+    def _get_scheduled_token_count(self, scheduler_output) -> int:
+        token_count = 0
+        for req in scheduler_output.scheduled_requests:
+            if scheduler_output.is_prefill:
+                token_count += max(
+                    0, req.get_prompt_length() - req.num_local_cached_tokens
+                )
+            else:
+                token_count += 1
+        return token_count
 
     def _model_forward_with_speculative(self, scheduler_output, model_input):
         return self.speculative_runner.forward(scheduler_output, model_input)

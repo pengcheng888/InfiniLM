@@ -23,6 +23,11 @@ enum class Event : size_t {
     MoeForward,
     MoeTopk,
     MoeExperts,
+    MoeExpertsPrepare,
+    MoeExpertsPrepareAlign,
+    MoeExpertsPrepareQuant,
+    MoeExpertsContiguous,
+    MoeExpertsFusedCall,
     MoeSharedExperts,
     MoeAddShared,
     MoeAllReduce,
@@ -70,6 +75,16 @@ inline const char *event_name(Event event) {
         return "moe.topk";
     case Event::MoeExperts:
         return "moe.experts";
+    case Event::MoeExpertsPrepare:
+        return "moe.experts.prepare";
+    case Event::MoeExpertsPrepareAlign:
+        return "moe.experts.prepare_align";
+    case Event::MoeExpertsPrepareQuant:
+        return "moe.experts.prepare_quant";
+    case Event::MoeExpertsContiguous:
+        return "moe.experts.contiguous";
+    case Event::MoeExpertsFusedCall:
+        return "moe.experts.fused_call";
     case Event::MoeSharedExperts:
         return "moe.shared_experts";
     case Event::MoeAddShared:

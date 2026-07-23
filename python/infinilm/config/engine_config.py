@@ -32,6 +32,7 @@ class EngineConfig:
         weight_load_mode: Weight loading mode across tensor-parallel workers.
         skip_load: Whether to skip loading model weights (for testing).
         skip_legacy_moe: Whether to use the new fused MoE implementation for Qwen3 MoE.
+        warmup: Whether to run a small eager warmup request after model loading.
     """
 
     model_path: str
@@ -57,6 +58,7 @@ class EngineConfig:
     weight_load_mode: str = "async"
     skip_load: bool = False
     skip_legacy_moe: bool = False
+    warmup: bool = False
     kv_transfer_config: Optional[KVTransferConfig] = None
 
     def __post_init__(self) -> None:

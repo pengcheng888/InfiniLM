@@ -760,6 +760,9 @@ def _remap_deepseek_v4(state_dict, config=None):
     """Adapt Hygon DeepSeek V4 checkpoint names to the InfiniLM module tree."""
     remapped = {}
     for key, tensor in state_dict.items():
+        if key.startswith("mtp."):
+            continue
+
         if key == "embed.weight":
             new_key = "model.embed_tokens.weight"
         elif key == "head.weight":
