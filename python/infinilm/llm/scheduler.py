@@ -52,12 +52,16 @@ class SchedulerOutput:
         scheduled_requests: List[InferenceRequest],
         is_prefill: bool = False,
         speculative_cache_ops: Optional[SpeculativeCacheOps] = None,
+        dsv4_full_to_swa_block_ids: Optional[List[int]] = None,
+        dsv4_swa_block_size: Optional[int] = None,
     ):
         self.scheduled_requests = scheduled_requests
         self.num_requests = len(scheduled_requests)
         self.is_prefill = is_prefill
         self.speculative_cache_ops = speculative_cache_ops
         self.kv_connector_metadata = None
+        self.dsv4_full_to_swa_block_ids = dsv4_full_to_swa_block_ids
+        self.dsv4_swa_block_size = dsv4_swa_block_size
 
 
 class Scheduler:
@@ -78,6 +82,8 @@ class Scheduler:
         connector=None,
         has_mamba_cache: bool = False,
         num_mamba_cache_blocks: int | None = None,
+        enable_dsv4_swa_mapping: bool = False,
+        dsv4_swa_num_blocks: int | None = None,
     ):
         self.waiting_queue = janus.Queue()
         self.running_queue = janus.Queue()
@@ -89,7 +95,12 @@ class Scheduler:
         self.pending_kv_decode_blocks: int = 0
         self.remote_kv_requests: dict[str, InferenceRequest] = {}
 
-        self.cache_manager = BlockManager(num_blocks=num_blocks, block_size=block_size)
+        self.cache_manager = BlockManager(
+            num_blocks=num_blocks,
+            block_size=block_size,
+            enable_swa_mapping=enable_dsv4_swa_mapping,
+            swa_num_blocks=dsv4_swa_num_blocks,
+        )
         self.has_mamba_cache = has_mamba_cache
         self.mamba_cache_manager = (
             MambaCacheManager(num_mamba_cache_blocks or max(2, num_blocks // 4))
@@ -100,6 +111,9 @@ class Scheduler:
         self.block_size = block_size
         self.max_num_batched_tokens = max_num_batched_tokens
         self.connector = connector
+
+    def _dsv4_swa_mapping_for_output(self) -> Optional[List[int]]:
+        return self.cache_manager.get_full_to_swa_block_mapping()
 
     def add_request(self, request: InferenceRequest):
         if request is not None:
@@ -298,6 +312,8 @@ class Scheduler:
                 scheduled_requests=scheduled_requests,
                 is_prefill=is_prefill,
                 speculative_cache_ops=self.speculative_cache_ops,
+                dsv4_full_to_swa_block_ids=self._dsv4_swa_mapping_for_output(),
+                dsv4_swa_block_size=self.block_size,
             )
             if self.connector is not None:
                 meta = self.connector.build_connector_meta()
@@ -361,6 +377,8 @@ class Scheduler:
                 scheduled_requests=scheduled_requests,
                 is_prefill=is_prefill,
                 speculative_cache_ops=self.speculative_cache_ops,
+                dsv4_full_to_swa_block_ids=self._dsv4_swa_mapping_for_output(),
+                dsv4_swa_block_size=self.block_size,
             )
 
             if self.connector is not None:
@@ -372,6 +390,8 @@ class Scheduler:
             scheduler_output = SchedulerOutput(
                 scheduled_requests=[],
                 speculative_cache_ops=self.speculative_cache_ops,
+                dsv4_full_to_swa_block_ids=self._dsv4_swa_mapping_for_output(),
+                dsv4_swa_block_size=self.block_size,
             )
             meta = self.connector.build_connector_meta()
             scheduler_output.kv_connector_metadata = meta

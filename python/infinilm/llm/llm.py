@@ -75,6 +75,9 @@ class LLMEngine:
                 "max_position_embeddings", config.max_cache_len
             )
             layer_types = llm_config.get("layer_types") or []
+            architectures = llm_config.get("architectures") or []
+            enable_dsv4_swa_mapping = llm_config.get("model_type") == "deepseek_v4" or "DeepseekV4ForCausalLM" in architectures
+            dsv4_swa_num_blocks = max(1, config.num_blocks // 10) if enable_dsv4_swa_mapping else None
             has_mamba_cache = "linear_attention" in layer_types or (
                 "linear_conv_kernel_dim" in llm_config
                 and "linear_num_key_heads" in llm_config
@@ -95,6 +98,8 @@ class LLMEngine:
                 connector=connector,
                 has_mamba_cache=has_mamba_cache,
                 num_mamba_cache_blocks=num_mamba_cache_blocks,
+                enable_dsv4_swa_mapping=enable_dsv4_swa_mapping,
+                dsv4_swa_num_blocks=dsv4_swa_num_blocks,
             )
             logger.info(f"Using Paged KV Cache with num_blocks={config.num_blocks}")
             if has_mamba_cache:

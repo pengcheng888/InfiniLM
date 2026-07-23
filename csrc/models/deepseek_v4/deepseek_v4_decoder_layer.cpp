@@ -54,6 +54,99 @@ DeepseekV4DecoderLayer::DeepseekV4DecoderLayer(std::shared_ptr<infinilm::config:
     INFINICORE_NN_PARAMETER_INIT(hc_ffn_scale, ({3}, infinicore::DataType::F32, device));
 }
 
+// std::tuple<infinicore::Tensor, infinicore::Tensor>
+// DeepseekV4DecoderLayer::forward(const infinicore::Tensor &positions,
+//                                 infinicore::Tensor &hidden_states,
+//                                 infinicore::Tensor &residual,
+//                                 const infinicore::Tensor &input_ids) {
+//     (void)positions;
+//     if (hidden_states->ndim() != 3) {
+//         throw std::runtime_error("infinilm::models::deepseek_v4::DeepseekV4DecoderLayer::forward expects hidden_states [tokens, hc, hidden]");
+//     }
+
+//     const size_t token_count = hidden_states->size(0);
+//     profile::ScopedTimer layer_timer(profile::Event::DecoderLayer, token_count);
+//     debug_dump_tensor(hidden_states, layer_idx_, "layer_input");
+//     residual = hidden_states;
+//     auto attn_in = infinicore::Tensor::empty({hidden_states->size(0), hidden_size_}, hidden_states->dtype(), hidden_states->device());
+//     auto attn_post = infinicore::Tensor::empty({hidden_states->size(0), hc_mult_}, infinicore::DataType::F32, hidden_states->device());
+//     auto attn_comb = infinicore::Tensor::empty({hidden_states->size(0), hc_mult_, hc_mult_}, infinicore::DataType::F32, hidden_states->device());
+//     {
+//         profile::ScopedTimer timer(profile::Event::DecoderAttnHcPre, token_count);
+//         infinicore::op::deepseek_v4_mhc_pre_naive_(
+//             attn_in,
+//             attn_post,
+//             attn_comb,
+//             hidden_states,
+//             hc_attn_fn_,
+//             hc_attn_scale_,
+//             hc_attn_base_,
+//             rms_norm_eps_,
+//             hc_eps_,
+//             hc_sinkhorn_iters_);
+//     }
+//     debug_dump_tensor(attn_in, layer_idx_, "attn_in");
+//     debug_dump_tensor(attn_post, layer_idx_, "attn_post");
+//     debug_dump_tensor(attn_comb, layer_idx_, "attn_comb");
+//     {
+//         profile::ScopedTimer timer(profile::Event::DecoderAttnNorm, token_count);
+//         hidden_states = attn_norm_->forward(attn_in);
+//     }
+//     debug_dump_tensor(hidden_states, layer_idx_, "attn_normed");
+
+//     hidden_states = attn_->forward(positions, hidden_states);
+//     debug_dump_tensor(hidden_states, layer_idx_, "attn_out");
+//     auto attn_posted = infinicore::Tensor::empty(residual->shape(), residual->dtype(), residual->device());
+//     {
+//         profile::ScopedTimer timer(profile::Event::DecoderAttnHcPost, token_count);
+//         infinicore::op::deepseek_v4_mhc_post_naive_(attn_posted, hidden_states, residual, attn_post, attn_comb);
+//     }
+//     debug_dump_tensor(attn_posted, layer_idx_, "attn_posted");
+
+//     residual = attn_posted;
+//     auto ffn_in = infinicore::Tensor::empty({attn_posted->size(0), hidden_size_}, attn_posted->dtype(), attn_posted->device());
+//     auto ffn_post = infinicore::Tensor::empty({attn_posted->size(0), hc_mult_}, infinicore::DataType::F32, attn_posted->device());
+//     auto ffn_comb = infinicore::Tensor::empty({attn_posted->size(0), hc_mult_, hc_mult_}, infinicore::DataType::F32, attn_posted->device());
+//     {
+//         profile::ScopedTimer timer(profile::Event::DecoderFfnHcPre, token_count);
+//         infinicore::op::deepseek_v4_mhc_pre_naive_(
+//             ffn_in,
+//             ffn_post,
+//             ffn_comb,
+//             attn_posted,
+//             hc_ffn_fn_,
+//             hc_ffn_scale_,
+//             hc_ffn_base_,
+//             rms_norm_eps_,
+//             hc_eps_,
+//             hc_sinkhorn_iters_);
+//     }
+//     debug_dump_tensor(ffn_in, layer_idx_, "ffn_in");
+//     debug_dump_tensor(ffn_post, layer_idx_, "ffn_post");
+//     debug_dump_tensor(ffn_comb, layer_idx_, "ffn_comb");
+//     infinicore::Tensor ffn_normed;
+//     {
+//         profile::ScopedTimer timer(profile::Event::DecoderFfnNorm, token_count);
+//         ffn_normed = ffn_norm_->forward(ffn_in);
+//     }
+//     debug_dump_tensor(ffn_normed, layer_idx_, "ffn_normed");
+
+//     infinicore::Tensor ffn_out;
+//     {
+//         profile::ScopedTimer timer(profile::Event::DecoderMoe, token_count);
+//         ffn_out = ffn_->forward(ffn_normed, input_ids);
+//     }
+//     // ffn_out = ffn_normed; // skip ffn_ for test.
+
+//     hidden_states = infinicore::Tensor::empty(residual->shape(), residual->dtype(), residual->device());
+//     {
+//         profile::ScopedTimer timer(profile::Event::DecoderFfnHcPost, token_count);
+//         infinicore::op::deepseek_v4_mhc_post_naive_(hidden_states, ffn_out, residual, ffn_post, ffn_comb);
+//     }
+//     debug_dump_tensor(hidden_states, layer_idx_, "layer_output");
+//     return std::make_tuple(hidden_states, residual);
+// }
+
 std::tuple<infinicore::Tensor, infinicore::Tensor>
 DeepseekV4DecoderLayer::forward(const infinicore::Tensor &positions,
                                 infinicore::Tensor &hidden_states,
@@ -107,7 +200,8 @@ DeepseekV4DecoderLayer::forward(const infinicore::Tensor &positions,
     }
     debug_dump_tensor(hidden_states, layer_idx_, "attn_normed", debug_dump_enabled_);
 
-    // Attention is intentionally skipped until DeepseekV4Attention::forward is implemented.
+    hidden_states = attn_->forward(positions, hidden_states);
+    debug_dump_tensor(hidden_states, layer_idx_, "attn_out", debug_dump_enabled_);
     auto attn_posted = infinicore::Tensor::empty(residual->shape(), residual->dtype(), residual->device());
     {
         profile::ScopedTimer timer(profile::Event::DecoderAttnHcPost, token_count);

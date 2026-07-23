@@ -13,6 +13,7 @@ public:
     DeepseekV4ForCausalLM(std::shared_ptr<infinilm::config::ModelConfig> model_config,
                           const infinicore::Device &device);
 
+    void reset_cache(const cache::CacheConfig *cache_config) override;
     Output forward(const Input &input) const override;
     infinicore::Tensor logits_from_hidden(const infinicore::Tensor &hidden_states) const;
 

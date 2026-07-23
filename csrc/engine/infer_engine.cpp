@@ -173,6 +173,31 @@ InferEngine::Input::to_model_input(infinicore::Device device) const {
         to_device(cu_seqlens),
         to_device(block_tables),
         to_device(slot_mapping),
+        to_device(dsv4_swa_indices),
+        to_device(dsv4_swa_topk_lengths),
+        to_device(dsv4_c4_indices),
+        to_device(dsv4_c4_topk_lengths),
+        to_device(dsv4_c128_indices),
+        to_device(dsv4_c128_topk_lengths),
+        to_device(dsv4_raw_out_loc),
+        to_device(dsv4_page_table),
+        to_device(dsv4_seq_lens_casual),
+        to_device(dsv4_positions_casual),
+        to_device(dsv4_c4_out_loc),
+        to_device(dsv4_c4_positions),
+        to_device(dsv4_c4_topk_lengths_raw),
+        to_device(dsv4_c4_topk_lengths_clamp1),
+        to_device(dsv4_c4_sparse_indices),
+        to_device(dsv4_c4_sparse_topk_lengths),
+        to_device(dsv4_c128_out_loc),
+        to_device(dsv4_c128_positions),
+        to_device(dsv4_c128_page_indices),
+        to_device(dsv4_c128_topk_lengths_clamp1),
+        to_device(dsv4_c4_compress_write_loc),
+        to_device(dsv4_c4_compress_extra_loc),
+        to_device(dsv4_c4_compress_state_indices),
+        to_device(dsv4_c128_compress_write_loc),
+        to_device(dsv4_c128_compress_state_indices),
         to_device(mamba_init_state_indices),
         to_device(mamba_final_state_indices),
         to_device_vec(pixel_values),
@@ -183,13 +208,7 @@ InferEngine::Input::to_model_input(infinicore::Device device) const {
         visual_token_ranges,
         to_device(target_hidden_states)};
 
-    infinilm::global_state::get_forward_context().attn_metadata = {
-        input.past_sequence_lengths,
-        input.total_sequence_lengths,
-        input.input_offsets,
-        input.cu_seqlens,
-        input.block_tables,
-        input.slot_mapping};
+    infinilm::global_state::get_forward_context().attn_metadata = infinilm::global_state::AttentionMetadata(input);
 
     infinilm::global_state::get_forward_context().mamba_metadata = {
         input.input_offsets,

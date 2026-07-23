@@ -220,6 +220,31 @@ class InferEngine(_infinilm.InferEngine):
         cu_seqlens=None,
         block_tables=None,
         slot_mapping=None,
+        dsv4_swa_indices=None,
+        dsv4_swa_topk_lengths=None,
+        dsv4_c4_indices=None,
+        dsv4_c4_topk_lengths=None,
+        dsv4_c128_indices=None,
+        dsv4_c128_topk_lengths=None,
+        dsv4_raw_out_loc=None,
+        dsv4_page_table=None,
+        dsv4_seq_lens_casual=None,
+        dsv4_positions_casual=None,
+        dsv4_c4_out_loc=None,
+        dsv4_c4_positions=None,
+        dsv4_c4_topk_lengths_raw=None,
+        dsv4_c4_topk_lengths_clamp1=None,
+        dsv4_c4_sparse_indices=None,
+        dsv4_c4_sparse_topk_lengths=None,
+        dsv4_c128_out_loc=None,
+        dsv4_c128_positions=None,
+        dsv4_c128_page_indices=None,
+        dsv4_c128_topk_lengths_clamp1=None,
+        dsv4_c4_compress_write_loc=None,
+        dsv4_c4_compress_extra_loc=None,
+        dsv4_c4_compress_state_indices=None,
+        dsv4_c128_compress_write_loc=None,
+        dsv4_c128_compress_state_indices=None,
         mamba_init_state_indices=None,
         mamba_final_state_indices=None,
         pixel_values=None,
@@ -247,6 +272,31 @@ class InferEngine(_infinilm.InferEngine):
         block_tables = unwrap_tensor(block_tables)
         cu_seqlens = unwrap_tensor(cu_seqlens)
         slot_mapping = unwrap_tensor(slot_mapping)
+        dsv4_swa_indices = unwrap_tensor(dsv4_swa_indices)
+        dsv4_swa_topk_lengths = unwrap_tensor(dsv4_swa_topk_lengths)
+        dsv4_c4_indices = unwrap_tensor(dsv4_c4_indices)
+        dsv4_c4_topk_lengths = unwrap_tensor(dsv4_c4_topk_lengths)
+        dsv4_c128_indices = unwrap_tensor(dsv4_c128_indices)
+        dsv4_c128_topk_lengths = unwrap_tensor(dsv4_c128_topk_lengths)
+        dsv4_raw_out_loc = unwrap_tensor(dsv4_raw_out_loc)
+        dsv4_page_table = unwrap_tensor(dsv4_page_table)
+        dsv4_seq_lens_casual = unwrap_tensor(dsv4_seq_lens_casual)
+        dsv4_positions_casual = unwrap_tensor(dsv4_positions_casual)
+        dsv4_c4_out_loc = unwrap_tensor(dsv4_c4_out_loc)
+        dsv4_c4_positions = unwrap_tensor(dsv4_c4_positions)
+        dsv4_c4_topk_lengths_raw = unwrap_tensor(dsv4_c4_topk_lengths_raw)
+        dsv4_c4_topk_lengths_clamp1 = unwrap_tensor(dsv4_c4_topk_lengths_clamp1)
+        dsv4_c4_sparse_indices = unwrap_tensor(dsv4_c4_sparse_indices)
+        dsv4_c4_sparse_topk_lengths = unwrap_tensor(dsv4_c4_sparse_topk_lengths)
+        dsv4_c128_out_loc = unwrap_tensor(dsv4_c128_out_loc)
+        dsv4_c128_positions = unwrap_tensor(dsv4_c128_positions)
+        dsv4_c128_page_indices = unwrap_tensor(dsv4_c128_page_indices)
+        dsv4_c128_topk_lengths_clamp1 = unwrap_tensor(dsv4_c128_topk_lengths_clamp1)
+        dsv4_c4_compress_write_loc = unwrap_tensor(dsv4_c4_compress_write_loc)
+        dsv4_c4_compress_extra_loc = unwrap_tensor(dsv4_c4_compress_extra_loc)
+        dsv4_c4_compress_state_indices = unwrap_tensor(dsv4_c4_compress_state_indices)
+        dsv4_c128_compress_write_loc = unwrap_tensor(dsv4_c128_compress_write_loc)
+        dsv4_c128_compress_state_indices = unwrap_tensor(dsv4_c128_compress_state_indices)
         mamba_init_state_indices = unwrap_tensor(mamba_init_state_indices)
         mamba_final_state_indices = unwrap_tensor(mamba_final_state_indices)
         target_hidden_states = unwrap_tensor(target_hidden_states)
@@ -278,6 +328,31 @@ class InferEngine(_infinilm.InferEngine):
             cu_seqlens=cu_seqlens,
             block_tables=block_tables,
             slot_mapping=slot_mapping,
+            dsv4_swa_indices=dsv4_swa_indices,
+            dsv4_swa_topk_lengths=dsv4_swa_topk_lengths,
+            dsv4_c4_indices=dsv4_c4_indices,
+            dsv4_c4_topk_lengths=dsv4_c4_topk_lengths,
+            dsv4_c128_indices=dsv4_c128_indices,
+            dsv4_c128_topk_lengths=dsv4_c128_topk_lengths,
+            dsv4_raw_out_loc=dsv4_raw_out_loc,
+            dsv4_page_table=dsv4_page_table,
+            dsv4_seq_lens_casual=dsv4_seq_lens_casual,
+            dsv4_positions_casual=dsv4_positions_casual,
+            dsv4_c4_out_loc=dsv4_c4_out_loc,
+            dsv4_c4_positions=dsv4_c4_positions,
+            dsv4_c4_topk_lengths_raw=dsv4_c4_topk_lengths_raw,
+            dsv4_c4_topk_lengths_clamp1=dsv4_c4_topk_lengths_clamp1,
+            dsv4_c4_sparse_indices=dsv4_c4_sparse_indices,
+            dsv4_c4_sparse_topk_lengths=dsv4_c4_sparse_topk_lengths,
+            dsv4_c128_out_loc=dsv4_c128_out_loc,
+            dsv4_c128_positions=dsv4_c128_positions,
+            dsv4_c128_page_indices=dsv4_c128_page_indices,
+            dsv4_c128_topk_lengths_clamp1=dsv4_c128_topk_lengths_clamp1,
+            dsv4_c4_compress_write_loc=dsv4_c4_compress_write_loc,
+            dsv4_c4_compress_extra_loc=dsv4_c4_compress_extra_loc,
+            dsv4_c4_compress_state_indices=dsv4_c4_compress_state_indices,
+            dsv4_c128_compress_write_loc=dsv4_c128_compress_write_loc,
+            dsv4_c128_compress_state_indices=dsv4_c128_compress_state_indices,
             mamba_init_state_indices=mamba_init_state_indices,
             mamba_final_state_indices=mamba_final_state_indices,
             pixel_values=pixel_values,
@@ -304,6 +379,31 @@ class InferEngine(_infinilm.InferEngine):
         cu_seqlens=None,
         block_tables=None,
         slot_mapping=None,
+        dsv4_swa_indices=None,
+        dsv4_swa_topk_lengths=None,
+        dsv4_c4_indices=None,
+        dsv4_c4_topk_lengths=None,
+        dsv4_c128_indices=None,
+        dsv4_c128_topk_lengths=None,
+        dsv4_raw_out_loc=None,
+        dsv4_page_table=None,
+        dsv4_seq_lens_casual=None,
+        dsv4_positions_casual=None,
+        dsv4_c4_out_loc=None,
+        dsv4_c4_positions=None,
+        dsv4_c4_topk_lengths_raw=None,
+        dsv4_c4_topk_lengths_clamp1=None,
+        dsv4_c4_sparse_indices=None,
+        dsv4_c4_sparse_topk_lengths=None,
+        dsv4_c128_out_loc=None,
+        dsv4_c128_positions=None,
+        dsv4_c128_page_indices=None,
+        dsv4_c128_topk_lengths_clamp1=None,
+        dsv4_c4_compress_write_loc=None,
+        dsv4_c4_compress_extra_loc=None,
+        dsv4_c4_compress_state_indices=None,
+        dsv4_c128_compress_write_loc=None,
+        dsv4_c128_compress_state_indices=None,
         mamba_init_state_indices=None,
         mamba_final_state_indices=None,
         pixel_values=None,
@@ -338,6 +438,87 @@ class InferEngine(_infinilm.InferEngine):
             cu_seqlens = cu_seqlens._underlying if cu_seqlens is not None else None
             slot_mapping = (
                 slot_mapping._underlying if slot_mapping is not None else None
+            )
+            dsv4_swa_indices = (
+                dsv4_swa_indices._underlying if dsv4_swa_indices is not None else None
+            )
+            dsv4_swa_topk_lengths = (
+                dsv4_swa_topk_lengths._underlying
+                if dsv4_swa_topk_lengths is not None
+                else None
+            )
+            dsv4_c4_indices = (
+                dsv4_c4_indices._underlying if dsv4_c4_indices is not None else None
+            )
+            dsv4_c4_topk_lengths = (
+                dsv4_c4_topk_lengths._underlying
+                if dsv4_c4_topk_lengths is not None
+                else None
+            )
+            dsv4_c128_indices = (
+                dsv4_c128_indices._underlying if dsv4_c128_indices is not None else None
+            )
+            dsv4_c128_topk_lengths = (
+                dsv4_c128_topk_lengths._underlying
+                if dsv4_c128_topk_lengths is not None
+                else None
+            )
+            dsv4_raw_out_loc = (
+                dsv4_raw_out_loc._underlying if dsv4_raw_out_loc is not None else None
+            )
+            dsv4_page_table = (
+                dsv4_page_table._underlying if dsv4_page_table is not None else None
+            )
+            dsv4_seq_lens_casual = (
+                dsv4_seq_lens_casual._underlying if dsv4_seq_lens_casual is not None else None
+            )
+            dsv4_positions_casual = (
+                dsv4_positions_casual._underlying if dsv4_positions_casual is not None else None
+            )
+            dsv4_c4_out_loc = (
+                dsv4_c4_out_loc._underlying if dsv4_c4_out_loc is not None else None
+            )
+            dsv4_c4_positions = (
+                dsv4_c4_positions._underlying if dsv4_c4_positions is not None else None
+            )
+            dsv4_c4_topk_lengths_raw = (
+                dsv4_c4_topk_lengths_raw._underlying if dsv4_c4_topk_lengths_raw is not None else None
+            )
+            dsv4_c4_topk_lengths_clamp1 = (
+                dsv4_c4_topk_lengths_clamp1._underlying if dsv4_c4_topk_lengths_clamp1 is not None else None
+            )
+            dsv4_c4_sparse_indices = (
+                dsv4_c4_sparse_indices._underlying if dsv4_c4_sparse_indices is not None else None
+            )
+            dsv4_c4_sparse_topk_lengths = (
+                dsv4_c4_sparse_topk_lengths._underlying if dsv4_c4_sparse_topk_lengths is not None else None
+            )
+            dsv4_c128_out_loc = (
+                dsv4_c128_out_loc._underlying if dsv4_c128_out_loc is not None else None
+            )
+            dsv4_c128_positions = (
+                dsv4_c128_positions._underlying if dsv4_c128_positions is not None else None
+            )
+            dsv4_c128_page_indices = (
+                dsv4_c128_page_indices._underlying if dsv4_c128_page_indices is not None else None
+            )
+            dsv4_c128_topk_lengths_clamp1 = (
+                dsv4_c128_topk_lengths_clamp1._underlying if dsv4_c128_topk_lengths_clamp1 is not None else None
+            )
+            dsv4_c4_compress_write_loc = (
+                dsv4_c4_compress_write_loc._underlying if dsv4_c4_compress_write_loc is not None else None
+            )
+            dsv4_c4_compress_extra_loc = (
+                dsv4_c4_compress_extra_loc._underlying if dsv4_c4_compress_extra_loc is not None else None
+            )
+            dsv4_c4_compress_state_indices = (
+                dsv4_c4_compress_state_indices._underlying if dsv4_c4_compress_state_indices is not None else None
+            )
+            dsv4_c128_compress_write_loc = (
+                dsv4_c128_compress_write_loc._underlying if dsv4_c128_compress_write_loc is not None else None
+            )
+            dsv4_c128_compress_state_indices = (
+                dsv4_c128_compress_state_indices._underlying if dsv4_c128_compress_state_indices is not None else None
             )
             mamba_init_state_indices = (
                 mamba_init_state_indices._underlying
@@ -376,6 +557,31 @@ class InferEngine(_infinilm.InferEngine):
                         cu_seqlens=cu_seqlens,
                         block_tables=block_tables,
                         slot_mapping=slot_mapping,
+                        dsv4_swa_indices=dsv4_swa_indices,
+                        dsv4_swa_topk_lengths=dsv4_swa_topk_lengths,
+                        dsv4_c4_indices=dsv4_c4_indices,
+                        dsv4_c4_topk_lengths=dsv4_c4_topk_lengths,
+                        dsv4_c128_indices=dsv4_c128_indices,
+                        dsv4_c128_topk_lengths=dsv4_c128_topk_lengths,
+            dsv4_raw_out_loc=dsv4_raw_out_loc,
+            dsv4_page_table=dsv4_page_table,
+            dsv4_seq_lens_casual=dsv4_seq_lens_casual,
+            dsv4_positions_casual=dsv4_positions_casual,
+            dsv4_c4_out_loc=dsv4_c4_out_loc,
+            dsv4_c4_positions=dsv4_c4_positions,
+            dsv4_c4_topk_lengths_raw=dsv4_c4_topk_lengths_raw,
+            dsv4_c4_topk_lengths_clamp1=dsv4_c4_topk_lengths_clamp1,
+            dsv4_c4_sparse_indices=dsv4_c4_sparse_indices,
+            dsv4_c4_sparse_topk_lengths=dsv4_c4_sparse_topk_lengths,
+            dsv4_c128_out_loc=dsv4_c128_out_loc,
+            dsv4_c128_positions=dsv4_c128_positions,
+            dsv4_c128_page_indices=dsv4_c128_page_indices,
+            dsv4_c128_topk_lengths_clamp1=dsv4_c128_topk_lengths_clamp1,
+            dsv4_c4_compress_write_loc=dsv4_c4_compress_write_loc,
+            dsv4_c4_compress_extra_loc=dsv4_c4_compress_extra_loc,
+            dsv4_c4_compress_state_indices=dsv4_c4_compress_state_indices,
+            dsv4_c128_compress_write_loc=dsv4_c128_compress_write_loc,
+            dsv4_c128_compress_state_indices=dsv4_c128_compress_state_indices,
                         mamba_init_state_indices=mamba_init_state_indices,
                         mamba_final_state_indices=mamba_final_state_indices,
                         pixel_values=pixel_values,
@@ -407,6 +613,31 @@ class InferEngine(_infinilm.InferEngine):
         cu_seqlens=None,
         block_tables=None,
         slot_mapping=None,
+        dsv4_swa_indices=None,
+        dsv4_swa_topk_lengths=None,
+        dsv4_c4_indices=None,
+        dsv4_c4_topk_lengths=None,
+        dsv4_c128_indices=None,
+        dsv4_c128_topk_lengths=None,
+        dsv4_raw_out_loc=None,
+        dsv4_page_table=None,
+        dsv4_seq_lens_casual=None,
+        dsv4_positions_casual=None,
+        dsv4_c4_out_loc=None,
+        dsv4_c4_positions=None,
+        dsv4_c4_topk_lengths_raw=None,
+        dsv4_c4_topk_lengths_clamp1=None,
+        dsv4_c4_sparse_indices=None,
+        dsv4_c4_sparse_topk_lengths=None,
+        dsv4_c128_out_loc=None,
+        dsv4_c128_positions=None,
+        dsv4_c128_page_indices=None,
+        dsv4_c128_topk_lengths_clamp1=None,
+        dsv4_c4_compress_write_loc=None,
+        dsv4_c4_compress_extra_loc=None,
+        dsv4_c4_compress_state_indices=None,
+        dsv4_c128_compress_write_loc=None,
+        dsv4_c128_compress_state_indices=None,
         pixel_values=None,
         image_bound=None,
         tgt_sizes=None,
@@ -429,6 +660,31 @@ class InferEngine(_infinilm.InferEngine):
                     cu_seqlens=cu_seqlens,
                     block_tables=block_tables,
                     slot_mapping=slot_mapping,
+                    dsv4_swa_indices=dsv4_swa_indices,
+                    dsv4_swa_topk_lengths=dsv4_swa_topk_lengths,
+                    dsv4_c4_indices=dsv4_c4_indices,
+                    dsv4_c4_topk_lengths=dsv4_c4_topk_lengths,
+                    dsv4_c128_indices=dsv4_c128_indices,
+                    dsv4_c128_topk_lengths=dsv4_c128_topk_lengths,
+            dsv4_raw_out_loc=dsv4_raw_out_loc,
+            dsv4_page_table=dsv4_page_table,
+            dsv4_seq_lens_casual=dsv4_seq_lens_casual,
+            dsv4_positions_casual=dsv4_positions_casual,
+            dsv4_c4_out_loc=dsv4_c4_out_loc,
+            dsv4_c4_positions=dsv4_c4_positions,
+            dsv4_c4_topk_lengths_raw=dsv4_c4_topk_lengths_raw,
+            dsv4_c4_topk_lengths_clamp1=dsv4_c4_topk_lengths_clamp1,
+            dsv4_c4_sparse_indices=dsv4_c4_sparse_indices,
+            dsv4_c4_sparse_topk_lengths=dsv4_c4_sparse_topk_lengths,
+            dsv4_c128_out_loc=dsv4_c128_out_loc,
+            dsv4_c128_positions=dsv4_c128_positions,
+            dsv4_c128_page_indices=dsv4_c128_page_indices,
+            dsv4_c128_topk_lengths_clamp1=dsv4_c128_topk_lengths_clamp1,
+            dsv4_c4_compress_write_loc=dsv4_c4_compress_write_loc,
+            dsv4_c4_compress_extra_loc=dsv4_c4_compress_extra_loc,
+            dsv4_c4_compress_state_indices=dsv4_c4_compress_state_indices,
+            dsv4_c128_compress_write_loc=dsv4_c128_compress_write_loc,
+            dsv4_c128_compress_state_indices=dsv4_c128_compress_state_indices,
                     pixel_values=pixel_values,
                     image_bound=image_bound,
                     tgt_sizes=tgt_sizes,

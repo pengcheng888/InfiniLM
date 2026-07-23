@@ -52,6 +52,56 @@ public:
         std::optional<infinicore::Tensor> block_tables;
         /// Slot ids for each token `[seq]`. Used for paged cache.
         std::optional<infinicore::Tensor> slot_mapping;
+        /// DeepSeek-V4 SWA FlashMLA indices, shape `[seq, 128]`.
+        std::optional<infinicore::Tensor> dsv4_swa_indices;
+        /// DeepSeek-V4 SWA top-k lengths, shape `[seq]`.
+        std::optional<infinicore::Tensor> dsv4_swa_topk_lengths;
+        /// DeepSeek-V4 C4 compressed FlashMLA indices, shape `[seq, 512]`.
+        std::optional<infinicore::Tensor> dsv4_c4_indices;
+        /// DeepSeek-V4 C4 compressed top-k lengths, shape `[seq]`.
+        std::optional<infinicore::Tensor> dsv4_c4_topk_lengths;
+        /// DeepSeek-V4 C128 compressed FlashMLA indices, shape `[seq, 64]`.
+        std::optional<infinicore::Tensor> dsv4_c128_indices;
+        /// DeepSeek-V4 C128 compressed top-k lengths, shape `[seq]`.
+        std::optional<infinicore::Tensor> dsv4_c128_topk_lengths;
+        /// DeepSeek-V4 raw output cache locations, shape `[seq]`.
+        std::optional<infinicore::Tensor> dsv4_raw_out_loc;
+        /// DeepSeek-V4 repeated page table, shape `[seq, max_pages]`.
+        std::optional<infinicore::Tensor> dsv4_page_table;
+        /// DeepSeek-V4 causal sequence lengths per query token, shape `[seq]`.
+        std::optional<infinicore::Tensor> dsv4_seq_lens_casual;
+        /// DeepSeek-V4 raw positions per query token, shape `[seq]`.
+        std::optional<infinicore::Tensor> dsv4_positions_casual;
+        /// DeepSeek-V4 C4 compressed output locations, shape `[seq]`.
+        std::optional<infinicore::Tensor> dsv4_c4_out_loc;
+        /// DeepSeek-V4 C4 compression RoPE positions, shape `[seq]`.
+        std::optional<infinicore::Tensor> dsv4_c4_positions;
+        /// DeepSeek-V4 C4 raw compressed lengths, shape `[seq]`.
+        std::optional<infinicore::Tensor> dsv4_c4_topk_lengths_raw;
+        /// DeepSeek-V4 C4 compressed lengths clamped to at least 1, shape `[seq]`.
+        std::optional<infinicore::Tensor> dsv4_c4_topk_lengths_clamp1;
+        /// DeepSeek-V4 C4 sparse page indices, shape `[seq, 512]`.
+        std::optional<infinicore::Tensor> dsv4_c4_sparse_indices;
+        /// DeepSeek-V4 C4 sparse top-k lengths, shape `[seq]`.
+        std::optional<infinicore::Tensor> dsv4_c4_sparse_topk_lengths;
+        /// DeepSeek-V4 C128 compressed output locations, shape `[seq]`.
+        std::optional<infinicore::Tensor> dsv4_c128_out_loc;
+        /// DeepSeek-V4 C128 compression RoPE positions, shape `[seq]`.
+        std::optional<infinicore::Tensor> dsv4_c128_positions;
+        /// DeepSeek-V4 C128 page indices, shape `[seq, 64]` in the current adapter.
+        std::optional<infinicore::Tensor> dsv4_c128_page_indices;
+        /// DeepSeek-V4 C128 top-k lengths clamped to at least 1, shape `[seq]`.
+        std::optional<infinicore::Tensor> dsv4_c128_topk_lengths_clamp1;
+        /// DeepSeek-V4 C4 compressor write locations, shape `[seq]`.
+        std::optional<infinicore::Tensor> dsv4_c4_compress_write_loc;
+        /// DeepSeek-V4 C4 compressor overlap locations, shape `[seq, 1]`.
+        std::optional<infinicore::Tensor> dsv4_c4_compress_extra_loc;
+        /// DeepSeek-V4 C4 compressor state indices, shape `[seq]`.
+        std::optional<infinicore::Tensor> dsv4_c4_compress_state_indices;
+        /// DeepSeek-V4 C128 compressor write locations, shape `[seq]`.
+        std::optional<infinicore::Tensor> dsv4_c128_compress_write_loc;
+        /// DeepSeek-V4 C128 compressor state indices, shape `[seq]`.
+        std::optional<infinicore::Tensor> dsv4_c128_compress_state_indices;
         /// Mamba state cache indices read at the start of each request forward.
         std::optional<infinicore::Tensor> mamba_init_state_indices;
         /// Mamba state cache indices written with the final state of each request forward.
