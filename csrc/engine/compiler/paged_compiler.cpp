@@ -6,6 +6,11 @@ namespace infinilm::engine {
 
 PagedCompiler::PagedCompiler(const std::shared_ptr<InfinilmModel> &model, RankBarrier *barrier)
     : GraphCompiler(model, barrier) {
+    const bool is_deepseek_v4 = model_ && model_->model_type() == "deepseek_v4";
+    if (is_deepseek_v4) {
+        decode_batch_sizes_.push_back(1);
+        return;
+    }
     for (size_t b = 1; b < 64; ++b) {
         decode_batch_sizes_.push_back(b);
     }
@@ -30,11 +35,20 @@ void PagedCompiler::compile() {
         set_zeros(block_tables_holder_);
 
         auto make_decode_input = [&](size_t b) {
+            const bool is_deepseek_v4 = model_ && model_->model_type() == "deepseek_v4";
             InfinilmModel::Input input;
             input.input_ids = infinicore::Tensor::empty({1, b}, infinicore::DataType::I64, infinicore::context::getDevice());
             input.position_ids = infinicore::Tensor::empty({b}, infinicore::DataType::I64, infinicore::context::getDevice());
             input.total_sequence_lengths = infinicore::Tensor::empty({b}, infinicore::DataType::I32, infinicore::context::getDevice());
-            set_zeros(input.input_ids.value());
+            if (is_deepseek_v4) {
+                // Token 104937 is a known-valid DeepSeek-V4 decode token from
+                // the local correctness tests. Avoid token-id 0 here because
+                // FFN graph capture now exercises hash-topk and MoE kernels.
+                std::vector<int64_t> input_ids_vec(b, 104937);
+                infinicore::context::memcpyH2D(input.input_ids.value()->data(), input_ids_vec.data(), b * sizeof(int64_t), false);
+            } else {
+                set_zeros(input.input_ids.value());
+            }
             set_zeros(input.position_ids.value());
             set_zeros(input.total_sequence_lengths.value());
             std::vector<int32_t> total_sequence_lengths_vec(b, 1);

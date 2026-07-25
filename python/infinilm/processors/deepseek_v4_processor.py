@@ -1,5 +1,6 @@
 import json
 import os
+import time
 
 from .basic_llm_processor import BasicLLMProcessor
 from .processor import register_processor
@@ -63,10 +64,30 @@ class DeepSeekV4Processor(BasicLLMProcessor):
     def _build_model_input_from_batch_scheduler_output(
         self, scheduler_output, temperature, top_p, top_k
     ) -> dict:
+        profile = os.getenv("INFINILM_DSV4_PROCESSOR_PROFILE", "0").lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+        start = time.perf_counter()
         result = super()._build_model_input_from_batch_scheduler_output(
             scheduler_output, temperature, top_p, top_k
         )
-        result.update(self._build_dsv4_attention_metadata(scheduler_output))
+        base_ms = (time.perf_counter() - start) * 1000.0
+        meta_start = time.perf_counter()
+        metadata = self._build_dsv4_attention_metadata(scheduler_output)
+        meta_ms = (time.perf_counter() - meta_start) * 1000.0
+        result.update(metadata)
+        if profile:
+            phase = "prefill" if scheduler_output.is_prefill else "decode"
+            print(
+                f"[INFINILM_DSV4_PROCESSOR_PROFILE] phase={phase} "
+                f"requests={len(scheduler_output.scheduled_requests)} "
+                f"base_ms={base_ms:.3f} dsv4_meta_ms={meta_ms:.3f} "
+                f"total_ms={(time.perf_counter() - start) * 1000.0:.3f}",
+                flush=True,
+            )
         return result
 
     @staticmethod
@@ -152,6 +173,7 @@ class DeepSeekV4Processor(BasicLLMProcessor):
     def _build_dsv4_attention_metadata(self, scheduler_output) -> dict:
         import infinicore
 
+        start = time.perf_counter()
         query_rows = []
         max_block_table_len = 1
         max_c128_visible = 1
@@ -253,7 +275,8 @@ class DeepSeekV4Processor(BasicLLMProcessor):
             c128_compress_write_loc.append(c128_write)
             c128_compress_state_indices.append(c128_state)
 
-        return {
+        list_done = time.perf_counter()
+        result = {
             "dsv4_swa_indices": infinicore.from_list(swa_indices, dtype=infinicore.int32),
             "dsv4_swa_topk_lengths": infinicore.from_list(swa_topk_lengths, dtype=infinicore.int32),
             "dsv4_c4_indices": infinicore.from_list(c4_indices, dtype=infinicore.int32),
@@ -280,3 +303,12 @@ class DeepSeekV4Processor(BasicLLMProcessor):
             "dsv4_c128_compress_write_loc": infinicore.from_list(c128_compress_write_loc, dtype=infinicore.int32),
             "dsv4_c128_compress_state_indices": infinicore.from_list(c128_compress_state_indices, dtype=infinicore.int32),
         }
+        if os.getenv("INFINILM_DSV4_PROCESSOR_PROFILE", "0").lower() in ("1", "true", "yes", "on"):
+            print(
+                f"[INFINILM_DSV4_METADATA_PROFILE] phase={'prefill' if scheduler_output.is_prefill else 'decode'} "
+                f"rows={len(query_rows)} c128_width={c128_width} "
+                f"list_ms={(list_done - start) * 1000.0:.3f} "
+                f"from_list_ms={(time.perf_counter() - list_done) * 1000.0:.3f}",
+                flush=True,
+            )
+        return result

@@ -28,9 +28,13 @@ private:
     INFINICORE_NN_PARAMETER(bias);
 
     size_t num_experts_per_tok_{0};
+    size_t num_experts_{0};
     bool norm_topk_prob_{true};
     bool is_hash_{true};
-    bool gate_topk_kernel_backend_enabled_{false};
+    bool gate_topk_kernel_backend_enabled_{true};
+    mutable DeepseekV4FlatScratchBuffer router_logits_scratch_;
+    mutable DeepseekV4FlatScratchBuffer router_scores_scratch_;
+    mutable DeepseekV4FlatScratchBuffer router_indices_scratch_;
 };
 
 class DeepseekV4SharedExperts : public infinicore::nn::Module {
@@ -104,6 +108,9 @@ public:
     void reset_runtime_state() const override;
 
 private:
+    infinicore::Tensor forward_impl(const infinicore::Tensor &hidden_states,
+                                    const infinicore::Tensor &input_ids) const;
+
     INFINICORE_NN_MODULE(DeepseekV4MoEGate, gate);
     INFINICORE_NN_MODULE(DeepseekV4PackedExperts, experts);
     INFINICORE_NN_MODULE(DeepseekV4SharedExperts, shared_experts);

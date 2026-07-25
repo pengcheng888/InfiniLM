@@ -42,10 +42,6 @@ inline bool kernel_backend_enabled(const char *name) {
     throw std::runtime_error(std::string(name) + " must be either naive or kernel");
 }
 
-inline bool mhc_kernel_backend_enabled(const char *name) {
-    return kernel_backend_enabled(name);
-}
-
 inline std::string env_string_or(const char *name, const std::string &fallback) {
     const char *value = env_value(name);
     if (value == nullptr || value[0] == 0) {

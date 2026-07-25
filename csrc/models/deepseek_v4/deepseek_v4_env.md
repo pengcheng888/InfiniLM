@@ -2,15 +2,17 @@
 
 本文档汇总 InfiniLM DeepSeek V4 路径使用的专用环境变量。当前约定是：这些环境变量在进程启动后保持不变，模型代码在构造阶段或首次静态初始化时读取，避免在每次 `forward` 中反复访问环境变量。
 
-## MHC 后端选择
+## MHC 算子
 
-| 环境变量 | 默认值 | 可选值 | 读取位置 | 作用 |
-| --- | --- | --- | --- | --- |
-| `INFINILM_DSV4_MHC_PRE` | `naive` | `naive`, `kernel` | `DeepseekV4DecoderLayer` 构造函数 | 选择 MHC pre 算子，同时作用于 attention 侧和 FFN 侧的 MHC pre。 |
-| `INFINILM_DSV4_MHC_POST` | `naive` | `naive`, `kernel` | `DeepseekV4DecoderLayer` 构造函数 | 选择 MHC post 算子，同时作用于 attention 侧和 FFN 侧的 MHC post。 |
-| `INFINILM_DSV4_MHC_HEAD` | `naive` | `naive`, `kernel` | `DeepseekV4Model` 构造函数 | 选择 final norm 前的 MHC head collapse 算子。 |
+当前 InfiniLM DeepSeek V4 模型路径固定调用 InfiniCore kernel 版本：
 
-MHC kernel 选择接受的真值别名包括 `1`、`true`、`TRUE`、`on`、`ON`、`kernel`。naive/假值别名包括 `0`、`false`、`FALSE`、`off`、`OFF`、`naive`。其它取值会报错。
+| 阶段 | 固定算子 |
+| --- | --- |
+| MHC pre | `deepseek_v4_mhc_pre_kernel_` |
+| MHC post | `deepseek_v4_mhc_post_kernel_` |
+| MHC head | `deepseek_v4_mhc_head_kernel_` |
+
+MHC 后端选择环境变量已删除；模型 forward 不再读取环境变量，也不再支持切换到 naive 版本。`deepseek_v4_mhc_pre_naive_`、`deepseek_v4_mhc_post_naive_`、`deepseek_v4_mhc_head_naive_` 仅作为 InfiniCore 层历史/测试接口保留，DeepSeek V4 模型路径不再考虑这三个算子。
 
 ## Gate/TopK 后端选择
 
@@ -18,7 +20,7 @@ MHC kernel 选择接受的真值别名包括 `1`、`true`、`TRUE`、`on`、`ON`
 | --- | --- | --- | --- | --- |
 | `INFINILM_DSV4_GATE_TOPK` | `naive` | `naive`, `kernel` | `DeepseekV4MoEGate` 构造函数 | 选择 gate 之后 routed expert topk 的计算路径。hash MoE 层对应 `deepseek_v4_hash_topk_*`，非 hash MoE 层对应带 correction bias 的 `deepseek_v4_topk_*`。 |
 
-Gate/TopK kernel 选择接受的真值/假值别名与 MHC kernel 一致。默认保持 `naive`，用于保证现有精度行为不变；设置为 `kernel` 后使用 InfiniCore native 单 kernel 实现以减少 ATen 多算子和中间张量开销。
+Gate/TopK kernel 选择接受常见真值/假值别名。默认保持 `naive`，用于保证现有精度行为不变；设置为 `kernel` 后使用 InfiniCore native 单 kernel 实现以减少 ATen 多算子和中间张量开销。
 
 ## 路由专家后端
 

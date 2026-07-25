@@ -81,6 +81,7 @@ DeepseekV4MoEGate::DeepseekV4MoEGate(std::shared_ptr<infinilm::config::ModelConf
     const size_t num_experts_per_tok = model_config->get<size_t>("num_experts_per_tok");
     const size_t num_hash_layers = model_config->get_or<size_t>("num_hash_layers", 0);
     num_experts_per_tok_ = num_experts_per_tok;
+    num_experts_ = num_experts;
     norm_topk_prob_ = model_config->get_or<bool>("norm_topk_prob", true);
     is_hash_ = layer_idx < num_hash_layers;
     gate_topk_kernel_backend_enabled_ = utils::kernel_backend_enabled("INFINILM_DSV4_GATE_TOPK");
@@ -105,13 +106,17 @@ DeepseekV4MoEGate::forward(const infinicore::Tensor &hidden_states,
     infinicore::Tensor router_logits;
     {
         profile::ScopedTimer timer(profile::Event::MoeGate, token_count);
-        router_logits = infinicore::op::deepseek_v4_linear_bf16_fp32(hidden_states, weight_);
+        router_logits = router_logits_scratch_.get(
+            {hidden_states->size(0), num_experts_},
+            infinicore::DataType::F32,
+            hidden_states->device());
+        infinicore::op::deepseek_v4_linear_bf16_fp32_(router_logits, hidden_states, weight_);
     }
-    auto router_scores = infinicore::Tensor::empty(
+    auto router_scores = router_scores_scratch_.get(
         {hidden_states->size(0), num_experts_per_tok_},
         infinicore::DataType::F32,
         hidden_states->device());
-    auto router_indices = infinicore::Tensor::empty(
+    auto router_indices = router_indices_scratch_.get(
         {hidden_states->size(0), num_experts_per_tok_},
         infinicore::DataType::I32,
         hidden_states->device());
@@ -189,9 +194,11 @@ DeepseekV4SharedExperts::DeepseekV4SharedExperts(std::shared_ptr<infinilm::confi
 
 infinicore::Tensor DeepseekV4SharedExperts::forward(infinicore::Tensor hidden_states) const {
     auto gate_up = gate_up_proj_->forward(hidden_states);
+    const auto last_dim = gate_up->ndim() - 1;
+    const auto intermediate_size = gate_up->size(last_dim) / 2;
     auto activated = scratch_.activated(
         gate_up->size(0),
-        gate_up->size(gate_up->ndim() - 1) / 2,
+        intermediate_size,
         gate_up->dtype(),
         gate_up->device());
     infinicore::op::deepseek_v4_silu_and_mul_(activated, gate_up);
@@ -399,6 +406,11 @@ DeepseekV4MoE::DeepseekV4MoE(std::shared_ptr<infinilm::config::ModelConfig> mode
 
 infinicore::Tensor DeepseekV4MoE::forward(const infinicore::Tensor &hidden_states,
                                           const infinicore::Tensor &input_ids) const {
+    return forward_impl(hidden_states, input_ids);
+}
+
+infinicore::Tensor DeepseekV4MoE::forward_impl(const infinicore::Tensor &hidden_states,
+                                               const infinicore::Tensor &input_ids) const {
     const size_t token_count = hidden_states->size(0);
     profile::ScopedTimer moe_timer(profile::Event::MoeForward, token_count);
     debug_dump_tensor(hidden_states, layer_idx_, "moe_input", debug_dump_enabled_);
@@ -417,7 +429,8 @@ infinicore::Tensor DeepseekV4MoE::forward(const infinicore::Tensor &hidden_state
         debug_dump_tensor(shared, layer_idx_, "shared", debug_dump_enabled_);
     }
 
-    const bool fuse_shared_output = fused_shared_output_enabled_ && shared && experts_->supports_fused_shared_output();
+    // const bool fuse_shared_output = fused_shared_output_enabled_ && shared && experts_->supports_fused_shared_output();
+    const bool fuse_shared_output = true;
     infinicore::Tensor routed;
     {
         profile::ScopedTimer timer(profile::Event::MoeExperts, token_count);

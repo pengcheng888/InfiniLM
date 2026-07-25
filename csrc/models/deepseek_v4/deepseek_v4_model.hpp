@@ -36,7 +36,6 @@ private:
     size_t hc_mult_{4};
     double rms_norm_eps_{1e-6};
     double hc_eps_{1e-6};
-    bool mhc_head_kernel_backend_enabled_{false};
 };
 
 } // namespace infinilm::models::deepseek_v4

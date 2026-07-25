@@ -12,6 +12,23 @@
 
 namespace infinilm::models::deepseek_v4 {
 
+struct DeepseekV4DecoderLayerScratch {
+    infinicore::Tensor attn_in;
+    infinicore::Tensor attn_post;
+    infinicore::Tensor attn_comb;
+    infinicore::Tensor attn_posted;
+    infinicore::Tensor ffn_in;
+    infinicore::Tensor ffn_post;
+    infinicore::Tensor ffn_comb;
+    infinicore::Tensor layer_out;
+
+    void ensure_decode(size_t hidden_size,
+                       size_t hc_mult,
+                       infinicore::DataType dtype,
+                       const infinicore::Device &device);
+    bool ready() const;
+};
+
 class DeepseekV4DecoderLayer : public infinicore::nn::Module {
 public:
     DeepseekV4DecoderLayer(std::shared_ptr<infinilm::config::ModelConfig> model_config,
@@ -44,14 +61,15 @@ private:
     INFINICORE_NN_PARAMETER(hc_ffn_scale);
 
     size_t layer_idx_;
+    infinicore::DataType dtype_{infinicore::DataType::BF16};
+    infinicore::Device device_;
     size_t hidden_size_{0};
     size_t hc_mult_{4};
     double rms_norm_eps_{1e-6};
     double hc_eps_{1e-6};
     int hc_sinkhorn_iters_{20};
-    bool mhc_pre_kernel_backend_enabled_{false};
-    bool mhc_post_kernel_backend_enabled_{false};
     bool debug_dump_enabled_{false};
+    DeepseekV4DecoderLayerScratch decode_scratch_;
 };
 
 } // namespace infinilm::models::deepseek_v4

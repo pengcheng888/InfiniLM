@@ -4,10 +4,33 @@
 #include "../../global_state/global_state.hpp"
 #include "../models_registry.hpp"
 
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <stdexcept>
 #include <string>
 
 namespace infinilm::models::deepseek_v4 {
+
+namespace {
+
+bool detail_profile_enabled() {
+    const char *value = std::getenv("INFINILM_DSV4_CAUSAL_DETAIL_PROFILE");
+    if (value == nullptr) {
+        return false;
+    }
+    std::string v(value);
+    return v == "1" || v == "true" || v == "TRUE" || v == "on" || v == "ON" || v == "yes" || v == "YES";
+}
+
+using Clock = std::chrono::steady_clock;
+
+double elapsed_ms(Clock::time_point start, Clock::time_point end) {
+    return std::chrono::duration<double, std::milli>(end - start).count();
+}
+
+} // namespace
+
 
 DeepseekV4ForCausalLM::DeepseekV4ForCausalLM(std::shared_ptr<infinilm::config::ModelConfig> model_config,
                                              const infinicore::Device &device) {
@@ -85,11 +108,37 @@ void DeepseekV4ForCausalLM::reset_cache(const cache::CacheConfig *cache_config) 
 }
 
 infinilm::InfinilmModel::Output DeepseekV4ForCausalLM::forward(const infinilm::InfinilmModel::Input &input) const {
+    if (!detail_profile_enabled()) {
+        auto hidden_states = model_->forward(input);
+        auto logits = lm_head_->forward(hidden_states);
+        if (logits->ndim() == 2) {
+            logits = logits->view({1, logits->size(0), logits->size(1)});
+        }
+        return {logits, hidden_states};
+    }
+
+    const auto total_start = Clock::now();
+    const auto model_start = Clock::now();
     auto hidden_states = model_->forward(input);
+    infinicore::context::syncStream();
+    const auto model_end = Clock::now();
+
+    const auto lm_head_start = Clock::now();
     auto logits = lm_head_->forward(hidden_states);
+    infinicore::context::syncStream();
+    const auto lm_head_end = Clock::now();
+
+    const auto view_start = Clock::now();
     if (logits->ndim() == 2) {
         logits = logits->view({1, logits->size(0), logits->size(1)});
     }
+    const auto view_end = Clock::now();
+    std::fprintf(stderr,
+                 "[INFINILM_DSV4_CAUSAL_DETAIL] model_ms=%.3f lm_head_ms=%.3f view_ms=%.3f total_ms=%.3f\n",
+                 elapsed_ms(model_start, model_end),
+                 elapsed_ms(lm_head_start, lm_head_end),
+                 elapsed_ms(view_start, view_end),
+                 elapsed_ms(total_start, view_end));
     return {logits, hidden_states};
 }
 

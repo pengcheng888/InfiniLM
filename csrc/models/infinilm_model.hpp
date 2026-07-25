@@ -121,6 +121,10 @@ public:
         return cache_config_.get();
     }
 
+    std::string model_type() const {
+        return model_config_ ? model_config_->get<std::string>("model_type") : "";
+    }
+
     void process_weights_after_loading();
     void reset_runtime_state() const;
 

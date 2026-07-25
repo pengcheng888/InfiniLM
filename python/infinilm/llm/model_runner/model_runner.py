@@ -1,4 +1,5 @@
 import logging
+import os
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -230,12 +231,30 @@ class ModelRunner:
             return sampled_tokens_list
 
         # Run inference
+        detail_profile = os.getenv("INFINILM_MODEL_RUNNER_DETAIL_PROFILE", "0").lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+
+        sync_before_start = time.perf_counter()
         infinicore.sync_stream()
+        sync_before_ms = (time.perf_counter() - sync_before_start) * 1000.0
+
         forward_start = time.perf_counter()
         sampled_tokens = self.model_engine.forward(**model_input)
+        engine_forward_ms = (time.perf_counter() - forward_start) * 1000.0
+
+        sync_after_start = time.perf_counter()
         infinicore.sync_stream()
-        forward_ms = (time.perf_counter() - forward_start) * 1000.0
+        sync_after_ms = (time.perf_counter() - sync_after_start) * 1000.0
+
+        numpy_start = time.perf_counter()
         sampled_tokens_list = sampled_tokens.to_numpy().tolist()
+        numpy_ms = (time.perf_counter() - numpy_start) * 1000.0
+
+        forward_ms = sync_before_ms + engine_forward_ms + sync_after_ms
         total_ms = (time.perf_counter() - step_start) * 1000.0
 
         print(
@@ -245,6 +264,15 @@ class ModelRunner:
             f"total_ms={total_ms:.3f}",
             flush=True,
         )
+        if detail_profile:
+            print(
+                f"[INFINILM_MODEL_RUNNER_DETAIL] {phase}{step_label} "
+                f"requests={request_count} tokens={token_count} "
+                f"build_ms={build_ms:.3f} sync_before_ms={sync_before_ms:.3f} "
+                f"engine_forward_ms={engine_forward_ms:.3f} sync_after_ms={sync_after_ms:.3f} "
+                f"to_numpy_ms={numpy_ms:.3f} total_ms={total_ms:.3f}",
+                flush=True,
+            )
 
         return sampled_tokens_list
 
