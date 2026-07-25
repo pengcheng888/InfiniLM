@@ -19,12 +19,47 @@
 #include <stdexcept>
 #include <string>
 
+namespace infinicore::op {
+bool deepseek_v4_dcu_custom_allreduce_(infinicore::Tensor output,
+                                       const infinicore::Tensor &input,
+                                       int tp_rank,
+                                       int tp_size,
+                                       int max_size_bytes = 8192 * 512);
+}
+
 namespace infinilm::models::deepseek_v4 {
 
 namespace {
 
 bool debug_dump_enabled() {
     return utils::env_flag_enabled("INFINILM_DSV4_DEBUG_DUMP");
+}
+
+bool moe_allreduce_outplace_enabled() {
+    const std::string backend = utils::env_string_or("INFINILM_DSV4_MOE_ALLREDUCE", "inplace");
+    if (backend == "outplace") {
+        return true;
+    }
+    if (backend == "inplace" || backend == "custom" || backend == "dcu_custom" || backend == "custom_ar") {
+        return false;
+    }
+    throw std::runtime_error("INFINILM_DSV4_MOE_ALLREDUCE must be one of inplace, outplace, custom");
+}
+
+bool moe_custom_allreduce_enabled() {
+    const std::string backend = utils::env_string_or("INFINILM_DSV4_MOE_ALLREDUCE", "inplace");
+    return backend == "custom" || backend == "dcu_custom" || backend == "custom_ar";
+}
+
+bool fused_shared_output_enabled() {
+    const std::string mode = utils::env_string_or("INFINILM_DSV4_FUSED_SHARED_OUTPUT", "auto");
+    if (mode == "auto" || mode == "1" || mode == "true" || mode == "TRUE" || mode == "on" || mode == "ON") {
+        return true;
+    }
+    if (mode == "0" || mode == "false" || mode == "FALSE" || mode == "off" || mode == "OFF") {
+        return false;
+    }
+    throw std::runtime_error("INFINILM_DSV4_FUSED_SHARED_OUTPUT must be one of auto, on, off");
 }
 
 void debug_dump_tensor(const infinicore::Tensor &tensor, size_t layer_idx, const std::string &name, bool enabled) {
@@ -66,7 +101,12 @@ DeepseekV4MoEGate::forward(const infinicore::Tensor &hidden_states,
     if (hidden_states->ndim() != 2) {
         throw std::runtime_error("infinilm::models::deepseek_v4::DeepseekV4MoEGate::forward expects hidden_states [tokens, hidden]");
     }
-    auto router_logits = infinicore::op::deepseek_v4_linear_bf16_fp32(hidden_states, weight_);
+    const size_t token_count = hidden_states->size(0);
+    infinicore::Tensor router_logits;
+    {
+        profile::ScopedTimer timer(profile::Event::MoeGate, token_count);
+        router_logits = infinicore::op::deepseek_v4_linear_bf16_fp32(hidden_states, weight_);
+    }
     auto router_scores = infinicore::Tensor::empty(
         {hidden_states->size(0), num_experts_per_tok_},
         infinicore::DataType::F32,
@@ -75,39 +115,42 @@ DeepseekV4MoEGate::forward(const infinicore::Tensor &hidden_states,
         {hidden_states->size(0), num_experts_per_tok_},
         infinicore::DataType::I32,
         hidden_states->device());
-    if (is_hash_) {
-        if (gate_topk_kernel_backend_enabled_) {
-            infinicore::op::deepseek_v4_hash_topk_kernel_(
-                router_scores,
-                router_indices,
-                router_logits,
-                input_ids,
-                tid2eid_,
-                norm_topk_prob_);
+    {
+        profile::ScopedTimer timer(profile::Event::MoeTopk, token_count);
+        if (is_hash_) {
+            if (gate_topk_kernel_backend_enabled_) {
+                infinicore::op::deepseek_v4_hash_topk_kernel_(
+                    router_scores,
+                    router_indices,
+                    router_logits,
+                    input_ids,
+                    tid2eid_,
+                    norm_topk_prob_);
+            } else {
+                infinicore::op::deepseek_v4_hash_topk_naive_(
+                    router_scores,
+                    router_indices,
+                    router_logits,
+                    input_ids,
+                    tid2eid_,
+                    norm_topk_prob_);
+            }
         } else {
-            infinicore::op::deepseek_v4_hash_topk_naive_(
-                router_scores,
-                router_indices,
-                router_logits,
-                input_ids,
-                tid2eid_,
-                norm_topk_prob_);
-        }
-    } else {
-        if (gate_topk_kernel_backend_enabled_) {
-            infinicore::op::deepseek_v4_topk_kernel_(
-                router_scores,
-                router_indices,
-                router_logits,
-                bias_,
-                norm_topk_prob_);
-        } else {
-            infinicore::op::deepseek_v4_topk_naive_(
-                router_scores,
-                router_indices,
-                router_logits,
-                bias_,
-                norm_topk_prob_);
+            if (gate_topk_kernel_backend_enabled_) {
+                infinicore::op::deepseek_v4_topk_kernel_(
+                    router_scores,
+                    router_indices,
+                    router_logits,
+                    bias_,
+                    norm_topk_prob_);
+            } else {
+                infinicore::op::deepseek_v4_topk_naive_(
+                    router_scores,
+                    router_indices,
+                    router_logits,
+                    bias_,
+                    norm_topk_prob_);
+            }
         }
     }
     return {router_scores, router_indices};
@@ -340,8 +383,11 @@ DeepseekV4MoE::DeepseekV4MoE(std::shared_ptr<infinilm::config::ModelConfig> mode
                              const infinicore::Device &device) {
     layer_idx_ = layer_idx;
     debug_dump_enabled_ = debug_dump_enabled();
-    fused_shared_output_enabled_ = utils::env_flag_enabled("INFINILM_DSV4_FUSED_SHARED_OUTPUT");
+    fused_shared_output_enabled_ = fused_shared_output_enabled();
+    moe_allreduce_outplace_enabled_ = moe_allreduce_outplace_enabled();
+    moe_custom_allreduce_enabled_ = moe_custom_allreduce_enabled();
     const auto &rank_info = infinilm::global_state::get_tensor_model_parallel_rank_info();
+    tp_rank_ = rank_info.tp_rank;
     tp_size_ = static_cast<size_t>(rank_info.tp_size);
     communicator_ = rank_info.comm;
     INFINICORE_NN_MODULE_INIT(gate, model_config, layer_idx, device);
@@ -358,10 +404,7 @@ infinicore::Tensor DeepseekV4MoE::forward(const infinicore::Tensor &hidden_state
     debug_dump_tensor(hidden_states, layer_idx_, "moe_input", debug_dump_enabled_);
     infinicore::Tensor routing_weights;
     infinicore::Tensor selected_experts;
-    {
-        profile::ScopedTimer timer(profile::Event::MoeTopk, token_count);
-        std::tie(routing_weights, selected_experts) = gate_->forward(hidden_states, input_ids);
-    }
+    std::tie(routing_weights, selected_experts) = gate_->forward(hidden_states, input_ids);
     debug_dump_tensor(routing_weights, layer_idx_, "topk_weights", debug_dump_enabled_);
     debug_dump_tensor(selected_experts, layer_idx_, "topk_indices", debug_dump_enabled_);
 
@@ -395,7 +438,33 @@ infinicore::Tensor DeepseekV4MoE::forward(const infinicore::Tensor &hidden_state
     }
     if (tp_size_ > 1 && communicator_ != nullptr) {
         profile::ScopedTimer timer(profile::Event::MoeAllReduce, token_count);
-        infinicore::op::distributed::allreduce_(routed, routed, INFINICCL_SUM, communicator_);
+        bool reduced_by_custom = false;
+        if (moe_custom_allreduce_enabled_) {
+            auto reduced = allreduce_scratch_.get(
+                routed->shape(),
+                routed->dtype(),
+                routed->device());
+            reduced_by_custom = infinicore::op::deepseek_v4_dcu_custom_allreduce_(
+                reduced,
+                routed,
+                tp_rank_,
+                static_cast<int>(tp_size_));
+            if (reduced_by_custom) {
+                routed = reduced;
+            }
+        }
+        if (!reduced_by_custom) {
+            if (moe_allreduce_outplace_enabled_) {
+                auto reduced = allreduce_scratch_.get(
+                    routed->shape(),
+                    routed->dtype(),
+                    routed->device());
+                infinicore::op::distributed::allreduce_(reduced, routed, INFINICCL_SUM, communicator_);
+                routed = reduced;
+            } else {
+                infinicore::op::distributed::allreduce_(routed, routed, INFINICCL_SUM, communicator_);
+            }
+        }
         debug_dump_tensor(routed, layer_idx_, "after_allreduce", debug_dump_enabled_);
     }
     debug_dump_tensor(routed, layer_idx_, "moe_output", debug_dump_enabled_);

@@ -25,7 +25,7 @@ Gate/TopK kernel 选择接受的真值/假值别名与 MHC kernel 一致。默�
 | 环境变量 | 默认值 | 可选值 | 读取位置 | 作用 |
 | --- | --- | --- | --- | --- |
 | `INFINILM_DSV4_ROUTED_EXPERT_BACKEND` | `naive` | `naive`, `lmslim_fused`, `fused_experts_int8_marlin`, `aiter_split`, `lightop_split` | `DeepseekV4PackedExperts` 构造函数 | 选择 routed expert 的计算路径。 |
-| `INFINILM_DSV4_FUSED_SHARED_OUTPUT` | 关闭 | `1`, `true`, `TRUE`, `on`, `ON` | `DeepseekV4MoE` 构造函数 | 实验性开关。仅在 `fused_experts_int8_marlin` 后端下，将 shared experts 输出传入 InfiniCore fused expert 算子内部做 `routed * scaling + shared`，用于评估去掉外部 `moe.add_shared` 的收益。默认关闭以保持当前 token 一致性。 |
+| `INFINILM_DSV4_FUSED_SHARED_OUTPUT` | `auto` | `auto`, `1`, `true`, `TRUE`, `on`, `ON`, `0`, `false`, `FALSE`, `off`, `OFF` | `DeepseekV4MoE` 构造函数 | 控制 shared experts 输出是否融合进 routed expert 后处理。默认 `auto`：仅在 `fused_experts_int8_marlin` 支持该路径时启用，将 `routed * scaling + shared` 放入 InfiniCore fused expert 算子内部，避免外部 `infinicore::op::add`。 |
 
 兼容别名：`reference` 等价于 `naive`，`lmslim` 和 `fused` 等价于 `lmslim_fused`，`int8_marlin` 和 `sglang_int8_marlin` 等价于 `fused_experts_int8_marlin`，`aiter` 等价于 `aiter_split`，`lightop` 和 `split_lightop` 等价于 `lightop_split`。
 
@@ -40,6 +40,22 @@ Gate/TopK kernel 选择接受的真值/假值别名与 MHC kernel 一致。默�
 | `lightop_split` | 运行 lightop 风格的拆分 Marlin 路径。 |
 
 注意：非 `naive` 后端会在 `process_weights_after_loading()` 中生成 Marlin 格式权重。完整权重场景下，为降低常驻显存，当前实现会在 repack 完成后释放原始 `w13_weight`/`w2_weight` 成员引用，并禁止再回退到 `naive`。
+
+
+## MoE AllReduce 后端选择
+
+| 环境变量 | 默认值 | 可选值 | 读取位置 | 作用 |
+| --- | --- | --- | --- | --- |
+| `INFINILM_DSV4_MOE_ALLREDUCE` | `inplace` | `inplace`, `outplace`, `custom` | `DeepseekV4MoE` 构造函数 | 选择 MoE TP allreduce 路径。`inplace` 为原始 `infinicclAllReduce(routed, routed)`；`outplace` 使用 per-layer scratch buffer 做 out-of-place `infinicclAllReduce`；`custom` 尝试调用 InfiniCore DCU custom allreduce wrapper，失败时回退到 `infiniccl`。 |
+
+当前实测 `outplace` 在 Hygon layer0-4 case 中没有收益，默认保持 `inplace`。`custom` 用于验证对齐 SGLang/vLLM `_C_custom_ar` 的可行性；由于 InfiniLM 是单进程多 rank 线程模型，而 SGLang 是多进程模型，vLLM IPC handle 打开路径在当前进程模型下仍可能失败并回退。
+
+InfiniCore distributed allreduce 还支持一个更底层的 DeepSeek V4/Hygon fast path 开关：
+
+| 环境变量 | 默认值 | 可选值 | 读取位置 | 作用 |
+| --- | --- | --- | --- | --- |
+| `INFINICORE_ALLREDUCE_FASTPATH` | `off` | `off`, `deepseek_v4`, `dsv4`, `hygon_deepseek_v4`, `1`, `true`, `on` | InfiniCore `distributed::AllReduce::run` | 在通用 `distributed::allreduce_` 内部优先尝试 `deepseek_v4_dcu_custom_allreduce_`，成功则跳过 `infinicclAllReduce`，失败自动回退。该 fast path 由 DeepSeek V4/Hygon 专用 wrapper 负责检查 tensor 连续性、大小、对齐和 world size。 |
+
 
 ## Marlin GEMM 调参覆盖
 

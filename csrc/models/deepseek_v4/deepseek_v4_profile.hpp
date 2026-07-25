@@ -21,6 +21,7 @@ enum class Event : size_t {
     DecoderMoe,
     DecoderFfnHcPost,
     MoeForward,
+    MoeGate,
     MoeTopk,
     MoeExperts,
     MoeExpertsPrepare,
@@ -71,6 +72,8 @@ inline const char *event_name(Event event) {
         return "decoder.ffn_hc_post";
     case Event::MoeForward:
         return "moe.forward";
+    case Event::MoeGate:
+        return "moe.gate";
     case Event::MoeTopk:
         return "moe.topk";
     case Event::MoeExperts:

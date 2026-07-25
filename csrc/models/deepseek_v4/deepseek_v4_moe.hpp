@@ -110,9 +110,13 @@ private:
 
     size_t layer_idx_{0};
     size_t tp_size_{1};
+    int tp_rank_{0};
     infinicclComm_t communicator_{nullptr};
     bool debug_dump_enabled_{false};
     bool fused_shared_output_enabled_{false};
+    bool moe_allreduce_outplace_enabled_{false};
+    bool moe_custom_allreduce_enabled_{false};
+    mutable DeepseekV4FlatScratchBuffer allreduce_scratch_;
 };
 
 } // namespace infinilm::models::deepseek_v4

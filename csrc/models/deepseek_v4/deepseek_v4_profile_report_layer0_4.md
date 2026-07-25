@@ -466,3 +466,110 @@ DeepseekV4PackedExperts: routed expert backend fused_experts_int8_marlin does no
 - 旧 profile 中 TP=8 `fused_experts_int8_marlin` token 不一致不是单算子精度问题，而是 InfiniLM MoE forward 数据流问题：`inplace=true` 覆盖 `hidden_states` 后才计算 shared experts。当前版本已修复 shared/routed 顺序，并通过 `[117160]` 单步和 `[104937]` 8 token attention-off 回归。
 - MHC kernel 生效后，TP=1 prefill `decoder.attn_hc_pre` 从旧报告最新值 135.614800 ms 降到 0.473800 ms；TP=1 decode `decoder.attn_hc_pre` 从 1.463973 ms 降到 0.122973 ms。
 - TP=8 prefill 的 `moe.topk` 在 profile 同步计时下仍然很大，且 profile 本身会在每个计时作用域前后同步 GPU stream；当前机器存在其它 TP=8 `test_infer.py` 进程，本节暂未重跑完整 16-token MHC-kernel profile，后续空闲时应刷新该 profile 快照。
+
+## 2026-07-24 复测补全：SGLang 与 InfiniLM MoE decode profile
+
+### 本轮目的
+
+上一轮对比表里缺少两个关键值：SGLang 的 `moe.forward` 总耗时，以及 InfiniLM 拆分后的 `moe.gate` 耗时。本轮重新补点后复测：
+
+- SGLang：在 `DeepseekV2MoE.forward` 外层增加 `moe.forward` 计时，保留 `moe.shared_experts`、`moe.gate`、`moe.topk`、`moe.experts`、`moe.add_shared`、`moe.allreduce` 计时。
+- InfiniLM：将原来包住 `gate_->forward` 的 `moe.topk` 外层计时拆开，在 `DeepseekV4MoEGate::forward` 内分别记录 `moe.gate` 和真正的 `moe.topk`。
+- 两边均关闭/跳过 attention forward：SGLang 使用 `SGLANG_DSV4_USE_ATTN=0`；InfiniLM 当前 attention forward 仍未实现。
+
+### 运行配置
+
+| 项目 | 配置 |
+|---|---|
+| 权重 | `/data/shared/hygon_DeepSeek-V4-Flash-Channel-INT8-w8a8-layer0-4` |
+| TP | 8 |
+| prompt token ids | `[0, 128803, 4117, 477, 440, 128804, 128822]` |
+| max_new_tokens | 16 |
+| InfiniLM routed expert | `INFINILM_DSV4_ROUTED_EXPERT_BACKEND=fused_experts_int8_marlin` |
+| InfiniLM MHC | `INFINILM_DSV4_MHC_PRE=kernel`，`INFINILM_DSV4_MHC_POST=kernel`，`INFINILM_DSV4_MHC_HEAD=kernel` |
+| InfiniLM gate/topk | `INFINILM_DSV4_GATE_TOPK=kernel` |
+| InfiniLM allreduce | `INFINILM_DSV4_MOE_ALLREDUCE=inplace` |
+| SGLang profile | `SGLANG_DSV4_MOE_PROFILE=1`，`SGLANG_DSV4_MOE_PROFILE_RANK=0` |
+| InfiniLM profile | `INFINILM_DSV4_PROFILE=1` |
+| SGLang 日志 | `/home/wangpengcheng/sglang_dsv4_layer0_4_moe_profile_defaultprompt_filled_20260724.log` |
+| InfiniLM 日志 | `csrc/models/deepseek_v4/profile_logs/infinilm_dsv4_layer0_4_moe_profile_defaultprompt_filled_20260724.log` |
+
+注意：SGLang 表中只统计 rank0；InfiniLM profile 当前在同一进程内聚合 8 个 TP rank。因此 InfiniLM decode `calls=600` 表示 `8 rank * 5 layer * 15 decode step`，与 SGLang rank0 `calls=80` 的统计口径不同。对单次算子耗时对比应主要看 `avg_ms`。
+
+### 运行摘要
+
+| 实现 | 端到端生成耗时 ms | generated token ids |
+|---|---:|---|
+| SGLang | 44763.674 | `[57329, 1486, 41381, 113780, 113780, 113780, 113780, 113780, 113780, 113780, 113780, 113780, 113780, 113780, 113780, 113780]` |
+| InfiniLM | 3604.810 | 日志中未打印完整 generated token ids；该命令执行成功 |
+
+### SGLang rank0 Prefill 阶段
+
+| 模块 | 调用次数 | 总耗时 ms | 平均耗时 ms |
+|---|---:|---:|---:|
+| `moe.forward` | 5 | 4855.492 | 971.098436 |
+| `moe.shared_experts` | 5 | 47.746 | 9.549151 |
+| `moe.gate` | 5 | 406.364 | 81.272885 |
+| `moe.topk` | 5 | 818.500 | 163.699910 |
+| `moe.experts` | 5 | 25.519 | 5.103762 |
+| `moe.add_shared` | 5 | 0.453 | 0.090683 |
+| `moe.allreduce` | 5 | 3553.912 | 710.782340 |
+
+### SGLang rank0 Decode 阶段
+
+| 模块 | 调用次数 | 总耗时 ms | 平均耗时 ms |
+|---|---:|---:|---:|
+| `moe.forward` | 80 | 194.361 | 2.429511 |
+| `moe.shared_experts` | 80 | 67.576 | 0.844700 |
+| `moe.gate` | 80 | 17.573 | 0.219667 |
+| `moe.topk` | 80 | 10.520 | 0.131499 |
+| `moe.experts` | 80 | 44.107 | 0.551338 |
+| `moe.add_shared` | 80 | 4.560 | 0.056996 |
+| `moe.allreduce` | 80 | 14.890 | 0.186119 |
+
+### InfiniLM TP8 聚合 Prefill 阶段
+
+| 模块 | 调用次数 | 总耗时 ms | 平均耗时 ms |
+|---|---:|---:|---:|
+| `moe.forward` | 40 | 19377.851 | 484.446275 |
+| `moe.gate` | 40 | 11171.521 | 279.288025 |
+| `moe.topk` | 40 | 960.084 | 24.002100 |
+| `moe.experts` | 40 | 1137.625 | 28.440625 |
+| `moe.experts.contiguous` | 40 | 2.373 | 0.059325 |
+| `moe.experts.fused_call` | 40 | 1133.988 | 28.349700 |
+| `moe.shared_experts` | 40 | 5168.684 | 129.217100 |
+| `moe.add_shared` | 40 | 61.855 | 1.546375 |
+| `moe.allreduce` | 40 | 873.623 | 21.840575 |
+
+### InfiniLM TP8 聚合 Decode 阶段
+
+| 模块 | 调用次数 | 总耗时 ms | 平均耗时 ms |
+|---|---:|---:|---:|
+| `moe.forward` | 600 | 735.344 | 1.225573 |
+| `moe.gate` | 600 | 90.327 | 0.150545 |
+| `moe.topk` | 600 | 28.313 | 0.047188 |
+| `moe.experts` | 600 | 258.466 | 0.430777 |
+| `moe.experts.contiguous` | 600 | 33.568 | 0.055947 |
+| `moe.experts.fused_call` | 600 | 211.765 | 0.352942 |
+| `moe.shared_experts` | 600 | 148.046 | 0.246743 |
+| `moe.add_shared` | 600 | 45.354 | 0.075590 |
+| `moe.allreduce` | 600 | 126.621 | 0.211035 |
+
+### Decode 平均耗时对比
+
+| 模块 | SGLang rank0 avg_ms | InfiniLM TP8 聚合 avg_ms | InfiniLM / SGLang |
+|---|---:|---:|---:|
+| `moe.forward` | 2.429511 | 1.225573 | 0.50x |
+| `moe.shared_experts` | 0.844700 | 0.246743 | 0.29x |
+| `moe.gate` | 0.219667 | 0.150545 | 0.69x |
+| `moe.topk` | 0.131499 | 0.047188 | 0.36x |
+| `moe.experts` | 0.551338 | 0.430777 | 0.78x |
+| `moe.add_shared` | 0.056996 | 0.075590 | 1.33x |
+| `moe.allreduce` | 0.186119 | 0.211035 | 1.13x |
+
+### 本轮结论
+
+- 缺失值已补齐：SGLang decode `moe.forward` 平均为 `2.429511 ms`；InfiniLM decode `moe.gate` 平均为 `0.150545 ms`。
+- 复测后 decode 口径下，InfiniLM 的 MoE 子模块平均耗时并没有比 SGLang 慢 4 倍；本轮 `moe.forward` 平均值低于 SGLang rank0 的 profile 值。
+- 原先看到的 InfiniLM `calls` 约 7.5-8 倍放大，不是 HC 维度导致，而是统计口径不同：InfiniLM 汇总了 8 个 TP rank，SGLang 本轮只打印 rank0。
+- 仍需注意 profile 方式本身会在计时边界做 GPU 同步，prefill 尤其容易受首次调用、JIT、通信同步和其它进程状态影响；decode 子模块定位更适合参考本节平均耗时表。

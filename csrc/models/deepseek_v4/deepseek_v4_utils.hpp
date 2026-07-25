@@ -46,4 +46,12 @@ inline bool mhc_kernel_backend_enabled(const char *name) {
     return kernel_backend_enabled(name);
 }
 
+inline std::string env_string_or(const char *name, const std::string &fallback) {
+    const char *value = env_value(name);
+    if (value == nullptr || value[0] == 0) {
+        return fallback;
+    }
+    return std::string(value);
+}
+
 } // namespace infinilm::models::deepseek_v4::utils
