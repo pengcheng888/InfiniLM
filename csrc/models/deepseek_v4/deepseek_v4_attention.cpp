@@ -9,6 +9,7 @@
 #include "infinicore/ops/deepseek_v4_fused_rope.hpp"
 #include "infinicore/ops/deepseek_v4_rms_norm.hpp"
 #include "infinicore/ops/deepseek_v4_rmsnorm_self.hpp"
+#include "infinicore/ops/deepseek_v4_sparse_attn_indexer.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -356,7 +357,7 @@ infinicore::Tensor DeepseekV4Attention::forward(const infinicore::Tensor &positi
     auto swa_topk_lengths = dsv4_metadata.swa_topk_lengths;
     auto cache_slots = dsv4_metadata.raw_out_loc ? dsv4_metadata.raw_out_loc : attn_metadata.slot_mapping.value();
 
-    infinicore::op::deepseek_v4_store_flashmla_raw_cache_(kv,
+    infinicore::op::deepseek_v4_store_flashmla_raw_cache_kernel_(kv,
                                                           layer_cache.swa_cache_raw,
                                                           cache_slots,
                                                           static_cast<int>(kDsv4SwaBlockSize));
@@ -366,7 +367,7 @@ infinicore::Tensor DeepseekV4Attention::forward(const infinicore::Tensor &positi
     std::optional<infinicore::Tensor> extra_topk_lengths = std::nullopt;
     int extra_page_size = 0;
     if (compress_ratio_ == 4) {
-        if (!compressor_ || !layer_cache.c4_cache_raw || !layer_cache.compressor_state || !dsv4_metadata.c4_out_loc || !dsv4_metadata.c4_positions || !dsv4_metadata.c4_sparse_indices || !dsv4_metadata.c4_sparse_topk_lengths || !dsv4_metadata.c4_compress_write_loc || !dsv4_metadata.c4_compress_extra_loc) {
+        if (!compressor_ || !layer_cache.c4_cache_raw || !layer_cache.compressor_state || !dsv4_metadata.c4_out_loc || !dsv4_metadata.c4_positions || !dsv4_metadata.c4_topk_lengths_raw || !dsv4_metadata.c4_sparse_indices || !dsv4_metadata.c4_sparse_topk_lengths || !dsv4_metadata.c4_compress_write_loc || !dsv4_metadata.c4_compress_extra_loc || !dsv4_metadata.page_table) {
             throw std::runtime_error("DeepseekV4Attention::forward requires C4 compressor/cache/state/metadata for compressed layer");
         }
         auto c4_out_loc = dsv4_metadata.c4_out_loc;
@@ -378,21 +379,66 @@ infinicore::Tensor DeepseekV4Attention::forward(const infinicore::Tensor &positi
         if (c4_kv_score->ndim() != 2 || c4_kv_score->size(1) < 2 * head_dim_) {
             throw std::runtime_error("DeepseekV4Attention::forward C4 compressor output shape mismatch");
         }
-        auto c4_kv = infinicore::op::deepseek_v4_c4_compress_stateful_reference(c4_kv_score,
+        auto c4_kv = infinicore::op::deepseek_v4_c4_compress_stateful(c4_kv_score,
                                                                                 compressor_->ape(),
                                                                                 layer_cache.compressor_state,
                                                                                 c4_write_loc,
                                                                                 c4_extra_loc,
                                                                                 pos_ids);
-        c4_kv = infinicore::op::deepseek_v4_rms_norm(c4_kv,
-                                                     compressor_->norm_weight(),
-                                                     compressor_->norm_eps());
-        auto c4_rope = c4_kv->narrow({{1, head_dim_ - qk_rope_head_dim_, qk_rope_head_dim_}});
-        apply_rope_(c4_positions, c4_rope, std::nullopt, false);
-        infinicore::op::deepseek_v4_store_flashmla_raw_cache_(c4_kv,
+        infinicore::op::deepseek_v4_compress_fused_norm_rope_(c4_kv,
+                                                               compressor_->norm_weight(),
+                                                               compressor_->norm_eps(),
+                                                               rope_freqs_cis_,
+                                                               c4_positions);
+        infinicore::op::deepseek_v4_store_flashmla_raw_cache_kernel_(c4_kv,
                                                               layer_cache.c4_cache_raw,
                                                               c4_out_loc,
                                                               static_cast<int>(kDsv4C4PageSize));
+
+        if (!indexer_ || !layer_cache.c4_indexer_cache_raw || !layer_cache.indexer_compressor_state) {
+            throw std::runtime_error("DeepseekV4Attention::forward requires C4 indexer/cache/state for compressed C4 layer");
+        }
+        auto indexer_kv_score = indexer_->forward_kv_score(hidden_states);
+        if (indexer_kv_score->ndim() != 2 || indexer_kv_score->size(1) != 4 * index_head_dim_) {
+            throw std::runtime_error("DeepseekV4Attention::forward C4 indexer compressor output shape mismatch");
+        }
+        auto indexer_kv = infinicore::op::deepseek_v4_c4_compress_stateful(indexer_kv_score,
+                                                                           indexer_->ape(),
+                                                                           layer_cache.indexer_compressor_state,
+                                                                           c4_write_loc,
+                                                                           c4_extra_loc,
+                                                                           pos_ids);
+        infinicore::op::deepseek_v4_compress_fused_norm_rope_(indexer_kv,
+                                                               indexer_->norm_weight(),
+                                                               indexer_->norm_eps(),
+                                                               rope_freqs_cis_,
+                                                               c4_positions);
+        infinicore::op::deepseek_v4_indexer_rotate_128_kernel_(indexer_kv, true);
+        infinicore::op::deepseek_v4_store_indexer_raw_cache_kernel_(indexer_kv,
+                                                             layer_cache.c4_indexer_cache_raw,
+                                                             c4_out_loc,
+                                                             static_cast<int>(kDsv4C4PageSize));
+
+        auto indexer_q = indexer_->compute_q(q_lora, seq_len);
+        auto indexer_q_rope = indexer_q->narrow({{2, index_head_dim_ - qk_rope_head_dim_, qk_rope_head_dim_}});
+        apply_rope_(pos_ids, indexer_q_rope, std::nullopt, false);
+        infinicore::op::deepseek_v4_indexer_rotate_128_kernel_(indexer_q, true);
+        auto indexer_weights = indexer_->compute_weights(hidden_states);
+        const auto max_c4_seq_len = static_cast<int>(dsv4_metadata.page_table->size(1) * kDsv4C4PageSize);
+        auto c4_indexer_logits = infinicore::Tensor::empty({seq_len, static_cast<size_t>(max_c4_seq_len)},
+                                                           infinicore::DataType::F32,
+                                                           device);
+        infinicore::op::deepseek_v4_c4_sparse_attn_indexer_(indexer_q,
+                                                            indexer_weights,
+                                                            layer_cache.c4_indexer_cache_raw,
+                                                            dsv4_metadata.c4_topk_lengths_raw,
+                                                            dsv4_metadata.page_table,
+                                                            c4_indexer_logits,
+                                                            dsv4_metadata.c4_sparse_indices,
+                                                            max_c4_seq_len,
+                                                            static_cast<int>(kDsv4C4PageSize),
+                                                            indexer_->weight_scale(),
+                                                            false);
 
         extra_raw_cache = layer_cache.c4_cache_raw;
         extra_indices = dsv4_metadata.c4_sparse_indices;
@@ -412,17 +458,17 @@ infinicore::Tensor DeepseekV4Attention::forward(const infinicore::Tensor &positi
         if (c128_kv_score->ndim() != 2 || c128_kv_score->size(1) != 2 * head_dim_) {
             throw std::runtime_error("DeepseekV4Attention::forward C128 compressor output shape mismatch");
         }
-        auto c128_kv = infinicore::op::deepseek_v4_c128_compress_stateful_reference(c128_kv_score,
+        auto c128_kv = infinicore::op::deepseek_v4_c128_compress_stateful(c128_kv_score,
                                                                                     compressor_->ape(),
                                                                                     layer_cache.compressor_state,
                                                                                     c128_write_loc,
                                                                                     pos_ids);
-        c128_kv = infinicore::op::deepseek_v4_rms_norm(c128_kv,
-                                                       compressor_->norm_weight(),
-                                                       compressor_->norm_eps());
-        auto c128_rope = c128_kv->narrow({{1, head_dim_ - qk_rope_head_dim_, qk_rope_head_dim_}});
-        apply_rope_(c128_positions, c128_rope, std::nullopt, false);
-        infinicore::op::deepseek_v4_store_flashmla_raw_cache_(c128_kv,
+        infinicore::op::deepseek_v4_compress_fused_norm_rope_(c128_kv,
+                                                               compressor_->norm_weight(),
+                                                               compressor_->norm_eps(),
+                                                               rope_freqs_cis_,
+                                                               c128_positions);
+        infinicore::op::deepseek_v4_store_flashmla_raw_cache_kernel_(c128_kv,
                                                               layer_cache.c128_cache_raw,
                                                               c128_out_loc,
                                                               static_cast<int>(kDsv4C128PageSize));
