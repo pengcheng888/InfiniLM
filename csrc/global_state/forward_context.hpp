@@ -2,6 +2,8 @@
 
 #include "../models/infinilm_model.hpp"
 
+#include <stdexcept>
+
 namespace infinilm::global_state {
 
 struct DeepSeekV4AttentionMetadata {
@@ -34,6 +36,31 @@ struct DeepSeekV4AttentionMetadata {
     infinicore::Tensor c4_compress_state_indices;
     infinicore::Tensor c128_compress_write_loc;
     infinicore::Tensor c128_compress_state_indices;
+
+    infinicore::Tensor flashmla_swa_tile_scheduler_metadata;
+    infinicore::Tensor flashmla_swa_num_splits;
+    infinicore::Tensor flashmla_c4_tile_scheduler_metadata;
+    infinicore::Tensor flashmla_c4_num_splits;
+    infinicore::Tensor flashmla_c128_tile_scheduler_metadata;
+    infinicore::Tensor flashmla_c128_num_splits;
+
+    struct FlashMLAScheduleTensors {
+        infinicore::Tensor *tile_scheduler_metadata;
+        infinicore::Tensor *num_splits;
+    };
+
+    FlashMLAScheduleTensors flashmla_schedule_for_compress_ratio(size_t compress_ratio) {
+        if (compress_ratio == 0) {
+            return {&flashmla_swa_tile_scheduler_metadata, &flashmla_swa_num_splits};
+        }
+        if (compress_ratio == 4) {
+            return {&flashmla_c4_tile_scheduler_metadata, &flashmla_c4_num_splits};
+        }
+        if (compress_ratio == 128) {
+            return {&flashmla_c128_tile_scheduler_metadata, &flashmla_c128_num_splits};
+        }
+        throw std::runtime_error("DeepSeekV4AttentionMetadata: invalid FlashMLA compress ratio");
+    }
 
     DeepSeekV4AttentionMetadata() = default;
 

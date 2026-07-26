@@ -70,7 +70,7 @@ infinicore::Tensor DeepseekV4Model::forward(const infinilm::InfinilmModel::Input
         std::tie(hidden_states, residual) = layer->forward(input.position_ids.value(), hidden_states, residual, flat_input_ids);
     }
     auto collapsed = infinicore::Tensor::empty({hidden_states->size(0), hidden_size_}, hidden_states->dtype(), hidden_states->device());
-    infinicore::op::deepseek_v4_mhc_head_kernel_(
+    infinicore::op::deepseek_v4_mhc_head_(
         collapsed,
         hidden_states,
         hc_head_fn_,

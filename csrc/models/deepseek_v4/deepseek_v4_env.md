@@ -18,15 +18,15 @@ MHC 后端选择环境变量已删除；模型 forward 不再读取环境变量�
 
 | 环境变量 | 默认值 | 可选值 | 读取位置 | 作用 |
 | --- | --- | --- | --- | --- |
-| `INFINILM_DSV4_GATE_TOPK` | `naive` | `naive`, `kernel` | `DeepseekV4MoEGate` 构造函数 | 选择 gate 之后 routed expert topk 的计算路径。hash MoE 层对应 `deepseek_v4_hash_topk_*`，非 hash MoE 层对应带 correction bias 的 `deepseek_v4_topk_*`。 |
+| `INFINILM_DSV4_GATE_TOPK` | `kernel` | `naive`, `kernel` | `DeepseekV4MoEGate` 构造函数 | 选择 gate 之后 routed expert topk 的计算路径。hash MoE 层对应 `deepseek_v4_hash_topk_*`，非 hash MoE 层对应带 correction bias 的 `deepseek_v4_topk_*`。 |
 
-Gate/TopK kernel 选择接受常见真值/假值别名。默认保持 `naive`，用于保证现有精度行为不变；设置为 `kernel` 后使用 InfiniCore native 单 kernel 实现以减少 ATen 多算子和中间张量开销。
+Gate/TopK kernel 选择接受常见真值/假值别名。默认使用 `kernel`，通过 InfiniCore native 单 kernel 实现减少 ATen 多算子和中间张量开销；如需调试旧路径，可显式设置为 `naive`。
 
 ## 路由专家后端
 
 | 环境变量 | 默认值 | 可选值 | 读取位置 | 作用 |
 | --- | --- | --- | --- | --- |
-| `INFINILM_DSV4_ROUTED_EXPERT_BACKEND` | `naive` | `naive`, `lmslim_fused`, `fused_experts_int8_marlin`, `aiter_split`, `lightop_split` | `DeepseekV4PackedExperts` 构造函数 | 选择 routed expert 的计算路径。 |
+| `INFINILM_DSV4_ROUTED_EXPERT_BACKEND` | `fused_experts_int8_marlin` | `naive`, `lmslim_fused`, `fused_experts_int8_marlin`, `aiter_split`, `lightop_split` | `DeepseekV4PackedExperts` 构造函数 | 选择 routed expert 的计算路径。 |
 | `INFINILM_DSV4_FUSED_SHARED_OUTPUT` | `auto` | `auto`, `1`, `true`, `TRUE`, `on`, `ON`, `0`, `false`, `FALSE`, `off`, `OFF` | `DeepseekV4MoE` 构造函数 | 控制 shared experts 输出是否融合进 routed expert 后处理。默认 `auto`：仅在 `fused_experts_int8_marlin` 支持该路径时启用，将 `routed * scaling + shared` 放入 InfiniCore fused expert 算子内部，避免外部 `infinicore::op::add`。 |
 
 兼容别名：`reference` 等价于 `naive`，`lmslim` 和 `fused` 等价于 `lmslim_fused`，`int8_marlin` 和 `sglang_int8_marlin` 等价于 `fused_experts_int8_marlin`，`aiter` 等价于 `aiter_split`，`lightop` 和 `split_lightop` 等价于 `lightop_split`。

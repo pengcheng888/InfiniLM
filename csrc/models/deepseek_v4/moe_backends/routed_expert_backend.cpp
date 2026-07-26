@@ -5,11 +5,11 @@
 #include "infinicore/ops/deepseek_v4_dynamic_scaled_int8_quant.hpp"
 #include "infinicore/ops/deepseek_v4_fused_experts_impl_int8_marlin.hpp"
 #include "infinicore/ops/deepseek_v4_lightop_moe_marlin.hpp"
-#include "infinicore/ops/deepseek_v4_mhc.hpp"
 #include "infinicore/ops/deepseek_v4_moe_align_block_size.hpp"
 #include "infinicore/ops/deepseek_v4_moe_lmslim_marlin_w8a8.hpp"
 #include "infinicore/ops/deepseek_v4_moe_marlin_w8a8.hpp"
 #include "infinicore/ops/deepseek_v4_moe_sum.hpp"
+#include "infinicore/ops/deepseek_v4_moe_w8a8.hpp"
 #include "infinicore/ops/deepseek_v4_silu_and_mul.hpp"
 #include "infinicore/ops/mul_scalar.hpp"
 
@@ -49,7 +49,7 @@ infinicore::Tensor forward_naive(const RoutedExpertContext &ctx,
         throw std::runtime_error("DeepseekV4 routed expert naive backend requires original packed weights, but they were released after Marlin repack");
     }
     auto output = scratch.output(hidden_states->size(0), ctx.hidden_size, hidden_states->dtype(), hidden_states->device());
-    infinicore::op::deepseek_v4_moe_w8a8_naive_(
+    infinicore::op::deepseek_v4_moe_w8a8_(
         output,
         hidden_states,
         topk_weights,
@@ -339,7 +339,7 @@ RoutedExpertBackendChoice select_routed_expert_backend() {
     if (backend_value != nullptr && backend_value[0] != '\0') {
         return {parse_backend(backend_value), true};
     }
-    return {RoutedExpertBackend::Naive, false};
+    return {RoutedExpertBackend::FusedExpertsInt8Marlin, false};
 }
 
 const char *to_string(RoutedExpertBackend backend) {

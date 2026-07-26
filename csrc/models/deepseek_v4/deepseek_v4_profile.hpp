@@ -32,6 +32,23 @@ enum class Event : size_t {
     MoeSharedExperts,
     MoeAddShared,
     MoeAllReduce,
+    AttentionForward,
+    AttentionQProjection,
+    AttentionKVProjection,
+    AttentionMetadata,
+    AttentionRope,
+    AttentionSWAStore,
+    AttentionC4Compress,
+    AttentionC4IndexerCompress,
+    AttentionC4IndexerQuery,
+    AttentionC4IndexerSparse,
+    AttentionC128Compress,
+    AttentionWorkspace,
+    AttentionFlashMLASchedule,
+    AttentionFlashMLA,
+    AttentionOutRope,
+    AttentionWoA,
+    AttentionWoB,
     Count,
 };
 
@@ -94,6 +111,40 @@ inline const char *event_name(Event event) {
         return "moe.add_shared";
     case Event::MoeAllReduce:
         return "moe.allreduce";
+    case Event::AttentionForward:
+        return "attention.forward";
+    case Event::AttentionQProjection:
+        return "attention.q_projection";
+    case Event::AttentionKVProjection:
+        return "attention.kv_projection";
+    case Event::AttentionMetadata:
+        return "attention.metadata";
+    case Event::AttentionRope:
+        return "attention.rope";
+    case Event::AttentionSWAStore:
+        return "attention.swa_store";
+    case Event::AttentionC4Compress:
+        return "attention.c4_compress";
+    case Event::AttentionC4IndexerCompress:
+        return "attention.c4_indexer.compress";
+    case Event::AttentionC4IndexerQuery:
+        return "attention.c4_indexer.query";
+    case Event::AttentionC4IndexerSparse:
+        return "attention.c4_indexer.sparse";
+    case Event::AttentionC128Compress:
+        return "attention.c128_compress";
+    case Event::AttentionWorkspace:
+        return "attention.workspace";
+    case Event::AttentionFlashMLASchedule:
+        return "attention.flashmla_schedule";
+    case Event::AttentionFlashMLA:
+        return "attention.flashmla";
+    case Event::AttentionOutRope:
+        return "attention.out_rope";
+    case Event::AttentionWoA:
+        return "attention.wo_a";
+    case Event::AttentionWoB:
+        return "attention.wo_b";
     case Event::Count:
         break;
     }

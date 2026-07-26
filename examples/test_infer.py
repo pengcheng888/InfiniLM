@@ -22,12 +22,13 @@ def _parse_input_ids(raw: str | None):
     return [int(item.strip()) for item in raw.split(",") if item.strip()]
 
 
-def _generate_from_input_ids(model, prompt_token_ids_list, max_new_tokens, temperature, top_p, top_k):
+def _generate_from_input_ids(model, prompt_token_ids_list, max_new_tokens, temperature, top_p, top_k, ignore_eos):
     sampling_params = SamplingParams(
         temperature=temperature,
         top_p=top_p,
         top_k=top_k,
         max_tokens=max_new_tokens,
+        ignore_eos=ignore_eos,
     )
     requests = []
     for prompt_token_ids in prompt_token_ids_list:
@@ -36,7 +37,7 @@ def _generate_from_input_ids(model, prompt_token_ids_list, max_new_tokens, tempe
             prompt=model.engine.detokenize(prompt_token_ids),
             prompt_token_ids=prompt_token_ids,
             sampling_params=sampling_params,
-            eos_token_ids=model.engine.eos_token_ids,
+            eos_token_ids=[] if ignore_eos else model.engine.eos_token_ids,
         )
         requests.append(req)
         model.engine.add_request(req)
@@ -74,6 +75,7 @@ def test(
     skip_legacy_moe=False,
     input_ids=None,
     warmup=False,
+    ignore_eos=False,
 ):
     model_path = os.path.expanduser(model_path)
     # ---------------------------------------------------------------------------- #
@@ -135,10 +137,20 @@ def test(
             temperature,
             top_p,
             top_k,
+            ignore_eos,
         )
     else:
+        sampling_params = SamplingParams(
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
+            max_tokens=max_new_tokens,
+            ignore_eos=ignore_eos,
+        )
         outputs = model.chat(
             messages=conversations,
+            sampling_params=sampling_params,
+            use_tqdm=False,
         )
     t2 = time.time()
 
@@ -219,4 +231,5 @@ if __name__ == "__main__":
         skip_legacy_moe=cfg.skip_legacy_moe,
         input_ids=input_ids,
         warmup=cfg.warmup,
+        ignore_eos=cfg.ignore_eos,
     )

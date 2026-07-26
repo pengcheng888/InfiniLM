@@ -84,7 +84,6 @@ DeepseekV4MoEGate::DeepseekV4MoEGate(std::shared_ptr<infinilm::config::ModelConf
     num_experts_ = num_experts;
     norm_topk_prob_ = model_config->get_or<bool>("norm_topk_prob", true);
     is_hash_ = layer_idx < num_hash_layers;
-    gate_topk_kernel_backend_enabled_ = utils::kernel_backend_enabled("INFINILM_DSV4_GATE_TOPK");
     if (num_experts == 0) {
         throw std::runtime_error("infinilm::models::deepseek_v4::DeepseekV4MoEGate: n_routed_experts is required");
     }
@@ -123,39 +122,20 @@ DeepseekV4MoEGate::forward(const infinicore::Tensor &hidden_states,
     {
         profile::ScopedTimer timer(profile::Event::MoeTopk, token_count);
         if (is_hash_) {
-            if (gate_topk_kernel_backend_enabled_) {
-                infinicore::op::deepseek_v4_hash_topk_kernel_(
-                    router_scores,
-                    router_indices,
-                    router_logits,
-                    input_ids,
-                    tid2eid_,
-                    norm_topk_prob_);
-            } else {
-                infinicore::op::deepseek_v4_hash_topk_naive_(
-                    router_scores,
-                    router_indices,
-                    router_logits,
-                    input_ids,
-                    tid2eid_,
-                    norm_topk_prob_);
-            }
+            infinicore::op::deepseek_v4_hash_topk_(
+                router_scores,
+                router_indices,
+                router_logits,
+                input_ids,
+                tid2eid_,
+                norm_topk_prob_);
         } else {
-            if (gate_topk_kernel_backend_enabled_) {
-                infinicore::op::deepseek_v4_topk_kernel_(
-                    router_scores,
-                    router_indices,
-                    router_logits,
-                    bias_,
-                    norm_topk_prob_);
-            } else {
-                infinicore::op::deepseek_v4_topk_naive_(
-                    router_scores,
-                    router_indices,
-                    router_logits,
-                    bias_,
-                    norm_topk_prob_);
-            }
+            infinicore::op::deepseek_v4_topk_(
+                router_scores,
+                router_indices,
+                router_logits,
+                bias_,
+                norm_topk_prob_);
         }
     }
     return {router_scores, router_indices};

@@ -31,7 +31,6 @@ private:
     size_t num_experts_{0};
     bool norm_topk_prob_{true};
     bool is_hash_{true};
-    bool gate_topk_kernel_backend_enabled_{true};
     mutable DeepseekV4FlatScratchBuffer router_logits_scratch_;
     mutable DeepseekV4FlatScratchBuffer router_scores_scratch_;
     mutable DeepseekV4FlatScratchBuffer router_indices_scratch_;

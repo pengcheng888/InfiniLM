@@ -105,6 +105,9 @@ private:
                      infinicore::Tensor query,
                      std::optional<infinicore::Tensor> key,
                      bool inverse) const;
+    infinicore::Tensor attn_out_workspace(size_t seq_len,
+                                          infinicore::DataType dtype,
+                                          const infinicore::Device &device) const;
 
     std::shared_ptr<infinilm::layers::linear::ReplicatedLinear> wq_a_;
     std::shared_ptr<infinilm::layers::linear::ReplicatedLinear> wkv_;
@@ -119,6 +122,7 @@ private:
 
     infinicore::DataType dtype_;
     infinicore::Tensor rope_freqs_cis_;
+    mutable infinicore::Tensor attn_out_workspace_;
 
     size_t layer_idx_;
     size_t hidden_size_;
@@ -143,7 +147,6 @@ private:
     double rope_beta_slow_{1.0};
     size_t rope_original_seq_len_{0};
     double rms_norm_eps_;
-
 };
 
 } // namespace infinilm::models::deepseek_v4

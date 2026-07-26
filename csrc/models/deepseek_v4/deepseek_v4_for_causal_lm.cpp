@@ -31,7 +31,6 @@ double elapsed_ms(Clock::time_point start, Clock::time_point end) {
 
 } // namespace
 
-
 DeepseekV4ForCausalLM::DeepseekV4ForCausalLM(std::shared_ptr<infinilm::config::ModelConfig> model_config,
                                              const infinicore::Device &device) {
     model_config_ = model_config;
@@ -42,7 +41,6 @@ DeepseekV4ForCausalLM::DeepseekV4ForCausalLM(std::shared_ptr<infinilm::config::M
     INFINICORE_NN_MODULE_INIT(model, model_config, device);
     INFINICORE_NN_MODULE_INIT(lm_head, hidden_size, vocab_size, false, dtype, device);
 }
-
 
 void DeepseekV4ForCausalLM::reset_cache(const cache::CacheConfig *cache_config) {
     auto &forward_context = infinilm::global_state::get_forward_context();
