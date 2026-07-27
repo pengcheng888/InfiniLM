@@ -232,6 +232,9 @@ inline void bind_infer_engine(py::module &m) {
                     "temperature",
                     "top_p",
                     "top_k",
+                    "labels",
+                    "score_start",
+                    "return_nll",
                 };
 
                 for (auto &item : kwargs) {
@@ -248,6 +251,25 @@ inline void bind_infer_engine(py::module &m) {
                         input.top_p = py::cast<float>(item.second);
                     } else if (key == "top_k") {
                         input.top_k = py::cast<int>(item.second);
+                    } else if (key == "labels") {
+                        input.labels = item.second.is_none()
+                                           ? std::nullopt
+                                           : std::optional<infinicore::Tensor>{
+                                                 py::cast<infinicore::Tensor>(item.second)};
+                    } else if (key == "score_start") {
+                        if (py::isinstance<py::bool_>(item.second)) {
+                            throw py::type_error("score_start must be an integer, not bool");
+                        }
+                        const auto score_start = py::cast<py::ssize_t>(item.second);
+                        if (score_start < 0) {
+                            throw py::value_error("score_start must be non-negative");
+                        }
+                        input.score_start = static_cast<size_t>(score_start);
+                    } else if (key == "return_nll") {
+                        if (!py::isinstance<py::bool_>(item.second)) {
+                            throw py::type_error("return_nll must be a bool");
+                        }
+                        input.return_nll = py::cast<bool>(item.second);
                     }
                 }
 
@@ -339,6 +361,9 @@ inline void bind_infer_engine(py::module &m) {
         .def_readwrite("visual_token_ranges", &InferEngine::Input::visual_token_ranges)
         .def_readwrite("target_hidden_states", &InferEngine::Input::target_hidden_states)
         .def_readwrite("sample_all_positions", &InferEngine::Input::sample_all_positions)
+        .def_readwrite("labels", &InferEngine::Input::labels)
+        .def_readwrite("score_start", &InferEngine::Input::score_start)
+        .def_readwrite("return_nll", &InferEngine::Input::return_nll)
         .def_readwrite("temperature", &InferEngine::Input::temperature)
         .def_readwrite("top_k", &InferEngine::Input::top_k)
         .def_readwrite("top_p", &InferEngine::Input::top_p);
@@ -346,7 +371,12 @@ inline void bind_infer_engine(py::module &m) {
     py::class_<InferEngine::Output>(infer_engine, "Output")
         .def_readwrite("output_ids", &InferEngine::Output::output_ids, "Sampled token IDs")
         .def_readwrite("logits", &InferEngine::Output::logits, "Raw logits tensor")
-        .def_readwrite("hidden_states", &InferEngine::Output::hidden_states, "Raw hidden states tensor");
+        .def_readwrite("hidden_states", &InferEngine::Output::hidden_states, "Raw hidden states tensor")
+        .def_readwrite("nll", &InferEngine::Output::nll, "Per-token NLL tensor")
+        .def_readwrite(
+            "scored_tokens",
+            &InferEngine::Output::scored_tokens,
+            "Number of token losses returned");
 }
 
 } // namespace infinilm::engine

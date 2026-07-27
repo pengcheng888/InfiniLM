@@ -170,6 +170,46 @@ class DeepSeekV4Processor(BasicLLMProcessor):
     def _dsv4_align(value: int, multiple: int):
         return ((value + multiple - 1) // multiple) * multiple
 
+    @classmethod
+    def build_prefill_attention_metadata(
+        cls,
+        model_dir_path: str,
+        block_table,
+        sequence_length: int,
+        block_size: int = 256,
+    ) -> dict:
+        """Build the same DSv4 prefill metadata used by the batch scheduler."""
+        from types import SimpleNamespace
+
+        if sequence_length < 1:
+            raise ValueError("sequence_length must be positive")
+        if block_size < 1:
+            raise ValueError("block_size must be positive")
+        block_table = list(block_table)
+        if not block_table:
+            raise ValueError("block_table must not be empty")
+
+        processor = cls.__new__(cls)
+        processor._dsv4_c128_metadata_width = cls._load_c128_metadata_width(
+            model_dir_path
+        )
+        request = SimpleNamespace(
+            block_table=block_table,
+            num_local_cached_tokens=0,
+            slot_mapping=[
+                cls._dsv4_slot_for_position(block_table, position, block_size)
+                for position in range(sequence_length)
+            ],
+            get_input_tokens=lambda: [0] * sequence_length,
+        )
+        scheduler_output = SimpleNamespace(
+            scheduled_requests=[request],
+            is_prefill=True,
+            dsv4_full_to_swa_block_ids=None,
+            dsv4_swa_block_size=block_size,
+        )
+        return processor._build_dsv4_attention_metadata(scheduler_output)
+
     def _build_dsv4_attention_metadata(self, scheduler_output) -> dict:
         import infinicore
 

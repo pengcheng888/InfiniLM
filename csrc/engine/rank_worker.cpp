@@ -449,7 +449,7 @@ void RankWorker::thread_loop() {
                         infinicore::Tensor hidden_states;
                         // All-position speculative/MTP runs need eager mode because
                         // hidden states are not part of compiled graph outputs.
-                        if (!local_args.sample_all_positions && compiler_ != nullptr) {
+                        if (!local_args.return_nll && !local_args.sample_all_positions && compiler_ != nullptr) {
                             auto [graph, output] = compiler_->get_compiled(local_args.to_model_input(infinicore::Device::cpu()));
                             if (graph != nullptr && output != nullptr) {
                                 graph->run();
@@ -475,72 +475,107 @@ void RankWorker::thread_loop() {
                             hidden_states = model_output.hidden_states;
                         }
 
-                        // Random sampling (rank 0 only)
+                        // Sampling and scoring both consume replicated full-vocabulary
+                        // logits, so only rank 0 needs to materialize the result.
                         if (rank_info_.tp_rank == 0) {
-                            auto temperature{local_args.temperature};
-                            auto top_p{local_args.top_p};
-                            auto top_k{local_args.top_k};
-
                             const auto &logits_shape{logits->shape()};
+                            if (logits_shape.size() != 3) {
+                                throw std::runtime_error("InferEngine expected rank-3 logits");
+                            }
                             const auto &vocab_size{logits_shape[2]};
                             const auto &total_len{logits_shape[1]};
                             const auto &batch_size{logits_shape[0]};
 
-                            auto n_req = local_args.input_offsets.value()->size(0) - 1;
-                            int32_t *input_offsets = (int32_t *)local_args.input_offsets.value()->data();
-
-                            const bool sample_all_positions = local_args.sample_all_positions;
-                            const size_t n_out = sample_all_positions ? static_cast<size_t>(input_offsets[n_req]) : n_req;
-                            auto output_ids{infinicore::Tensor::empty({n_out}, infinicore::DataType::I64, rank_info_.device)};
-
-                            const auto sample_start = DetailClock::now();
-                            for (size_t i{0}; i < n_out; ++i) {
-                                size_t score_idx = i;
-                                if (!sample_all_positions) {
-                                    score_idx = static_cast<size_t>(input_offsets[i + 1] - 1);
+                            if (local_args.return_nll) {
+                                auto labels = local_args.labels.value()->to(rank_info_.device);
+                                if (labels->dtype() != infinicore::DataType::I64
+                                    || labels->ndim() != 2
+                                    || labels->size(0) != batch_size
+                                    || labels->size(1) != total_len) {
+                                    throw std::runtime_error(
+                                        "NLL labels must be I64 with shape [batch, sequence]");
                                 }
-                                auto score{logits->view({batch_size * total_len, vocab_size})->narrow({{0, score_idx, 1}})->view({vocab_size})};
-                                auto out{output_ids->narrow({{0, i, 1}})->view({})};
-                                float random_val = std::uniform_real_distribution<float>(0, 1)(rng_);
-                                infinicore::op::random_sample_(
-                                    out, score, random_val, top_p, top_k, temperature);
-                            }
-                            if (detail_profile) {
+
+                                const auto score_len = total_len - local_args.score_start;
+                                auto score_logits = logits->narrow(
+                                    {{1, local_args.score_start, score_len}});
+                                auto score_labels = labels->narrow(
+                                    {{1, local_args.score_start, score_len}});
+                                auto token_nll = infinicore::Tensor::empty(
+                                    score_labels->shape(),
+                                    infinicore::DataType::F32,
+                                    rank_info_.device);
+                                infinicore::op::cross_entropy_(
+                                    token_nll, score_logits, score_labels);
+                                token_nll = token_nll->to(infinicore::Device::cpu());
                                 infinicore::context::syncStream();
-                            }
-                            const auto sample_end = DetailClock::now();
-                            sample_ms = detail_elapsed_ms(sample_start, sample_end);
+                                output_ = Output{
+                                    infinicore::Tensor{},
+                                    infinicore::Tensor{},
+                                    infinicore::Tensor{},
+                                    token_nll,
+                                    score_len,
+                                };
+                            } else {
+                                auto temperature{local_args.temperature};
+                                auto top_p{local_args.top_p};
+                                auto top_k{local_args.top_k};
+                                auto n_req = local_args.input_offsets.value()->size(0) - 1;
+                                int32_t *input_offsets = (int32_t *)local_args.input_offsets.value()->data();
 
-                            const auto copy_start = DetailClock::now();
-                            output_ids = output_ids->to(infinicore::Device::cpu());
-                            if (detail_profile) {
+                                const bool sample_all_positions = local_args.sample_all_positions;
+                                const size_t n_out = sample_all_positions ? static_cast<size_t>(input_offsets[n_req]) : n_req;
+                                auto output_ids{infinicore::Tensor::empty({n_out}, infinicore::DataType::I64, rank_info_.device)};
+
+                                const auto sample_start = DetailClock::now();
+                                for (size_t i{0}; i < n_out; ++i) {
+                                    size_t score_idx = i;
+                                    if (!sample_all_positions) {
+                                        score_idx = static_cast<size_t>(input_offsets[i + 1] - 1);
+                                    }
+                                    auto score{logits->view({batch_size * total_len, vocab_size})->narrow({{0, score_idx, 1}})->view({vocab_size})};
+                                    auto out{output_ids->narrow({{0, i, 1}})->view({})};
+                                    float random_val = std::uniform_real_distribution<float>(0, 1)(rng_);
+                                    infinicore::op::random_sample_(
+                                        out, score, random_val, top_p, top_k, temperature);
+                                }
+                                if (detail_profile) {
+                                    infinicore::context::syncStream();
+                                }
+                                const auto sample_end = DetailClock::now();
+                                sample_ms = detail_elapsed_ms(sample_start, sample_end);
+
+                                const auto copy_start = DetailClock::now();
+                                output_ids = output_ids->to(infinicore::Device::cpu());
+                                if (detail_profile) {
+                                    infinicore::context::syncStream();
+                                }
+                                const auto copy_end = DetailClock::now();
+                                copy_to_cpu_ms = detail_elapsed_ms(copy_start, copy_end);
+
+                                const auto final_sync_start = DetailClock::now();
                                 infinicore::context::syncStream();
+                                const auto final_sync_end = DetailClock::now();
+                                final_sync_ms = detail_elapsed_ms(final_sync_start, final_sync_end);
+
+                                if (detail_profile) {
+                                    const size_t input_token_count = local_args.input_ids.has_value() ? local_args.input_ids.value()->numel() : 0;
+                                    std::fprintf(stderr,
+                                                 "[INFINILM_RANK_WORKER_DETAIL] rank=%d input_tokens=%zu to_model_input_ms=%.3f model_forward_ms=%.3f sample_ms=%.3f copy_to_cpu_ms=%.3f final_sync_ms=%.3f total_ms=%.3f\n",
+                                                 rank_info_.tp_rank,
+                                                 input_token_count,
+                                                 to_model_input_ms,
+                                                 model_forward_ms,
+                                                 sample_ms,
+                                                 copy_to_cpu_ms,
+                                                 final_sync_ms,
+                                                 detail_elapsed_ms(run_start, final_sync_end));
+                                }
+
+                                auto out{Output{output_ids, logits, hidden_states}};
+
+                                output_ = std::move(out);
                             }
-                            const auto copy_end = DetailClock::now();
-                            copy_to_cpu_ms = detail_elapsed_ms(copy_start, copy_end);
-
-                            const auto final_sync_start = DetailClock::now();
-                            infinicore::context::syncStream();
-                            const auto final_sync_end = DetailClock::now();
-                            final_sync_ms = detail_elapsed_ms(final_sync_start, final_sync_end);
-
-                            if (detail_profile) {
-                                const size_t input_token_count = local_args.input_ids.has_value() ? local_args.input_ids.value()->numel() : 0;
-                                std::fprintf(stderr,
-                                             "[INFINILM_RANK_WORKER_DETAIL] rank=%d input_tokens=%zu to_model_input_ms=%.3f model_forward_ms=%.3f sample_ms=%.3f copy_to_cpu_ms=%.3f final_sync_ms=%.3f total_ms=%.3f\n",
-                                             rank_info_.tp_rank,
-                                             input_token_count,
-                                             to_model_input_ms,
-                                             model_forward_ms,
-                                             sample_ms,
-                                             copy_to_cpu_ms,
-                                             final_sync_ms,
-                                             detail_elapsed_ms(run_start, final_sync_end));
-                            }
-
-                            auto out{Output{output_ids, logits, hidden_states}};
-
-                            output_ = std::move(out);
                         }
 
                         job_done_ = true;

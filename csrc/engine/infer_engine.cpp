@@ -223,6 +223,39 @@ InferEngine::Input::to_model_input(infinicore::Device device) const {
 }
 
 InferEngine::Output InferEngine::forward(const InferEngine::Input &input) {
+    if (!input.return_nll) {
+        if (input.labels.has_value()) {
+            throw std::invalid_argument("labels require return_nll=true");
+        }
+        if (input.score_start != 0) {
+            throw std::invalid_argument("score_start requires return_nll=true");
+        }
+    } else {
+        if (!input.input_ids.has_value() || !input.input_ids.value()) {
+            throw std::invalid_argument("NLL scoring requires input_ids");
+        }
+        if (!input.labels.has_value() || !input.labels.value()) {
+            throw std::invalid_argument("NLL scoring requires labels");
+        }
+        const auto &ids = input.input_ids.value();
+        const auto &labels = input.labels.value();
+        if (ids->dtype() != infinicore::DataType::I64
+            || labels->dtype() != infinicore::DataType::I64) {
+            throw std::invalid_argument("NLL input_ids and labels must use I64 dtype");
+        }
+        if (ids->ndim() != 2 || labels->ndim() != 2) {
+            throw std::invalid_argument("NLL input_ids and labels must be rank-2 tensors");
+        }
+        if (ids->shape() != labels->shape()) {
+            throw std::invalid_argument("NLL input_ids and labels must have identical shapes");
+        }
+        if (ids->size(0) != 1) {
+            throw std::invalid_argument("NLL scoring currently requires batch_size=1");
+        }
+        if (input.score_start >= ids->size(1)) {
+            throw std::invalid_argument("NLL score_start must select at least one token");
+        }
+    }
     // Trigger each worker to run inference
     for (auto &worker : workers_) {
         worker->run(input);
