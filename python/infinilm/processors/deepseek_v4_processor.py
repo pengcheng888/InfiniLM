@@ -144,7 +144,15 @@ class DeepSeekV4Processor(BasicLLMProcessor):
         return indices, visible, clamp1
 
     @classmethod
-    def _dsv4_compress_locations_for_position(cls, block_table, slot: int, position: int, ratio: int, block_size: int = 256):
+    def _dsv4_compress_locations_for_position(
+        cls,
+        block_table,
+        slot: int,
+        position: int,
+        ratio: int,
+        block_size: int = 256,
+        full_to_state_block_ids=None,
+    ):
         ring_size = 8 if ratio == 4 else 128
 
         def state_loc(raw_slot: int) -> int:
@@ -152,16 +160,25 @@ class DeepSeekV4Processor(BasicLLMProcessor):
                 return -1
             return ((raw_slot // block_size) * ring_size + (raw_slot % ring_size)) // ratio
 
-        state_index = state_loc(slot)
+        state_slot = cls._dsv4_full_slot_to_swa_slot(
+            slot, full_to_state_block_ids, block_size
+        )
+        state_index = state_loc(state_slot)
         out_loc = slot // ratio if slot >= 0 and (position + 1) % ratio == 0 else -1
         clipped_position = (position // ratio) * ratio
         clipped_slot = cls._dsv4_slot_for_position(block_table, clipped_position, block_size)
-        write_loc = state_loc(clipped_slot)
+        clipped_state_slot = cls._dsv4_full_slot_to_swa_slot(
+            clipped_slot, full_to_state_block_ids, block_size
+        )
+        write_loc = state_loc(clipped_state_slot)
         if write_loc < 0:
             write_loc = state_index
         prev_position = clipped_position - ratio
         prev_slot = cls._dsv4_slot_for_position(block_table, prev_position, block_size)
-        prev_state_index = state_loc(prev_slot)
+        prev_state_slot = cls._dsv4_full_slot_to_swa_slot(
+            prev_slot, full_to_state_block_ids, block_size
+        )
+        prev_state_index = state_loc(prev_state_slot)
         if prev_state_index < 0:
             prev_state_index = write_loc if write_loc >= 0 else 0
         return out_loc, clipped_position, write_loc, prev_state_index, state_index
@@ -187,17 +204,14 @@ class DeepSeekV4Processor(BasicLLMProcessor):
                 positions = range(num_cached, num_cached + compute_len)
             else:
                 positions = [req.get_total_length() - 1]
-            slots = list(req.slot_mapping)
-            if len(slots) != len(list(positions)):
-                positions = list(positions)
-            else:
-                positions = list(positions)
+            slots = req.slot_mapping
+            positions = list(positions)
             for idx, position in enumerate(positions):
                 slot = slots[idx] if idx < len(slots) else self._dsv4_slot_for_position(req.block_table, position)
                 max_c128_visible = max(max_c128_visible, (position + 1) // 128)
                 query_rows.append((req.block_table, position, slot))
 
-        c128_width = max(self._dsv4_c128_metadata_width, self._dsv4_align(max(max_c128_visible, 1), 64))
+        c128_width = self._dsv4_align(max(max_c128_visible, 1), 64)
         c4_sparse_topk = 512
 
         swa_indices = []
@@ -245,7 +259,7 @@ class DeepSeekV4Processor(BasicLLMProcessor):
             raw_out_loc[-1] = self._dsv4_full_slot_to_swa_slot(raw_out_loc[-1], full_to_swa_block_ids, block_size)
 
             c4_row, c4_raw_len, c4_clamp1 = self._dsv4_compressed_indices_for_position(
-                block_table, position, 4, c4_sparse_topk
+                block_table, position, 4, c4_sparse_topk, block_size=block_size
             )
             c4_indices.append(c4_row)
             c4_topk_lengths_raw.append(c4_raw_len)
@@ -253,7 +267,12 @@ class DeepSeekV4Processor(BasicLLMProcessor):
             c4_sparse_topk_lengths.append(min(c4_clamp1, c4_sparse_topk))
             c4_topk_lengths.append(min(c4_clamp1, c4_sparse_topk))
             c4_loc, c4_pos, c4_write, c4_prev, c4_state = self._dsv4_compress_locations_for_position(
-                block_table, slot, position, 4
+                block_table,
+                slot,
+                position,
+                4,
+                block_size=block_size,
+                full_to_state_block_ids=full_to_swa_block_ids,
             )
             c4_out_loc.append(c4_loc)
             c4_positions.append(c4_pos)
@@ -262,13 +281,18 @@ class DeepSeekV4Processor(BasicLLMProcessor):
             c4_compress_state_indices.append(c4_state)
 
             c128_row, c128_raw_len, c128_clamp1 = self._dsv4_compressed_indices_for_position(
-                block_table, position, 128, c128_width
+                block_table, position, 128, c128_width, block_size=block_size
             )
             c128_indices.append(c128_row)
             c128_topk_lengths_clamp1.append(c128_clamp1)
             c128_topk_lengths.append(c128_clamp1)
             c128_loc, c128_pos, c128_write, _c128_prev, c128_state = self._dsv4_compress_locations_for_position(
-                block_table, slot, position, 128
+                block_table,
+                slot,
+                position,
+                128,
+                block_size=block_size,
+                full_to_state_block_ids=full_to_swa_block_ids,
             )
             c128_out_loc.append(c128_loc)
             c128_positions.append(c128_pos)
@@ -276,12 +300,14 @@ class DeepSeekV4Processor(BasicLLMProcessor):
             c128_compress_state_indices.append(c128_state)
 
         list_done = time.perf_counter()
+        c4_indices_tensor = infinicore.from_list(c4_indices, dtype=infinicore.int32)
+        c128_indices_tensor = infinicore.from_list(c128_indices, dtype=infinicore.int32)
         result = {
             "dsv4_swa_indices": infinicore.from_list(swa_indices, dtype=infinicore.int32),
             "dsv4_swa_topk_lengths": infinicore.from_list(swa_topk_lengths, dtype=infinicore.int32),
-            "dsv4_c4_indices": infinicore.from_list(c4_indices, dtype=infinicore.int32),
+            "dsv4_c4_indices": c4_indices_tensor,
             "dsv4_c4_topk_lengths": infinicore.from_list(c4_topk_lengths, dtype=infinicore.int32),
-            "dsv4_c128_indices": infinicore.from_list(c128_indices, dtype=infinicore.int32),
+            "dsv4_c128_indices": c128_indices_tensor,
             "dsv4_c128_topk_lengths": infinicore.from_list(c128_topk_lengths, dtype=infinicore.int32),
             "dsv4_raw_out_loc": infinicore.from_list(raw_out_loc, dtype=infinicore.int32),
             "dsv4_page_table": infinicore.from_list(page_table, dtype=infinicore.int32),
@@ -291,11 +317,11 @@ class DeepSeekV4Processor(BasicLLMProcessor):
             "dsv4_c4_positions": infinicore.from_list(c4_positions, dtype=infinicore.int32),
             "dsv4_c4_topk_lengths_raw": infinicore.from_list(c4_topk_lengths_raw, dtype=infinicore.int32),
             "dsv4_c4_topk_lengths_clamp1": infinicore.from_list(c4_topk_lengths_clamp1, dtype=infinicore.int32),
-            "dsv4_c4_sparse_indices": infinicore.from_list(c4_indices, dtype=infinicore.int32),
+            "dsv4_c4_sparse_indices": c4_indices_tensor,
             "dsv4_c4_sparse_topk_lengths": infinicore.from_list(c4_sparse_topk_lengths, dtype=infinicore.int32),
             "dsv4_c128_out_loc": infinicore.from_list(c128_out_loc, dtype=infinicore.int32),
             "dsv4_c128_positions": infinicore.from_list(c128_positions, dtype=infinicore.int32),
-            "dsv4_c128_page_indices": infinicore.from_list(c128_indices, dtype=infinicore.int32),
+            "dsv4_c128_page_indices": c128_indices_tensor,
             "dsv4_c128_topk_lengths_clamp1": infinicore.from_list(c128_topk_lengths_clamp1, dtype=infinicore.int32),
             "dsv4_c4_compress_write_loc": infinicore.from_list(c4_compress_write_loc, dtype=infinicore.int32),
             "dsv4_c4_compress_extra_loc": infinicore.from_list(c4_compress_extra_loc, dtype=infinicore.int32),

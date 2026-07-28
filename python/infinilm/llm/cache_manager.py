@@ -541,8 +541,9 @@ class BlockManager:
                     last_block.update(current_hash, block_tokens)
                     self.hash_to_block_id[current_hash] = last_block_id
 
-            # Need new block
-            if not self.free_block_ids:
+            # Need new block. DeepSeek-V4 also has a SWA cache pool,
+            # so normal free KV blocks are not enough to guarantee allocation.
+            if not self.can_allocate(1):
                 if not self.try_free_blocks(1):
                     raise RuntimeError("No available cache blocks")
             new_block = self._allocate_partial_block()
@@ -558,12 +559,19 @@ class BlockManager:
     # Reference management
 
     def free_blocks(self, block_table: List[int]):
-        """Decrease reference count for all blocks. Blocks with ref_count=0 are not
-        immediately freed to allow reuse."""
+        """Decrease reference count for all blocks.
+
+        Normal paged attention keeps ref_count=0 blocks around for prefix-cache
+        reuse. DeepSeek-V4 uses an additional SWA block mapping, and retaining
+        stale SWA mappings across long service runs can exhaust or reuse the
+        compressed-cache pool incorrectly, so release those blocks immediately.
+        """
         for block_id in reversed(block_table):
             block = self.blocks[block_id]
             assert block.ref_count > 0, "block ref_count must be greater than 0"
             block.ref_count -= 1
+            if self.enable_swa_mapping and block.ref_count == 0:
+                self._deallocate_block(block_id)
 
     def try_free_blocks(self, num_required: int) -> bool:
         """Try to free blocks with ref_count=0."""

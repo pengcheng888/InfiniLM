@@ -10,6 +10,7 @@ python/infinilm/lib/*.so
 .vscode/
 
 *.sh
+!serve_deepseek_v4.sh
 model_weight/
 
 # Python

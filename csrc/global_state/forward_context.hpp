@@ -65,35 +65,40 @@ struct DeepSeekV4AttentionMetadata {
     DeepSeekV4AttentionMetadata() = default;
 
     explicit DeepSeekV4AttentionMetadata(const infinilm::InfinilmModel::Input &input)
-        : swa_indices(tensor_or_empty(input.dsv4_swa_indices)),
-          swa_topk_lengths(tensor_or_empty(input.dsv4_swa_topk_lengths)),
-          c4_indices(tensor_or_empty(input.dsv4_c4_indices)),
-          c4_topk_lengths(tensor_or_empty(input.dsv4_c4_topk_lengths)),
-          c128_indices(tensor_or_empty(input.dsv4_c128_indices)),
-          c128_topk_lengths(tensor_or_empty(input.dsv4_c128_topk_lengths)),
-          raw_out_loc(tensor_or_empty(input.dsv4_raw_out_loc)),
-          page_table(tensor_or_empty(input.dsv4_page_table)),
-          seq_lens_casual(tensor_or_empty(input.dsv4_seq_lens_casual)),
-          positions_casual(tensor_or_empty(input.dsv4_positions_casual)),
-          c4_out_loc(tensor_or_empty(input.dsv4_c4_out_loc)),
-          c4_positions(tensor_or_empty(input.dsv4_c4_positions)),
-          c4_topk_lengths_raw(tensor_or_empty(input.dsv4_c4_topk_lengths_raw)),
-          c4_topk_lengths_clamp1(tensor_or_empty(input.dsv4_c4_topk_lengths_clamp1)),
-          c4_sparse_indices(tensor_or_empty(input.dsv4_c4_sparse_indices)),
-          c4_sparse_topk_lengths(tensor_or_empty(input.dsv4_c4_sparse_topk_lengths)),
-          c128_out_loc(tensor_or_empty(input.dsv4_c128_out_loc)),
-          c128_positions(tensor_or_empty(input.dsv4_c128_positions)),
-          c128_page_indices(tensor_or_empty(input.dsv4_c128_page_indices)),
-          c128_topk_lengths_clamp1(tensor_or_empty(input.dsv4_c128_topk_lengths_clamp1)),
-          c4_compress_write_loc(tensor_or_empty(input.dsv4_c4_compress_write_loc)),
-          c4_compress_extra_loc(tensor_or_empty(input.dsv4_c4_compress_extra_loc)),
-          c4_compress_state_indices(tensor_or_empty(input.dsv4_c4_compress_state_indices)),
-          c128_compress_write_loc(tensor_or_empty(input.dsv4_c128_compress_write_loc)),
-          c128_compress_state_indices(tensor_or_empty(input.dsv4_c128_compress_state_indices)) {}
+        : swa_indices(input.deepseek_v4.swa_indices),
+          swa_topk_lengths(input.deepseek_v4.swa_topk_lengths),
+          c4_indices(input.deepseek_v4.c4_indices),
+          c4_topk_lengths(input.deepseek_v4.c4_topk_lengths),
+          c128_indices(input.deepseek_v4.c128_indices),
+          c128_topk_lengths(input.deepseek_v4.c128_topk_lengths),
+          raw_out_loc(input.deepseek_v4.raw_out_loc),
+          page_table(input.deepseek_v4.page_table),
+          seq_lens_casual(input.deepseek_v4.seq_lens_casual),
+          positions_casual(input.deepseek_v4.positions_casual),
+          c4_out_loc(input.deepseek_v4.c4_out_loc),
+          c4_positions(input.deepseek_v4.c4_positions),
+          c4_topk_lengths_raw(input.deepseek_v4.c4_topk_lengths_raw),
+          c4_topk_lengths_clamp1(input.deepseek_v4.c4_topk_lengths_clamp1),
+          c4_sparse_indices(input.deepseek_v4.c4_sparse_indices),
+          c4_sparse_topk_lengths(input.deepseek_v4.c4_sparse_topk_lengths),
+          c128_out_loc(input.deepseek_v4.c128_out_loc),
+          c128_positions(input.deepseek_v4.c128_positions),
+          c128_page_indices(input.deepseek_v4.c128_page_indices),
+          c128_topk_lengths_clamp1(input.deepseek_v4.c128_topk_lengths_clamp1),
+          c4_compress_write_loc(input.deepseek_v4.c4_compress_write_loc),
+          c4_compress_extra_loc(input.deepseek_v4.c4_compress_extra_loc),
+          c4_compress_state_indices(input.deepseek_v4.c4_compress_state_indices),
+          c128_compress_write_loc(input.deepseek_v4.c128_compress_write_loc),
+          c128_compress_state_indices(input.deepseek_v4.c128_compress_state_indices),
+          flashmla_swa_tile_scheduler_metadata(tensor_or_empty(input.dsv4_flashmla_swa_tile_scheduler_metadata)),
+          flashmla_swa_num_splits(tensor_or_empty(input.dsv4_flashmla_swa_num_splits)),
+          flashmla_c4_tile_scheduler_metadata(tensor_or_empty(input.dsv4_flashmla_c4_tile_scheduler_metadata)),
+          flashmla_c4_num_splits(tensor_or_empty(input.dsv4_flashmla_c4_num_splits)),
+          flashmla_c128_tile_scheduler_metadata(tensor_or_empty(input.dsv4_flashmla_c128_tile_scheduler_metadata)),
+          flashmla_c128_num_splits(tensor_or_empty(input.dsv4_flashmla_c128_num_splits)) {}
 
     bool has_flashmla_indices() const {
-        return swa_indices && swa_topk_lengths && c4_indices && c4_topk_lengths &&
-               c128_indices && c128_topk_lengths;
+        return swa_indices && swa_topk_lengths && c4_indices && c4_topk_lengths && c128_indices && c128_topk_lengths;
     }
 
 private:

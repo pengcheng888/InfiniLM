@@ -372,7 +372,6 @@ infinicore::Tensor DeepseekV4Attention::forward(const infinicore::Tensor &positi
     auto &attn_metadata = *attn_metadata_ptr;
     auto &dsv4_metadata = *dsv4_metadata_ptr;
     auto &layer_cache = *layer_cache_ptr;
-
     {
         profile::ScopedTimer timer(profile::Event::AttentionRope, seq_len);
         auto q_rope = q->narrow({{2, head_dim_ - qk_rope_head_dim_, qk_rope_head_dim_}});
