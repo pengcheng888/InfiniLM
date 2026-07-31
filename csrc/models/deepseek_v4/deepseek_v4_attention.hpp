@@ -72,13 +72,21 @@ private:
                      infinicore::Tensor query,
                      std::optional<infinicore::Tensor> key,
                      bool inverse) const;
-    infinicore::Tensor attn_out_workspace(size_t seq_len,
-                                          infinicore::DataType dtype,
-                                          const infinicore::Device &device) const;
+    infinicore::Tensor prepare_attn_out_workspace(size_t seq_len,
+                                                  infinicore::DataType dtype,
+                                                  const infinicore::Device &device) const;
+    std::pair<std::optional<infinicore::Tensor>, std::optional<infinicore::Tensor>>
+    prepare_flashmla_schedule_metadata(
+        const infinilm::global_state::DeepSeekV4FlashMLAScheduleCache &schedule_cache) const;
+    void cache_flashmla_schedule_metadata(
+        infinilm::global_state::DeepSeekV4FlashMLAScheduleCache &schedule_cache,
+        const infinicore::op::DeepseekV4FlashMLASparseAttentionSchedule &flashmla_schedule) const;
     infinicore::Tensor flashmla_workspace(std::vector<infinicore::Tensor> &cache,
                                           const infinicore::Shape &shape,
                                           infinicore::DataType dtype,
                                           const infinicore::Device &device) const;
+    void validate_forward_metadata_and_cache(
+        const infinilm::global_state::ForwardContext &forward_context) const;
 
     std::shared_ptr<infinilm::layers::linear::ReplicatedLinear> wq_a_;
     std::shared_ptr<infinilm::layers::linear::ReplicatedLinear> wkv_;

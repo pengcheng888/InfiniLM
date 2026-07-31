@@ -13,6 +13,8 @@ namespace infinilm::engine {
 
 namespace {
 
+constexpr int kDeepSeekV4C4SparseTopk = 512;
+
 void bind_forward_context_from_input(const InfinilmModel::Input &input) {
     auto &forward_context = infinilm::global_state::get_forward_context();
     forward_context.attn_metadata = infinilm::global_state::AttentionMetadata(input);
@@ -42,25 +44,25 @@ bool copy_graph_input_optional(std::optional<infinicore::Tensor> &dst,
     return dst.has_value() && src.has_value() && copy_graph_input_tensor(dst.value(), src.value());
 }
 
-bool refresh_flashmla_schedule(std::optional<infinicore::Tensor> &tile_scheduler_metadata,
-                               std::optional<infinicore::Tensor> &num_splits,
+bool refresh_flashmla_schedule(infinicore::Tensor &tile_scheduler_metadata,
+                               infinicore::Tensor &num_splits,
                                const infinicore::Tensor &topk_lengths,
                                const infinicore::Tensor &indices,
                                std::optional<infinicore::Tensor> extra_topk_lengths = std::nullopt,
-                               infinicore::Tensor extra_indices = infinicore::Tensor{}) {
-    if (!tile_scheduler_metadata.has_value() || !tile_scheduler_metadata.value() || !num_splits.has_value() || !num_splits.value() || !topk_lengths || !indices || indices->ndim() < 2) {
+                               int extra_topk = -1) {
+    if (!tile_scheduler_metadata || !num_splits || !topk_lengths || !indices || indices->ndim() < 2) {
         return false;
     }
     const int topk = static_cast<int>(indices->size(indices->ndim() - 1));
-    int extra_topk = -1;
     if (extra_topk_lengths.has_value() && extra_topk_lengths.value()) {
-        if (!extra_indices || extra_indices->ndim() < 2) {
+        if (extra_topk <= 0) {
             return false;
         }
-        extra_topk = static_cast<int>(extra_indices->size(extra_indices->ndim() - 1));
+    } else {
+        extra_topk = -1;
     }
-    infinicore::op::deepseek_v4_flashmla_sparse_attention_metadata_(tile_scheduler_metadata.value(),
-                                                                    num_splits.value(),
+    infinicore::op::deepseek_v4_flashmla_sparse_attention_metadata_(tile_scheduler_metadata,
+                                                                    num_splits,
                                                                     topk_lengths,
                                                                     topk,
                                                                     extra_topk_lengths,
@@ -68,23 +70,26 @@ bool refresh_flashmla_schedule(std::optional<infinicore::Tensor> &tile_scheduler
     return true;
 }
 
-bool refresh_deepseek_v4_flashmla_schedules(InfinilmModel::Input &graph_input) {
-    return refresh_flashmla_schedule(graph_input.dsv4_flashmla_swa_tile_scheduler_metadata,
-                                     graph_input.dsv4_flashmla_swa_num_splits,
+bool refresh_deepseek_v4_flashmla_schedules(
+    InfinilmModel::Input &graph_input,
+    infinilm::global_state::DeepSeekV4FlashMLAScheduleCache &schedule_cache) {
+    return refresh_flashmla_schedule(schedule_cache.swa_tile_scheduler_metadata,
+                                     schedule_cache.swa_num_splits,
                                      graph_input.deepseek_v4.swa_topk_lengths,
                                      graph_input.deepseek_v4.swa_indices)
-        && refresh_flashmla_schedule(graph_input.dsv4_flashmla_c4_tile_scheduler_metadata,
-                                     graph_input.dsv4_flashmla_c4_num_splits,
+        && refresh_flashmla_schedule(schedule_cache.c4_tile_scheduler_metadata,
+                                     schedule_cache.c4_num_splits,
                                      graph_input.deepseek_v4.swa_topk_lengths,
                                      graph_input.deepseek_v4.swa_indices,
                                      graph_input.deepseek_v4.c4_sparse_topk_lengths,
-                                     graph_input.deepseek_v4.c4_sparse_indices)
-        && refresh_flashmla_schedule(graph_input.dsv4_flashmla_c128_tile_scheduler_metadata,
-                                     graph_input.dsv4_flashmla_c128_num_splits,
+                                     kDeepSeekV4C4SparseTopk)
+        && refresh_flashmla_schedule(schedule_cache.c128_tile_scheduler_metadata,
+                                     schedule_cache.c128_num_splits,
                                      graph_input.deepseek_v4.swa_topk_lengths,
                                      graph_input.deepseek_v4.swa_indices,
                                      graph_input.deepseek_v4.c128_topk_lengths_clamp1,
-                                     graph_input.deepseek_v4.c128_page_indices);
+                                     static_cast<int>(graph_input.deepseek_v4.c128_page_indices->size(
+                                         graph_input.deepseek_v4.c128_page_indices->ndim() - 1)));
 }
 
 } // namespace
@@ -198,7 +203,8 @@ void PagedCompiler::compile() {
             model_->reset_runtime_state();
             infinicore::context::syncStream();
             infinicore::context::startGraphRecording();
-            if (is_deepseek_v4_model && !refresh_deepseek_v4_flashmla_schedules(input)) {
+            if (is_deepseek_v4_model &&
+                !refresh_deepseek_v4_flashmla_schedules(input, deepseek_v4_flashmla_schedule_cache)) {
                 infinicore::context::stopGraphRecording();
                 throw std::runtime_error("failed to record DeepSeek-V4 FlashMLA schedule metadata refresh");
             }
