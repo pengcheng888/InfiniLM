@@ -2,8 +2,11 @@
 #include "../../global_state/global_state.hpp"
 #include "../../models/deepseek_v4/deepseek_v4_graph_metadata.hpp"
 #include "../../utils.hpp"
+#include "infinicore/ops/deepseek_v4_flashmla_compute.hpp"
 
 #include <cstdint>
+#include <optional>
+#include <stdexcept>
 #include <vector>
 
 namespace infinilm::engine {
@@ -31,13 +34,66 @@ bool copy_graph_input_tensor(infinicore::Tensor &dst, const infinicore::Tensor &
     return false;
 }
 
+bool copy_graph_input_optional(std::optional<infinicore::Tensor> &dst,
+                               const std::optional<infinicore::Tensor> &src) {
+    if (!dst.has_value() && !src.has_value()) {
+        return true;
+    }
+    return dst.has_value() && src.has_value() && copy_graph_input_tensor(dst.value(), src.value());
+}
+
+bool refresh_flashmla_schedule(std::optional<infinicore::Tensor> &tile_scheduler_metadata,
+                               std::optional<infinicore::Tensor> &num_splits,
+                               const infinicore::Tensor &topk_lengths,
+                               const infinicore::Tensor &indices,
+                               std::optional<infinicore::Tensor> extra_topk_lengths = std::nullopt,
+                               infinicore::Tensor extra_indices = infinicore::Tensor{}) {
+    if (!tile_scheduler_metadata.has_value() || !tile_scheduler_metadata.value() || !num_splits.has_value() || !num_splits.value() || !topk_lengths || !indices || indices->ndim() < 2) {
+        return false;
+    }
+    const int topk = static_cast<int>(indices->size(indices->ndim() - 1));
+    int extra_topk = -1;
+    if (extra_topk_lengths.has_value() && extra_topk_lengths.value()) {
+        if (!extra_indices || extra_indices->ndim() < 2) {
+            return false;
+        }
+        extra_topk = static_cast<int>(extra_indices->size(extra_indices->ndim() - 1));
+    }
+    infinicore::op::deepseek_v4_flashmla_sparse_attention_metadata_(tile_scheduler_metadata.value(),
+                                                                    num_splits.value(),
+                                                                    topk_lengths,
+                                                                    topk,
+                                                                    extra_topk_lengths,
+                                                                    extra_topk);
+    return true;
+}
+
+bool refresh_deepseek_v4_flashmla_schedules(InfinilmModel::Input &graph_input) {
+    return refresh_flashmla_schedule(graph_input.dsv4_flashmla_swa_tile_scheduler_metadata,
+                                     graph_input.dsv4_flashmla_swa_num_splits,
+                                     graph_input.deepseek_v4.swa_topk_lengths,
+                                     graph_input.deepseek_v4.swa_indices)
+        && refresh_flashmla_schedule(graph_input.dsv4_flashmla_c4_tile_scheduler_metadata,
+                                     graph_input.dsv4_flashmla_c4_num_splits,
+                                     graph_input.deepseek_v4.swa_topk_lengths,
+                                     graph_input.deepseek_v4.swa_indices,
+                                     graph_input.deepseek_v4.c4_sparse_topk_lengths,
+                                     graph_input.deepseek_v4.c4_sparse_indices)
+        && refresh_flashmla_schedule(graph_input.dsv4_flashmla_c128_tile_scheduler_metadata,
+                                     graph_input.dsv4_flashmla_c128_num_splits,
+                                     graph_input.deepseek_v4.swa_topk_lengths,
+                                     graph_input.deepseek_v4.swa_indices,
+                                     graph_input.deepseek_v4.c128_topk_lengths_clamp1,
+                                     graph_input.deepseek_v4.c128_page_indices);
+}
+
 } // namespace
 
 PagedCompiler::PagedCompiler(const std::shared_ptr<InfinilmModel> &model, RankBarrier *barrier)
     : GraphCompiler(model, barrier) {
     const bool is_deepseek_v4 = model_ && model_->model_type() == "deepseek_v4";
     if (is_deepseek_v4) {
-        for (size_t b = 32; b >= 1; --b) {
+        for (size_t b = 1; b <= 32; ++b) {
             decode_batch_sizes_.push_back(b);
         }
         return;
@@ -142,6 +198,10 @@ void PagedCompiler::compile() {
             model_->reset_runtime_state();
             infinicore::context::syncStream();
             infinicore::context::startGraphRecording();
+            if (is_deepseek_v4_model && !refresh_deepseek_v4_flashmla_schedules(input)) {
+                infinicore::context::stopGraphRecording();
+                throw std::runtime_error("failed to record DeepSeek-V4 FlashMLA schedule metadata refresh");
+            }
             auto output = model_->forward(input);
             auto graph = infinicore::context::stopGraphRecording();
             barrier_->wait();
