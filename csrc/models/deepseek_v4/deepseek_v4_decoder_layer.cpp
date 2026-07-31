@@ -64,6 +64,7 @@ DeepseekV4DecoderLayer::DeepseekV4DecoderLayer(std::shared_ptr<infinilm::config:
     debug_dump_enabled_ = utils::env_flag_enabled("INFINILM_DSV4_DEBUG_DUMP");
 
     INFINICORE_NN_MODULE_INIT(attn, model_config, layer_idx, device);
+    compress_ratio_ = attn_->compress_ratio();
     INFINICORE_NN_MODULE_INIT(ffn, model_config, layer_idx, device);
     INFINICORE_NN_MODULE_INIT(attn_norm, hidden_size, rms_norm_eps, dtype, device);
     INFINICORE_NN_MODULE_INIT(ffn_norm, hidden_size, rms_norm_eps, dtype, device);
@@ -86,6 +87,7 @@ DeepseekV4DecoderLayer::forward(const infinicore::Tensor &positions,
         throw std::runtime_error("infinilm::models::deepseek_v4::DeepseekV4DecoderLayer::forward expects hidden_states [tokens, hc, hidden]");
     }
     const size_t token_count = hidden_states->size(0);
+    profile::ScopedLayerContext layer_context(profile::layer_type_from_compress_ratio(compress_ratio_));
     profile::ScopedTimer layer_timer(profile::Event::DecoderLayer, token_count);
     debug_dump_tensor(hidden_states, layer_idx_, "layer_input", debug_dump_enabled_);
     residual = hidden_states;

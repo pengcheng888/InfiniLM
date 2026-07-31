@@ -115,9 +115,13 @@ class BlockManager:
         self.num_blocks = num_blocks
         self.block_size = block_size
         self.enable_swa_mapping = enable_swa_mapping
-        self.swa_num_blocks = max(1, num_blocks // 10) if swa_num_blocks is None else swa_num_blocks
+        self.swa_num_blocks = (
+            max(1, num_blocks // 10) if swa_num_blocks is None else swa_num_blocks
+        )
         if self.enable_swa_mapping and self.swa_num_blocks <= 0:
-            raise ValueError("swa_num_blocks must be positive when SWA mapping is enabled")
+            raise ValueError(
+                "swa_num_blocks must be positive when SWA mapping is enabled"
+            )
 
         self.blocks: List[Block] = [Block(i) for i in range(num_blocks)]
         self.hash_to_block_id: Dict[int, int] = {}
@@ -198,7 +202,10 @@ class BlockManager:
     def can_allocate(self, num_required_blocks: int) -> bool:
         if len(self.free_block_ids) < num_required_blocks:
             return False
-        if self.enable_swa_mapping and len(self.swa_free_block_ids) < num_required_blocks:
+        if (
+            self.enable_swa_mapping
+            and len(self.swa_free_block_ids) < num_required_blocks
+        ):
             return False
         return True
 

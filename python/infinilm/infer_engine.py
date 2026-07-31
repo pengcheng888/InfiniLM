@@ -425,31 +425,47 @@ class InferEngine(_infinilm.InferEngine):
                 dsv4_c4_positions._underlying if dsv4_c4_positions is not None else None
             )
             dsv4_c4_topk_lengths_raw = (
-                dsv4_c4_topk_lengths_raw._underlying if dsv4_c4_topk_lengths_raw is not None else None
+                dsv4_c4_topk_lengths_raw._underlying
+                if dsv4_c4_topk_lengths_raw is not None
+                else None
             )
             dsv4_c4_sparse_topk_lengths = (
-                dsv4_c4_sparse_topk_lengths._underlying if dsv4_c4_sparse_topk_lengths is not None else None
+                dsv4_c4_sparse_topk_lengths._underlying
+                if dsv4_c4_sparse_topk_lengths is not None
+                else None
             )
             dsv4_c128_out_loc = (
                 dsv4_c128_out_loc._underlying if dsv4_c128_out_loc is not None else None
             )
             dsv4_c128_positions = (
-                dsv4_c128_positions._underlying if dsv4_c128_positions is not None else None
+                dsv4_c128_positions._underlying
+                if dsv4_c128_positions is not None
+                else None
             )
             dsv4_c128_page_indices = (
-                dsv4_c128_page_indices._underlying if dsv4_c128_page_indices is not None else None
+                dsv4_c128_page_indices._underlying
+                if dsv4_c128_page_indices is not None
+                else None
             )
             dsv4_c128_topk_lengths_clamp1 = (
-                dsv4_c128_topk_lengths_clamp1._underlying if dsv4_c128_topk_lengths_clamp1 is not None else None
+                dsv4_c128_topk_lengths_clamp1._underlying
+                if dsv4_c128_topk_lengths_clamp1 is not None
+                else None
             )
             dsv4_c4_compress_write_loc = (
-                dsv4_c4_compress_write_loc._underlying if dsv4_c4_compress_write_loc is not None else None
+                dsv4_c4_compress_write_loc._underlying
+                if dsv4_c4_compress_write_loc is not None
+                else None
             )
             dsv4_c4_compress_extra_loc = (
-                dsv4_c4_compress_extra_loc._underlying if dsv4_c4_compress_extra_loc is not None else None
+                dsv4_c4_compress_extra_loc._underlying
+                if dsv4_c4_compress_extra_loc is not None
+                else None
             )
             dsv4_c128_compress_write_loc = (
-                dsv4_c128_compress_write_loc._underlying if dsv4_c128_compress_write_loc is not None else None
+                dsv4_c128_compress_write_loc._underlying
+                if dsv4_c128_compress_write_loc is not None
+                else None
             )
             mamba_init_state_indices = (
                 mamba_init_state_indices._underlying

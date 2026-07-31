@@ -435,7 +435,7 @@ class TestModel:
             )
             t2 = time.time()
             if cfg.verbose and not self.skip_load:
-                if output_len <= 256*1000:
+                if output_len <= 256 * 1000:
                     for output in outputs:
                         print(output.outputs[0].text)
                 else:
@@ -566,8 +566,8 @@ if __name__ == "__main__":
     # ---------------------------------------------------------------------------- #
     if cfg.warmup:
         # warmup cache capacity
-        warmup_batch = 1 # warmup_case["batch_size"]
-        warmup_input_len = 12 #warmup_case["input_len"]
+        warmup_batch = 1  # warmup_case["batch_size"]
+        warmup_input_len = 12  # warmup_case["input_len"]
         warmup_decode_len = 5
 
         print(

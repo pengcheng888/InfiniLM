@@ -22,7 +22,9 @@ def _parse_input_ids(raw: str | None):
     return [int(item.strip()) for item in raw.split(",") if item.strip()]
 
 
-def _generate_from_input_ids(model, prompt_token_ids_list, max_new_tokens, temperature, top_p, top_k, ignore_eos):
+def _generate_from_input_ids(
+    model, prompt_token_ids_list, max_new_tokens, temperature, top_p, top_k, ignore_eos
+):
     sampling_params = SamplingParams(
         temperature=temperature,
         top_p=top_p,

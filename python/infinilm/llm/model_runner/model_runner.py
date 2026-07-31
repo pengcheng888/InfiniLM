@@ -231,7 +231,9 @@ class ModelRunner:
             return sampled_tokens_list
 
         # Run inference
-        detail_profile = os.getenv("INFINILM_MODEL_RUNNER_DETAIL_PROFILE", "0").lower() in (
+        detail_profile = os.getenv(
+            "INFINILM_MODEL_RUNNER_DETAIL_PROFILE", "0"
+        ).lower() in (
             "1",
             "true",
             "yes",

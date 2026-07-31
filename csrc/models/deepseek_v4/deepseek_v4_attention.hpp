@@ -33,6 +33,10 @@ public:
     infinicore::Tensor forward(const infinicore::Tensor &positions,
                                const infinicore::Tensor &hidden_states) const;
 
+    size_t compress_ratio() const {
+        return compress_ratio_;
+    }
+
     void process_weights_after_loading() override {
         wq_a_->process_weights_after_loading();
         wkv_->process_weights_after_loading();

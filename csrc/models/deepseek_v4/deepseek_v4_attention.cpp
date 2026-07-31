@@ -305,19 +305,37 @@ infinicore::Tensor DeepseekV4Attention::forward(const infinicore::Tensor &positi
     {
         profile::ScopedTimer timer(profile::Event::AttentionQProjection, seq_len);
         auto x0 = hidden_states;
-        q_lora = wq_a_->forward(x0);
-        q_lora = q_norm_->forward(q_lora);
+        {
+            profile::ScopedTimer sub_timer(profile::Event::AttentionQProjA, seq_len);
+            q_lora = wq_a_->forward(x0);
+        }
+        {
+            profile::ScopedTimer sub_timer(profile::Event::AttentionQNorm, seq_len);
+            q_lora = q_norm_->forward(q_lora);
+        }
         auto q_mut = q_lora;
-        q = wq_b_->forward(q_mut)->view({seq_len, num_local_attention_heads_, head_dim_});
-        q = infinicore::op::deepseek_v4_rmsnorm_self(q, static_cast<float>(rms_norm_eps_));
+        {
+            profile::ScopedTimer sub_timer(profile::Event::AttentionQProjB, seq_len);
+            q = wq_b_->forward(q_mut)->view({seq_len, num_local_attention_heads_, head_dim_});
+        }
+        {
+            profile::ScopedTimer sub_timer(profile::Event::AttentionQRmsNormSelf, seq_len);
+            q = infinicore::op::deepseek_v4_rmsnorm_self(q, static_cast<float>(rms_norm_eps_));
+        }
     }
 
     infinicore::Tensor kv;
     {
         profile::ScopedTimer timer(profile::Event::AttentionKVProjection, seq_len);
         auto x1 = hidden_states;
-        kv = wkv_->forward(x1);
-        kv = kv_norm_->forward(kv);
+        {
+            profile::ScopedTimer sub_timer(profile::Event::AttentionKVProj, seq_len);
+            kv = wkv_->forward(x1);
+        }
+        {
+            profile::ScopedTimer sub_timer(profile::Event::AttentionKVNorm, seq_len);
+            kv = kv_norm_->forward(kv);
+        }
     }
 
     {
@@ -351,9 +369,13 @@ infinicore::Tensor DeepseekV4Attention::forward(const infinicore::Tensor &positi
                                  rope_freqs_cis_,
                                  layer_cache,
                                  dsv4_metadata);
-        auto c4_sparse_indices = infinicore::Tensor::empty({seq_len, kDsv4C4Topk},
-                                                           infinicore::DataType::I32,
-                                                           hidden_states->device());
+        infinicore::Tensor c4_sparse_indices;
+        {
+            profile::ScopedTimer timer(profile::Event::AttentionC4SparseAlloc, seq_len);
+            c4_sparse_indices = infinicore::Tensor::empty({seq_len, kDsv4C4Topk},
+                                                          infinicore::DataType::I32,
+                                                          hidden_states->device());
+        }
         indexer_->forward(hidden_states,
                           q_lora,
                           pos_ids,
@@ -391,26 +413,39 @@ infinicore::Tensor DeepseekV4Attention::forward(const infinicore::Tensor &positi
     auto q_for_flash = q;
     auto swa_indices = dsv4_metadata.swa_indices;
     auto swa_topk_lengths = dsv4_metadata.swa_topk_lengths;
-    auto [flashmla_tile_scheduler_metadata_opt, flashmla_num_splits_opt]
-        = prepare_flashmla_schedule_metadata(flashmla_schedule_cache);
+    std::optional<infinicore::Tensor> flashmla_tile_scheduler_metadata_opt;
+    std::optional<infinicore::Tensor> flashmla_num_splits_opt;
+    {
+        profile::ScopedTimer timer(profile::Event::AttentionFlashMLASchedule, seq_len);
+        auto flashmla_metadata = prepare_flashmla_schedule_metadata(flashmla_schedule_cache);
+        flashmla_tile_scheduler_metadata_opt = std::move(flashmla_metadata.first);
+        flashmla_num_splits_opt = std::move(flashmla_metadata.second);
+    }
     const bool has_flashmla_schedule = flashmla_tile_scheduler_metadata_opt.has_value() && flashmla_tile_scheduler_metadata_opt.value() && flashmla_num_splits_opt.has_value() && flashmla_num_splits_opt.value();
     bool used_flashmla_out_workspace = false;
     if (has_flashmla_schedule && !flashmla_out_workspace_disabled_) {
         profile::ScopedTimer timer(profile::Event::AttentionFlashMLA, seq_len);
         const auto num_sm_parts = flashmla_tile_scheduler_metadata_opt.value()->size(0);
-        auto lse = flashmla_workspace(flashmla_lse_workspaces_,
-                                      infinicore::Shape{seq_len, num_local_attention_heads_},
-                                      infinicore::DataType::F32,
-                                      hidden_states->device());
-        auto lse_accum = flashmla_workspace(flashmla_lse_accum_workspaces_,
-                                            infinicore::Shape{seq_len + num_sm_parts, num_local_attention_heads_},
-                                            infinicore::DataType::F32,
-                                            hidden_states->device());
-        auto o_accum = flashmla_workspace(flashmla_o_accum_workspaces_,
-                                          infinicore::Shape{seq_len + num_sm_parts, num_local_attention_heads_, head_dim_},
-                                          infinicore::DataType::F32,
-                                          hidden_states->device());
+        infinicore::Tensor lse;
+        infinicore::Tensor lse_accum;
+        infinicore::Tensor o_accum;
+        {
+            profile::ScopedTimer sub_timer(profile::Event::AttentionFlashMLAWorkspace, seq_len);
+            lse = flashmla_workspace(flashmla_lse_workspaces_,
+                                     infinicore::Shape{seq_len, num_local_attention_heads_},
+                                     infinicore::DataType::F32,
+                                     hidden_states->device());
+            lse_accum = flashmla_workspace(flashmla_lse_accum_workspaces_,
+                                           infinicore::Shape{seq_len + num_sm_parts, num_local_attention_heads_},
+                                           infinicore::DataType::F32,
+                                           hidden_states->device());
+            o_accum = flashmla_workspace(flashmla_o_accum_workspaces_,
+                                         infinicore::Shape{seq_len + num_sm_parts, num_local_attention_heads_, head_dim_},
+                                         infinicore::DataType::F32,
+                                         hidden_states->device());
+        }
         try {
+            profile::ScopedTimer sub_timer(profile::Event::AttentionFlashMLAOutWorkspaceCall, seq_len);
             infinicore::op::deepseek_v4_flashmla_sparse_attention_out_workspace_(q_for_flash,
                                                                                  layer_cache.swa_cache_raw,
                                                                                  swa_indices,
@@ -440,22 +475,28 @@ infinicore::Tensor DeepseekV4Attention::forward(const infinicore::Tensor &positi
     }
     if (!used_flashmla_out_workspace) {
         profile::ScopedTimer timer(profile::Event::AttentionFlashMLA, seq_len);
-        flashmla_schedule = infinicore::op::deepseek_v4_flashmla_sparse_attention_with_metadata_(q_for_flash,
-                                                                                                 layer_cache.swa_cache_raw,
-                                                                                                 swa_indices,
-                                                                                                 swa_topk_lengths,
-                                                                                                 attn_sink_for_flash_,
-                                                                                                 attn_out,
-                                                                                                 flashmla_tile_scheduler_metadata_opt,
-                                                                                                 flashmla_num_splits_opt,
-                                                                                                 flashmla_softmax_scale,
-                                                                                                 static_cast<int>(kDsv4SwaBlockSize),
-                                                                                                 static_cast<int>(head_dim_),
-                                                                                                 extra_raw_cache,
-                                                                                                 extra_indices,
-                                                                                                 extra_topk_lengths,
-                                                                                                 extra_page_size);
-        cache_flashmla_schedule_metadata(flashmla_schedule_cache, flashmla_schedule);
+        {
+            profile::ScopedTimer sub_timer(profile::Event::AttentionFlashMLAWithMetadataCall, seq_len);
+            flashmla_schedule = infinicore::op::deepseek_v4_flashmla_sparse_attention_with_metadata_(q_for_flash,
+                                                                                                     layer_cache.swa_cache_raw,
+                                                                                                     swa_indices,
+                                                                                                     swa_topk_lengths,
+                                                                                                     attn_sink_for_flash_,
+                                                                                                     attn_out,
+                                                                                                     flashmla_tile_scheduler_metadata_opt,
+                                                                                                     flashmla_num_splits_opt,
+                                                                                                     flashmla_softmax_scale,
+                                                                                                     static_cast<int>(kDsv4SwaBlockSize),
+                                                                                                     static_cast<int>(head_dim_),
+                                                                                                     extra_raw_cache,
+                                                                                                     extra_indices,
+                                                                                                     extra_topk_lengths,
+                                                                                                     extra_page_size);
+        }
+        {
+            profile::ScopedTimer sub_timer(profile::Event::AttentionFlashMLACacheMetadata, seq_len);
+            cache_flashmla_schedule_metadata(flashmla_schedule_cache, flashmla_schedule);
+        }
     }
 
     {

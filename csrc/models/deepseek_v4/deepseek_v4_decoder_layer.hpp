@@ -68,6 +68,7 @@ private:
     double rms_norm_eps_{1e-6};
     double hc_eps_{1e-6};
     int hc_sinkhorn_iters_{20};
+    size_t compress_ratio_{0};
     bool debug_dump_enabled_{false};
     DeepseekV4DecoderLayerScratch decode_scratch_;
 };

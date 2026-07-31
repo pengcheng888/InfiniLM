@@ -76,8 +76,13 @@ class LLMEngine:
             )
             layer_types = llm_config.get("layer_types") or []
             architectures = llm_config.get("architectures") or []
-            enable_dsv4_swa_mapping = llm_config.get("model_type") == "deepseek_v4" or "DeepseekV4ForCausalLM" in architectures
-            dsv4_swa_num_blocks = max(1, config.num_blocks // 10) if enable_dsv4_swa_mapping else None
+            enable_dsv4_swa_mapping = (
+                llm_config.get("model_type") == "deepseek_v4"
+                or "DeepseekV4ForCausalLM" in architectures
+            )
+            dsv4_swa_num_blocks = (
+                max(1, config.num_blocks // 10) if enable_dsv4_swa_mapping else None
+            )
             has_mamba_cache = "linear_attention" in layer_types or (
                 "linear_conv_kernel_dim" in llm_config
                 and "linear_num_key_heads" in llm_config
@@ -125,7 +130,6 @@ class LLMEngine:
             f"on device {config.device}, "
             f"enable_graph={config.enable_graph}"
         )
-
 
     def _should_run_startup_warmup(self) -> bool:
         env_value = os.getenv("INFINILM_WARMUP", "").strip().lower()
