@@ -3,6 +3,8 @@
 #include "infinicore/nn/module.hpp"
 #include "infinicore/tensor.hpp"
 
+#include <cstddef>
+
 namespace infinilm::models::deepseek_v4 {
 
 class DeepseekV4RMSNorm : public infinicore::nn::Module {

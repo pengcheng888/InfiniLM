@@ -1,6 +1,8 @@
 # DeepSeek V4 环境变量说明
 
-本文档汇总 InfiniLM DeepSeek V4 路径使用的专用环境变量。当前约定是：这些环境变量在进程启动后保持不变，模型代码在构造阶段或首次静态初始化时读取，避免在每次 `forward` 中反复访问环境变量。
+本文档汇总 InfiniLM DeepSeek V4 路径当前源码实际读取的专用环境变量。除特别说明外，建议在进程启动前设置这些变量，并在同一进程内保持不变。
+
+注意：本文以当前源码为准。部分历史变量仍出现在旧 profile 报告或脚本中，但模型路径已经不再读取。
 
 ## MHC 算子
 
@@ -14,22 +16,27 @@
 
 MHC 后端选择环境变量已删除；模型 forward 不再读取环境变量，也不再支持切换到 naive 版本。`deepseek_v4_mhc_pre_naive_`、`deepseek_v4_mhc_post_naive_`、`deepseek_v4_mhc_head_naive_` 仅作为 InfiniCore 层历史/测试接口保留，DeepSeek V4 模型路径不再考虑这三个算子。
 
-## Gate/TopK 后端选择
+## Gate/TopK
 
-| 环境变量 | 默认值 | 可选值 | 读取位置 | 作用 |
-| --- | --- | --- | --- | --- |
-| `INFINILM_DSV4_GATE_TOPK` | `kernel` | `naive`, `kernel` | `DeepseekV4MoEGate` 构造函数 | 选择 gate 之后 routed expert topk 的计算路径。hash MoE 层对应 `deepseek_v4_hash_topk_*`，非 hash MoE 层对应带 correction bias 的 `deepseek_v4_topk_*`。 |
+当前 `DeepseekV4MoEGate::forward` 固定调用 InfiniCore public kernel 入口：
 
-Gate/TopK kernel 选择接受常见真值/假值别名。默认使用 `kernel`，通过 InfiniCore native 单 kernel 实现减少 ATen 多算子和中间张量开销；如需调试旧路径，可显式设置为 `naive`。
+| 场景 | 固定算子 |
+| --- | --- |
+| hash MoE 层 | `deepseek_v4_hash_topk_` |
+| 非 hash MoE 层 | `deepseek_v4_topk_` |
+
+`INFINILM_DSV4_GATE_TOPK` 已不再被当前模型源码读取。模型侧不再提供 naive/kernel 环境变量切换；如需排查 topk 行为，应在 InfiniCore public op 内部或测试路径中处理。
 
 ## 路由专家后端
 
 | 环境变量 | 默认值 | 可选值 | 读取位置 | 作用 |
 | --- | --- | --- | --- | --- |
 | `INFINILM_DSV4_ROUTED_EXPERT_BACKEND` | `fused_experts_int8_marlin` | `naive`, `lmslim_fused`, `fused_experts_int8_marlin`, `aiter_split`, `lightop_split` | `DeepseekV4PackedExperts` 构造函数 | 选择 routed expert 的计算路径。 |
-| `INFINILM_DSV4_FUSED_SHARED_OUTPUT` | `auto` | `auto`, `1`, `true`, `TRUE`, `on`, `ON`, `0`, `false`, `FALSE`, `off`, `OFF` | `DeepseekV4MoE` 构造函数 | 控制 shared experts 输出是否融合进 routed expert 后处理。默认 `auto`：仅在 `fused_experts_int8_marlin` 支持该路径时启用，将 `routed * scaling + shared` 放入 InfiniCore fused expert 算子内部，避免外部 `infinicore::op::add`。 |
+| `INFINILM_DSV4_FUSED_SHARED_OUTPUT` | `auto` | `auto`, `1`, `true`, `TRUE`, `on`, `ON`, `0`, `false`, `FALSE`, `off`, `OFF` | `DeepseekV4MoE` 构造函数 | 当前源码会读取并保存该变量，但 `forward_impl` 中 `fuse_shared_output` 暂时硬编码为 `true`，因此该变量目前不实际控制 forward 行为。 |
 
 兼容别名：`reference` 等价于 `naive`，`lmslim` 和 `fused` 等价于 `lmslim_fused`，`int8_marlin` 和 `sglang_int8_marlin` 等价于 `fused_experts_int8_marlin`，`aiter` 等价于 `aiter_split`，`lightop` 和 `split_lightop` 等价于 `lightop_split`。
+
+当前 `fused_shared_output` 实际总是启用：`DeepseekV4MoE::forward_impl` 会把 shared experts 输出作为可选参数传给 routed expert backend。只有在恢复 `fused_shared_output_enabled_ && shared && experts_->supports_fused_shared_output()` 判断后，`INFINILM_DSV4_FUSED_SHARED_OUTPUT` 才会重新成为有效开关。
 
 后端行为：
 
@@ -48,7 +55,7 @@ Gate/TopK kernel 选择接受常见真值/假值别名。默认使用 `kernel`�
 
 | 环境变量 | 默认值 | 可选值 | 读取位置 | 作用 |
 | --- | --- | --- | --- | --- |
-| `INFINILM_DSV4_MOE_ALLREDUCE` | `inplace` | `inplace`, `outplace`, `custom` | `DeepseekV4MoE` 构造函数 | 选择 MoE TP allreduce 路径。`inplace` 为原始 `infinicclAllReduce(routed, routed)`；`outplace` 使用 per-layer scratch buffer 做 out-of-place `infinicclAllReduce`；`custom` 尝试调用 InfiniCore DCU custom allreduce wrapper，失败时回退到 `infiniccl`。 |
+| `INFINILM_DSV4_MOE_ALLREDUCE` | `inplace` | `inplace`, `outplace`, `custom`, `dcu_custom`, `custom_ar` | `DeepseekV4MoE` 构造函数 | 选择 MoE TP allreduce 路径。`inplace` 为原始 `infinicclAllReduce(routed, routed)`；`outplace` 使用 per-layer scratch buffer 做 out-of-place `infinicclAllReduce`；`custom`/`dcu_custom`/`custom_ar` 会先尝试 InfiniCore DCU custom allreduce wrapper，失败时回退到 `infiniccl`。 |
 
 当前实测 `outplace` 在 Hygon layer0-4 case 中没有收益，默认保持 `inplace`。`custom` 用于验证对齐 SGLang/vLLM `_C_custom_ar` 的可行性；由于 InfiniLM 是单进程多 rank 线程模型，而 SGLang 是多进程模型，vLLM IPC handle 打开路径在当前进程模型下仍可能失败并回退。
 
@@ -56,7 +63,7 @@ InfiniCore distributed allreduce 还支持一个更底层的 DeepSeek V4/Hygon f
 
 | 环境变量 | 默认值 | 可选值 | 读取位置 | 作用 |
 | --- | --- | --- | --- | --- |
-| `INFINICORE_ALLREDUCE_FASTPATH` | `off` | `off`, `deepseek_v4`, `dsv4`, `hygon_deepseek_v4`, `1`, `true`, `on` | InfiniCore `distributed::AllReduce::run` | 在通用 `distributed::allreduce_` 内部优先尝试 `deepseek_v4_dcu_custom_allreduce_`，成功则跳过 `infinicclAllReduce`，失败自动回退。该 fast path 由 DeepSeek V4/Hygon 专用 wrapper 负责检查 tensor 连续性、大小、对齐和 world size。 |
+| `INFINICORE_ALLREDUCE_FASTPATH` | `off` | `off`, `0`, `false`, `FALSE`, `deepseek_v4`, `dsv4`, `hygon_deepseek_v4`, `1`, `true`, `TRUE`, `on`, `ON` | InfiniCore `distributed::AllReduce::run` | 在通用 `distributed::allreduce_` 内部优先尝试 `deepseek_v4_dcu_custom_allreduce_`，成功则跳过 `infinicclAllReduce`，失败自动回退。该 fast path 只对 `INFINICCL_SUM`、有效 communicator 生效。 |
 
 
 ## Marlin GEMM 调参覆盖
@@ -75,9 +82,10 @@ InfiniCore distributed allreduce 还支持一个更底层的 DeepSeek V4/Hygon f
 
 | 环境变量 | 默认值 | 可选值 | 读取位置 | 作用 |
 | --- | --- | --- | --- | --- |
-| `INFINILM_DSV4_DEBUG_DUMP` | 关闭 | `1`, `true`, `TRUE`, `on`, `ON` | `DeepseekV4DecoderLayer` 和 `DeepseekV4MoE` 构造函数 | 将部分中间 tensor dump 到 `/tmp/infinilm_dsv4_tp*_l*_*`。 |
-| `INFINILM_DSV4_PROFILE` | 关闭 | `1`, `true`, `TRUE`, `on`, `ON` | `deepseek_v4_profile.hpp` 静态初始化 | 开启 DeepSeek V4 性能分析计时并在退出时打印报告。 |
-| `INFINILM_DSV4_FFN_PROFILE` | 关闭 | `1`, `true`, `TRUE`, `on`, `ON` | `deepseek_v4_profile.hpp` 静态初始化 | 保留的 FFN 性能分析别名开关。 |
+| `INFINILM_DSV4_DEBUG_DUMP` | 关闭 | `1`, `true`, `TRUE`, `on`, `ON`, `kernel`, `marlin` | `DeepseekV4DecoderLayer` 和 `DeepseekV4MoE` 构造函数 | 将部分中间 tensor dump 到 `/tmp/infinilm_dsv4_tp*_l*_*`。 |
+| `INFINILM_DSV4_PROFILE` | 关闭 | 任意非空且首字符不是 `0` 的值 | `deepseek_v4_profile.hpp` 静态初始化 | 开启 DeepSeek V4 GPU-synced wall time 计时，并在进程退出时打印 overall/prefill/decode 报告。 |
+| `INFINILM_DSV4_FFN_PROFILE` | 关闭 | 任意非空且首字符不是 `0` 的值 | `deepseek_v4_profile.hpp` 静态初始化 | 保留的 FFN 性能分析别名开关；当前与 `INFINILM_DSV4_PROFILE` 一样会开启完整 DSv4 profile。 |
+| `INFINILM_DSV4_PROCESSOR_PROFILE` | 关闭 | `1`, `true`, `yes`, `on` | `DeepSeekV4Processor` 每次构造模型输入时 | 打印 Python processor 侧耗时，包括基础输入构造、DSv4 attention metadata 构造、list 生成和 `infinicore.from_list` 耗时。 |
 
 注意：当前性能分析计时器会在每个计时代码块前后同步 GPU stream，因此适合定位热点，不适合作为关闭 profile 后的真实性能数据。
 
@@ -85,6 +93,7 @@ InfiniCore distributed allreduce 还支持一个更底层的 DeepSeek V4/Hygon f
 
 路由专家后端选择已经统一集中到 `INFINILM_DSV4_ROUTED_EXPERT_BACKEND`。以下早期后端选择别名不应继续在模型代码中使用：
 
+- `INFINILM_DSV4_GATE_TOPK`
 - `INFINILM_DSV4_MOE_MARLIN`
 - `INFINILM_DSV4_MOE_BACKEND`
 - `INFINILM_DSV4_MOE_AITER`

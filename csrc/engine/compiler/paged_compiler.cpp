@@ -1,81 +1,18 @@
 #include "paged_compiler.hpp"
 #include "../../global_state/global_state.hpp"
+#include "../../models/deepseek_v4/deepseek_v4_graph_metadata.hpp"
 #include "../../utils.hpp"
 
 #include <cstdint>
-#include <optional>
 #include <vector>
 
 namespace infinilm::engine {
 
 namespace {
 
-constexpr size_t kDsv4SwaTopk = 128;
-constexpr size_t kDsv4C4Topk = 512;
-constexpr size_t kDsv4C128MetadataWidth = 8256;
-
-infinicore::Tensor make_i32_tensor(const std::vector<size_t> &shape,
-                                   int32_t fill,
-                                   infinicore::Device device) {
-    auto tensor = infinicore::Tensor::empty(shape, infinicore::DataType::I32, device);
-    std::vector<int32_t> values(tensor->numel(), fill);
-    infinicore::context::memcpyH2D(tensor->data(), values.data(), values.size() * sizeof(int32_t), false);
-    return tensor;
-}
-
-void init_deepseek_v4_graph_decode_metadata(InfinilmModel::Input &input,
-                                            size_t batch_size,
-                                            size_t block_per_req,
-                                            infinicore::Device device) {
-    auto &deepseek_v4 = input.deepseek_v4;
-    deepseek_v4.swa_indices = make_i32_tensor({batch_size, kDsv4SwaTopk}, -1, device);
-    deepseek_v4.swa_topk_lengths = make_i32_tensor({batch_size}, 1, device);
-    deepseek_v4.c4_indices = make_i32_tensor({batch_size, kDsv4C4Topk}, -1, device);
-    deepseek_v4.c4_topk_lengths = make_i32_tensor({batch_size}, 1, device);
-    deepseek_v4.c128_indices = make_i32_tensor({batch_size, kDsv4C128MetadataWidth}, -1, device);
-    deepseek_v4.c128_topk_lengths = make_i32_tensor({batch_size}, 1, device);
-
-    deepseek_v4.raw_out_loc = make_i32_tensor({batch_size}, 0, device);
-    deepseek_v4.page_table = make_i32_tensor({batch_size, block_per_req}, -1, device);
-    std::vector<int32_t> page_table(batch_size * block_per_req, -1);
-    for (size_t row = 0; row < batch_size; ++row) {
-        page_table[row * block_per_req] = 0;
-    }
-    infinicore::context::memcpyH2D(deepseek_v4.page_table->data(), page_table.data(), page_table.size() * sizeof(int32_t), false);
-    deepseek_v4.seq_lens_casual = make_i32_tensor({batch_size}, 1, device);
-    deepseek_v4.positions_casual = make_i32_tensor({batch_size}, 0, device);
-
-    deepseek_v4.c4_out_loc = make_i32_tensor({batch_size}, -1, device);
-    deepseek_v4.c4_positions = make_i32_tensor({batch_size}, 0, device);
-    deepseek_v4.c4_topk_lengths_raw = make_i32_tensor({batch_size}, 0, device);
-    deepseek_v4.c4_topk_lengths_clamp1 = make_i32_tensor({batch_size}, 1, device);
-    deepseek_v4.c4_sparse_indices = make_i32_tensor({batch_size, kDsv4C4Topk}, -1, device);
-    deepseek_v4.c4_sparse_topk_lengths = make_i32_tensor({batch_size}, 1, device);
-
-    deepseek_v4.c128_out_loc = make_i32_tensor({batch_size}, -1, device);
-    deepseek_v4.c128_positions = make_i32_tensor({batch_size}, 0, device);
-    deepseek_v4.c128_page_indices = make_i32_tensor({batch_size, kDsv4C128MetadataWidth}, -1, device);
-    deepseek_v4.c128_topk_lengths_clamp1 = make_i32_tensor({batch_size}, 1, device);
-
-    deepseek_v4.c4_compress_write_loc = make_i32_tensor({batch_size}, 0, device);
-    deepseek_v4.c4_compress_extra_loc = make_i32_tensor({batch_size, 1}, 0, device);
-    deepseek_v4.c4_compress_state_indices = make_i32_tensor({batch_size}, 0, device);
-    deepseek_v4.c128_compress_write_loc = make_i32_tensor({batch_size}, 0, device);
-    deepseek_v4.c128_compress_state_indices = make_i32_tensor({batch_size}, 0, device);
-}
-
-std::optional<infinicore::Tensor> tensor_optional(const infinicore::Tensor &tensor) {
-    return tensor ? std::optional<infinicore::Tensor>(tensor) : std::nullopt;
-}
-
-void bind_deepseek_v4_flashmla_schedule_metadata(InfinilmModel::Input &input) {
-    auto &metadata = infinilm::global_state::get_forward_context().attn_metadata.deepseek_v4;
-    input.dsv4_flashmla_swa_tile_scheduler_metadata = tensor_optional(metadata.flashmla_swa_tile_scheduler_metadata);
-    input.dsv4_flashmla_swa_num_splits = tensor_optional(metadata.flashmla_swa_num_splits);
-    input.dsv4_flashmla_c4_tile_scheduler_metadata = tensor_optional(metadata.flashmla_c4_tile_scheduler_metadata);
-    input.dsv4_flashmla_c4_num_splits = tensor_optional(metadata.flashmla_c4_num_splits);
-    input.dsv4_flashmla_c128_tile_scheduler_metadata = tensor_optional(metadata.flashmla_c128_tile_scheduler_metadata);
-    input.dsv4_flashmla_c128_num_splits = tensor_optional(metadata.flashmla_c128_num_splits);
+void bind_forward_context_from_input(const InfinilmModel::Input &input) {
+    auto &forward_context = infinilm::global_state::get_forward_context();
+    forward_context.attn_metadata = infinilm::global_state::AttentionMetadata(input);
 }
 
 bool copy_graph_input_tensor(infinicore::Tensor &dst, const infinicore::Tensor &src) {
@@ -92,14 +29,6 @@ bool copy_graph_input_tensor(infinicore::Tensor &dst, const infinicore::Tensor &
         return true;
     }
     return false;
-}
-
-bool copy_graph_input_optional(std::optional<infinicore::Tensor> &dst,
-                               const std::optional<infinicore::Tensor> &src) {
-    if (!dst.has_value() && !src.has_value()) {
-        return true;
-    }
-    return dst.has_value() && src.has_value() && copy_graph_input_tensor(dst.value(), src.value());
 }
 
 } // namespace
@@ -171,11 +100,15 @@ void PagedCompiler::compile() {
             set_zeros(input.slot_mapping.value());
 
             if (is_deepseek_v4) {
-                init_deepseek_v4_graph_decode_metadata(input, b, block_per_req, infinicore::context::getDevice());
+                infinilm::models::deepseek_v4::init_graph_decode_metadata(input, b, block_per_req, infinicore::context::getDevice());
             }
 
-            // Attention reads attn_metadata from thread-local forward context.
-            infinilm::global_state::get_forward_context().attn_metadata = infinilm::global_state::AttentionMetadata(input);
+            // Attention reads metadata from thread-local forward context.
+            if (is_deepseek_v4) {
+                infinilm::models::deepseek_v4::bind_graph_forward_context_from_input(input);
+            } else {
+                bind_forward_context_from_input(input);
+            }
             return input;
         };
 
@@ -197,9 +130,10 @@ void PagedCompiler::compile() {
             barrier_->wait();
             (void)model_->forward(input);
             infinicore::context::syncStream();
+            infinilm::global_state::DeepSeekV4FlashMLAScheduleCache deepseek_v4_flashmla_schedule_cache;
             if (is_deepseek_v4_model) {
-                bind_deepseek_v4_flashmla_schedule_metadata(input);
-                infinilm::global_state::get_forward_context().attn_metadata = infinilm::global_state::AttentionMetadata(input);
+                deepseek_v4_flashmla_schedule_cache = infinilm::global_state::get_forward_context().deepseek_v4_flashmla_schedule_cache;
+                infinilm::models::deepseek_v4::bind_graph_forward_context_from_input(input, deepseek_v4_flashmla_schedule_cache);
             }
             // Capture must not start with stale Marlin locks from previous
             // warmup/capture attempts. This reset is intentionally outside
@@ -215,7 +149,10 @@ void PagedCompiler::compile() {
             auto shared_output = std::shared_ptr<InfinilmModel::Output>(
                 new InfinilmModel::Output{infinicore::graph::GraphTensor(output.logits)});
 
-            compiled_map_decode_[b] = CompiledResult{std::move(input), std::make_tuple(graph, shared_output)};
+            compiled_map_decode_[b] = CompiledResult{
+                std::move(input),
+                std::move(deepseek_v4_flashmla_schedule_cache),
+                std::make_tuple(graph, shared_output)};
         }
     }
 }
@@ -255,33 +192,25 @@ PagedCompiler::Compiled PagedCompiler::get_compiled(const InfinilmModel::Input &
             graph_block_tables->narrow({{1, 0, block_per_req}})->copy_from(input.block_tables.value());
             graph_input.slot_mapping.value()->copy_from(input.slot_mapping.value());
 
-            const bool dsv4_copied = copy_graph_input_tensor(graph_input.deepseek_v4.swa_indices, input.deepseek_v4.swa_indices)
-                                  && copy_graph_input_tensor(graph_input.deepseek_v4.swa_topk_lengths, input.deepseek_v4.swa_topk_lengths)
-                                  && copy_graph_input_tensor(graph_input.deepseek_v4.c4_indices, input.deepseek_v4.c4_indices)
-                                  && copy_graph_input_tensor(graph_input.deepseek_v4.c4_topk_lengths, input.deepseek_v4.c4_topk_lengths)
-                                  && copy_graph_input_tensor(graph_input.deepseek_v4.c128_indices, input.deepseek_v4.c128_indices)
-                                  && copy_graph_input_tensor(graph_input.deepseek_v4.c128_topk_lengths, input.deepseek_v4.c128_topk_lengths)
-                                  && copy_graph_input_tensor(graph_input.deepseek_v4.raw_out_loc, input.deepseek_v4.raw_out_loc)
-                                  && copy_graph_input_tensor(graph_input.deepseek_v4.page_table, input.deepseek_v4.page_table)
-                                  && copy_graph_input_tensor(graph_input.deepseek_v4.seq_lens_casual, input.deepseek_v4.seq_lens_casual)
-                                  && copy_graph_input_tensor(graph_input.deepseek_v4.positions_casual, input.deepseek_v4.positions_casual)
-                                  && copy_graph_input_tensor(graph_input.deepseek_v4.c4_out_loc, input.deepseek_v4.c4_out_loc)
-                                  && copy_graph_input_tensor(graph_input.deepseek_v4.c4_positions, input.deepseek_v4.c4_positions)
-                                  && copy_graph_input_tensor(graph_input.deepseek_v4.c4_topk_lengths_raw, input.deepseek_v4.c4_topk_lengths_raw)
-                                  && copy_graph_input_tensor(graph_input.deepseek_v4.c4_topk_lengths_clamp1, input.deepseek_v4.c4_topk_lengths_clamp1)
-                                  && copy_graph_input_tensor(graph_input.deepseek_v4.c4_sparse_indices, input.deepseek_v4.c4_sparse_indices)
-                                  && copy_graph_input_tensor(graph_input.deepseek_v4.c4_sparse_topk_lengths, input.deepseek_v4.c4_sparse_topk_lengths)
-                                  && copy_graph_input_tensor(graph_input.deepseek_v4.c128_out_loc, input.deepseek_v4.c128_out_loc)
-                                  && copy_graph_input_tensor(graph_input.deepseek_v4.c128_positions, input.deepseek_v4.c128_positions)
-                                  && copy_graph_input_tensor(graph_input.deepseek_v4.c128_page_indices, input.deepseek_v4.c128_page_indices)
-                                  && copy_graph_input_tensor(graph_input.deepseek_v4.c128_topk_lengths_clamp1, input.deepseek_v4.c128_topk_lengths_clamp1)
-                                  && copy_graph_input_tensor(graph_input.deepseek_v4.c4_compress_write_loc, input.deepseek_v4.c4_compress_write_loc)
-                                  && copy_graph_input_tensor(graph_input.deepseek_v4.c4_compress_extra_loc, input.deepseek_v4.c4_compress_extra_loc)
-                                  && copy_graph_input_tensor(graph_input.deepseek_v4.c4_compress_state_indices, input.deepseek_v4.c4_compress_state_indices)
-                                  && copy_graph_input_tensor(graph_input.deepseek_v4.c128_compress_write_loc, input.deepseek_v4.c128_compress_write_loc)
-                                  && copy_graph_input_tensor(graph_input.deepseek_v4.c128_compress_state_indices, input.deepseek_v4.c128_compress_state_indices);
-            if (!dsv4_copied) {
-                return {nullptr, nullptr};
+            if (model_ && model_->model_type() == "deepseek_v4") {
+                const bool dsv4_copied = copy_graph_input_tensor(graph_input.deepseek_v4.swa_indices, input.deepseek_v4.swa_indices)
+                                      && copy_graph_input_tensor(graph_input.deepseek_v4.swa_topk_lengths, input.deepseek_v4.swa_topk_lengths)
+                                      && copy_graph_input_tensor(graph_input.deepseek_v4.raw_out_loc, input.deepseek_v4.raw_out_loc)
+                                      && copy_graph_input_tensor(graph_input.deepseek_v4.page_table, input.deepseek_v4.page_table)
+                                      && copy_graph_input_tensor(graph_input.deepseek_v4.c4_out_loc, input.deepseek_v4.c4_out_loc)
+                                      && copy_graph_input_tensor(graph_input.deepseek_v4.c4_positions, input.deepseek_v4.c4_positions)
+                                      && copy_graph_input_tensor(graph_input.deepseek_v4.c4_topk_lengths_raw, input.deepseek_v4.c4_topk_lengths_raw)
+                                      && copy_graph_input_tensor(graph_input.deepseek_v4.c4_sparse_topk_lengths, input.deepseek_v4.c4_sparse_topk_lengths)
+                                      && copy_graph_input_tensor(graph_input.deepseek_v4.c128_out_loc, input.deepseek_v4.c128_out_loc)
+                                      && copy_graph_input_tensor(graph_input.deepseek_v4.c128_positions, input.deepseek_v4.c128_positions)
+                                      && copy_graph_input_tensor(graph_input.deepseek_v4.c128_page_indices, input.deepseek_v4.c128_page_indices)
+                                      && copy_graph_input_tensor(graph_input.deepseek_v4.c128_topk_lengths_clamp1, input.deepseek_v4.c128_topk_lengths_clamp1)
+                                      && copy_graph_input_tensor(graph_input.deepseek_v4.c4_compress_write_loc, input.deepseek_v4.c4_compress_write_loc)
+                                      && copy_graph_input_tensor(graph_input.deepseek_v4.c4_compress_extra_loc, input.deepseek_v4.c4_compress_extra_loc)
+                                      && copy_graph_input_tensor(graph_input.deepseek_v4.c128_compress_write_loc, input.deepseek_v4.c128_compress_write_loc);
+                if (!dsv4_copied) {
+                    return {nullptr, nullptr};
+                }
             }
             // CUDA graph replay reuses the same per-layer Marlin workspaces.
             // The graph itself does not contain a workspace reset, so enqueue

@@ -122,7 +122,7 @@ DeepseekV4DecoderLayer::forward(const infinicore::Tensor &positions,
     }
     debug_dump_tensor(hidden_states, layer_idx_, "attn_normed", debug_dump_enabled_);
 
-    hidden_states = attn_->forward(positions, hidden_states); // skip attn_ for test.
+    hidden_states = attn_->forward(positions, hidden_states);
 
     debug_dump_tensor(hidden_states, layer_idx_, "attn_out", debug_dump_enabled_);
     auto attn_posted = use_decode_scratch
@@ -174,7 +174,7 @@ DeepseekV4DecoderLayer::forward(const infinicore::Tensor &positions,
         ffn_out = ffn_->forward(ffn_normed, input_ids);
     }
 
-    // ffn_out = ffn_normed; // skip ffn_ for test.
+    // ffn_out = ffn_normed;
 
     hidden_states = use_decode_scratch
                       ? decode_scratch_.layer_out

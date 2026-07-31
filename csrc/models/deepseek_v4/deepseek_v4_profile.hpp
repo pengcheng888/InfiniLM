@@ -13,6 +13,10 @@ namespace infinilm::models::deepseek_v4::profile {
 
 enum class Event : size_t {
     DecoderLayer = 0,
+    CausalForward,
+    CausalModel,
+    CausalLmHead,
+    CausalLogitsView,
     DecoderAttnHcPre,
     DecoderAttnNorm,
     DecoderAttnHcPost,
@@ -73,6 +77,14 @@ inline const char *event_name(Event event) {
     switch (event) {
     case Event::DecoderLayer:
         return "decoder.layer";
+    case Event::CausalForward:
+        return "causal.forward";
+    case Event::CausalModel:
+        return "causal.model";
+    case Event::CausalLmHead:
+        return "causal.lm_head";
+    case Event::CausalLogitsView:
+        return "causal.logits_view";
     case Event::DecoderAttnHcPre:
         return "decoder.attn_hc_pre";
     case Event::DecoderAttnNorm:

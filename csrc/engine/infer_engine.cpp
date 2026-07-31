@@ -170,19 +170,11 @@ InferEngine::Input::to_model_input(infinicore::Device device) const {
         return {
             to_device_tensor(deepseek_v4.swa_indices),
             to_device_tensor(deepseek_v4.swa_topk_lengths),
-            to_device_tensor(deepseek_v4.c4_indices),
-            to_device_tensor(deepseek_v4.c4_topk_lengths),
-            to_device_tensor(deepseek_v4.c128_indices),
-            to_device_tensor(deepseek_v4.c128_topk_lengths),
             to_device_tensor(deepseek_v4.raw_out_loc),
             to_device_tensor(deepseek_v4.page_table),
-            to_device_tensor(deepseek_v4.seq_lens_casual),
-            to_device_tensor(deepseek_v4.positions_casual),
             to_device_tensor(deepseek_v4.c4_out_loc),
             to_device_tensor(deepseek_v4.c4_positions),
             to_device_tensor(deepseek_v4.c4_topk_lengths_raw),
-            to_device_tensor(deepseek_v4.c4_topk_lengths_clamp1),
-            to_device_tensor(deepseek_v4.c4_sparse_indices),
             to_device_tensor(deepseek_v4.c4_sparse_topk_lengths),
             to_device_tensor(deepseek_v4.c128_out_loc),
             to_device_tensor(deepseek_v4.c128_positions),
@@ -190,9 +182,7 @@ InferEngine::Input::to_model_input(infinicore::Device device) const {
             to_device_tensor(deepseek_v4.c128_topk_lengths_clamp1),
             to_device_tensor(deepseek_v4.c4_compress_write_loc),
             to_device_tensor(deepseek_v4.c4_compress_extra_loc),
-            to_device_tensor(deepseek_v4.c4_compress_state_indices),
             to_device_tensor(deepseek_v4.c128_compress_write_loc),
-            to_device_tensor(deepseek_v4.c128_compress_state_indices),
         };
     };
 
@@ -216,14 +206,17 @@ InferEngine::Input::to_model_input(infinicore::Device device) const {
         visual_token_ranges,
         to_device(target_hidden_states)};
 
-    infinilm::global_state::get_forward_context().attn_metadata = infinilm::global_state::AttentionMetadata(input);
+    auto &forward_context = infinilm::global_state::get_forward_context();
+    forward_context.attn_metadata = infinilm::global_state::AttentionMetadata(input);
+    forward_context.deepseek_v4_attention_metadata = infinilm::global_state::DeepSeekV4AttentionMetadata(input);
+    forward_context.deepseek_v4_flashmla_schedule_cache = infinilm::global_state::DeepSeekV4FlashMLAScheduleCache{};
 
-    infinilm::global_state::get_forward_context().mamba_metadata = {
+    forward_context.mamba_metadata = {
         input.input_offsets,
         input.mamba_init_state_indices,
         input.mamba_final_state_indices};
 
-    global_state::get_forward_context().mm_metadata = {
+    forward_context.mm_metadata = {
         image_req_ids,
         visual_token_ranges};
 

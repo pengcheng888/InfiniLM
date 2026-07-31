@@ -1,8 +1,10 @@
 #pragma once
 
+#include "../../global_state/forward_context.hpp"
 #include "graph_compiler.hpp"
 
 #include <unordered_map>
+#include <vector>
 
 namespace infinilm::engine {
 class PagedCompiler : public GraphCompiler {
@@ -20,6 +22,7 @@ private:
 
     struct CompiledResult {
         InfinilmModel::Input input;
+        infinilm::global_state::DeepSeekV4FlashMLAScheduleCache deepseek_v4_flashmla_schedule_cache;
         Compiled compiled;
     };
 

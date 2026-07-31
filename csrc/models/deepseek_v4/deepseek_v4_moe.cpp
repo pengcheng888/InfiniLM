@@ -7,7 +7,6 @@
 
 #include "infinicore/context/context.hpp"
 #include "infinicore/ops/add.hpp"
-#include "infinicore/ops/cat.hpp"
 #include "infinicore/ops/deepseek_v4_biased_topk.hpp"
 #include "infinicore/ops/deepseek_v4_hash_topk.hpp"
 #include "infinicore/ops/deepseek_v4_linear_bf16_fp32.hpp"
@@ -30,37 +29,6 @@ bool deepseek_v4_dcu_custom_allreduce_(infinicore::Tensor output,
 namespace infinilm::models::deepseek_v4 {
 
 namespace {
-
-bool debug_dump_enabled() {
-    return utils::env_flag_enabled("INFINILM_DSV4_DEBUG_DUMP");
-}
-
-bool moe_allreduce_outplace_enabled() {
-    const std::string backend = utils::env_string_or("INFINILM_DSV4_MOE_ALLREDUCE", "inplace");
-    if (backend == "outplace") {
-        return true;
-    }
-    if (backend == "inplace" || backend == "custom" || backend == "dcu_custom" || backend == "custom_ar") {
-        return false;
-    }
-    throw std::runtime_error("INFINILM_DSV4_MOE_ALLREDUCE must be one of inplace, outplace, custom");
-}
-
-bool moe_custom_allreduce_enabled() {
-    const std::string backend = utils::env_string_or("INFINILM_DSV4_MOE_ALLREDUCE", "inplace");
-    return backend == "custom" || backend == "dcu_custom" || backend == "custom_ar";
-}
-
-bool fused_shared_output_enabled() {
-    const std::string mode = utils::env_string_or("INFINILM_DSV4_FUSED_SHARED_OUTPUT", "auto");
-    if (mode == "auto" || mode == "1" || mode == "true" || mode == "TRUE" || mode == "on" || mode == "ON") {
-        return true;
-    }
-    if (mode == "0" || mode == "false" || mode == "FALSE" || mode == "off" || mode == "OFF") {
-        return false;
-    }
-    throw std::runtime_error("INFINILM_DSV4_FUSED_SHARED_OUTPUT must be one of auto, on, off");
-}
 
 void debug_dump_tensor(const infinicore::Tensor &tensor, size_t layer_idx, const std::string &name, bool enabled) {
     if (!enabled || !tensor) {
@@ -369,10 +337,10 @@ DeepseekV4MoE::DeepseekV4MoE(std::shared_ptr<infinilm::config::ModelConfig> mode
                              size_t layer_idx,
                              const infinicore::Device &device) {
     layer_idx_ = layer_idx;
-    debug_dump_enabled_ = debug_dump_enabled();
-    fused_shared_output_enabled_ = fused_shared_output_enabled();
-    moe_allreduce_outplace_enabled_ = moe_allreduce_outplace_enabled();
-    moe_custom_allreduce_enabled_ = moe_custom_allreduce_enabled();
+    debug_dump_enabled_ = utils::debug_dump_enabled();
+    fused_shared_output_enabled_ = utils::fused_shared_output_enabled();
+    moe_allreduce_outplace_enabled_ = utils::moe_allreduce_outplace_enabled();
+    moe_custom_allreduce_enabled_ = utils::moe_custom_allreduce_enabled();
     const auto &rank_info = infinilm::global_state::get_tensor_model_parallel_rank_info();
     tp_rank_ = rank_info.tp_rank;
     tp_size_ = static_cast<size_t>(rank_info.tp_size);
@@ -409,7 +377,6 @@ infinicore::Tensor DeepseekV4MoE::forward_impl(const infinicore::Tensor &hidden_
         debug_dump_tensor(shared, layer_idx_, "shared", debug_dump_enabled_);
     }
 
-    // const bool fuse_shared_output = fused_shared_output_enabled_ && shared && experts_->supports_fused_shared_output();
     const bool fuse_shared_output = true;
     infinicore::Tensor routed;
     {

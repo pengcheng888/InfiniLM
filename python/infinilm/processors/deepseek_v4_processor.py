@@ -218,34 +218,24 @@ class DeepSeekV4Processor(BasicLLMProcessor):
         swa_topk_lengths = []
         raw_out_loc = []
         page_table = []
-        seq_lens_casual = []
-        positions_casual = []
 
-        c4_indices = []
-        c4_topk_lengths = []
         c4_topk_lengths_raw = []
-        c4_topk_lengths_clamp1 = []
         c4_sparse_topk_lengths = []
         c4_out_loc = []
         c4_positions = []
         c4_compress_write_loc = []
         c4_compress_extra_loc = []
-        c4_compress_state_indices = []
 
-        c128_indices = []
-        c128_topk_lengths = []
+        c128_page_indices = []
         c128_topk_lengths_clamp1 = []
         c128_out_loc = []
         c128_positions = []
         c128_compress_write_loc = []
-        c128_compress_state_indices = []
 
         for block_table, position, slot in query_rows:
             padded_page_table = block_table + [-1] * (max_block_table_len - len(block_table))
             page_table.append(padded_page_table)
             raw_out_loc.append(slot)
-            seq_lens_casual.append(position + 1)
-            positions_casual.append(position)
 
             swa_indices.append(
                 self._dsv4_swa_indices_for_position(
@@ -258,15 +248,12 @@ class DeepSeekV4Processor(BasicLLMProcessor):
             swa_topk_lengths.append(min(position + 1, 128))
             raw_out_loc[-1] = self._dsv4_full_slot_to_swa_slot(raw_out_loc[-1], full_to_swa_block_ids, block_size)
 
-            c4_row, c4_raw_len, c4_clamp1 = self._dsv4_compressed_indices_for_position(
+            _, c4_raw_len, c4_clamp1 = self._dsv4_compressed_indices_for_position(
                 block_table, position, 4, c4_sparse_topk, block_size=block_size
             )
-            c4_indices.append(c4_row)
             c4_topk_lengths_raw.append(c4_raw_len)
-            c4_topk_lengths_clamp1.append(c4_clamp1)
             c4_sparse_topk_lengths.append(min(c4_clamp1, c4_sparse_topk))
-            c4_topk_lengths.append(min(c4_clamp1, c4_sparse_topk))
-            c4_loc, c4_pos, c4_write, c4_prev, c4_state = self._dsv4_compress_locations_for_position(
+            c4_loc, c4_pos, c4_write, c4_prev, _ = self._dsv4_compress_locations_for_position(
                 block_table,
                 slot,
                 position,
@@ -278,15 +265,13 @@ class DeepSeekV4Processor(BasicLLMProcessor):
             c4_positions.append(c4_pos)
             c4_compress_write_loc.append(c4_write)
             c4_compress_extra_loc.append([c4_prev])
-            c4_compress_state_indices.append(c4_state)
 
-            c128_row, c128_raw_len, c128_clamp1 = self._dsv4_compressed_indices_for_position(
+            c128_page_row, _, c128_clamp1 = self._dsv4_compressed_indices_for_position(
                 block_table, position, 128, c128_width, block_size=block_size
             )
-            c128_indices.append(c128_row)
+            c128_page_indices.append(c128_page_row)
             c128_topk_lengths_clamp1.append(c128_clamp1)
-            c128_topk_lengths.append(c128_clamp1)
-            c128_loc, c128_pos, c128_write, _c128_prev, c128_state = self._dsv4_compress_locations_for_position(
+            c128_loc, c128_pos, c128_write, _c128_prev, _ = self._dsv4_compress_locations_for_position(
                 block_table,
                 slot,
                 position,
@@ -297,37 +282,25 @@ class DeepSeekV4Processor(BasicLLMProcessor):
             c128_out_loc.append(c128_loc)
             c128_positions.append(c128_pos)
             c128_compress_write_loc.append(c128_write)
-            c128_compress_state_indices.append(c128_state)
 
         list_done = time.perf_counter()
-        c4_indices_tensor = infinicore.from_list(c4_indices, dtype=infinicore.int32)
-        c128_indices_tensor = infinicore.from_list(c128_indices, dtype=infinicore.int32)
+        c128_page_indices_tensor = infinicore.from_list(c128_page_indices, dtype=infinicore.int32)
         result = {
             "dsv4_swa_indices": infinicore.from_list(swa_indices, dtype=infinicore.int32),
             "dsv4_swa_topk_lengths": infinicore.from_list(swa_topk_lengths, dtype=infinicore.int32),
-            "dsv4_c4_indices": c4_indices_tensor,
-            "dsv4_c4_topk_lengths": infinicore.from_list(c4_topk_lengths, dtype=infinicore.int32),
-            "dsv4_c128_indices": c128_indices_tensor,
-            "dsv4_c128_topk_lengths": infinicore.from_list(c128_topk_lengths, dtype=infinicore.int32),
             "dsv4_raw_out_loc": infinicore.from_list(raw_out_loc, dtype=infinicore.int32),
             "dsv4_page_table": infinicore.from_list(page_table, dtype=infinicore.int32),
-            "dsv4_seq_lens_casual": infinicore.from_list(seq_lens_casual, dtype=infinicore.int32),
-            "dsv4_positions_casual": infinicore.from_list(positions_casual, dtype=infinicore.int32),
             "dsv4_c4_out_loc": infinicore.from_list(c4_out_loc, dtype=infinicore.int32),
             "dsv4_c4_positions": infinicore.from_list(c4_positions, dtype=infinicore.int32),
             "dsv4_c4_topk_lengths_raw": infinicore.from_list(c4_topk_lengths_raw, dtype=infinicore.int32),
-            "dsv4_c4_topk_lengths_clamp1": infinicore.from_list(c4_topk_lengths_clamp1, dtype=infinicore.int32),
-            "dsv4_c4_sparse_indices": c4_indices_tensor,
             "dsv4_c4_sparse_topk_lengths": infinicore.from_list(c4_sparse_topk_lengths, dtype=infinicore.int32),
             "dsv4_c128_out_loc": infinicore.from_list(c128_out_loc, dtype=infinicore.int32),
             "dsv4_c128_positions": infinicore.from_list(c128_positions, dtype=infinicore.int32),
-            "dsv4_c128_page_indices": c128_indices_tensor,
+            "dsv4_c128_page_indices": c128_page_indices_tensor,
             "dsv4_c128_topk_lengths_clamp1": infinicore.from_list(c128_topk_lengths_clamp1, dtype=infinicore.int32),
             "dsv4_c4_compress_write_loc": infinicore.from_list(c4_compress_write_loc, dtype=infinicore.int32),
             "dsv4_c4_compress_extra_loc": infinicore.from_list(c4_compress_extra_loc, dtype=infinicore.int32),
-            "dsv4_c4_compress_state_indices": infinicore.from_list(c4_compress_state_indices, dtype=infinicore.int32),
             "dsv4_c128_compress_write_loc": infinicore.from_list(c128_compress_write_loc, dtype=infinicore.int32),
-            "dsv4_c128_compress_state_indices": infinicore.from_list(c128_compress_state_indices, dtype=infinicore.int32),
         }
         if os.getenv("INFINILM_DSV4_PROCESSOR_PROFILE", "0").lower() in ("1", "true", "yes", "on"):
             print(

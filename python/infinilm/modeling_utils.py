@@ -59,16 +59,13 @@ def _is_internal_moe_packed_weight(key: str) -> bool:
     # InfiniLM registers packed MoE parameters internally. HF checkpoints
     # provide per-expert gate/up/down weights instead, so these packed tensors
     # are expected missing keys during non-strict checkpoint loading.
-    return key.endswith(".mlp.experts.w13_weight") or key.endswith(
-        ".mlp.experts.w2_weight"
-    ) or key.endswith(
-        ".ffn.experts.w13_weight"
-    ) or key.endswith(
-        ".ffn.experts.w13_weight_scale"
-    ) or key.endswith(
-        ".ffn.experts.w2_weight"
-    ) or key.endswith(
-        ".ffn.experts.w2_weight_scale"
+    return (
+        key.endswith(".mlp.experts.w13_weight")
+        or key.endswith(".mlp.experts.w2_weight")
+        or key.endswith(".ffn.experts.w13_weight")
+        or key.endswith(".ffn.experts.w13_weight_scale")
+        or key.endswith(".ffn.experts.w2_weight")
+        or key.endswith(".ffn.experts.w2_weight_scale")
     )
 
 
@@ -753,7 +750,10 @@ def _remap_qwen3_5(state_dict, config):
 
 def _remap_qwen3(state_dict, config=None):
     """Drop non-parameter rotary cache tensors from dense Qwen3 checkpoints."""
-    return drop_keys(state_dict, ["rotary_emb.inv_freq", "rotary_emb.cos_cached", "rotary_emb.sin_cached"])
+    return drop_keys(
+        state_dict,
+        ["rotary_emb.inv_freq", "rotary_emb.cos_cached", "rotary_emb.sin_cached"],
+    )
 
 
 def _remap_deepseek_v4(state_dict, config=None):
@@ -775,6 +775,12 @@ def _remap_deepseek_v4(state_dict, config=None):
             new_key = "model." + key
         else:
             new_key = key
+
+        if ".attn.indexer.compressor." in new_key:
+            new_key = new_key.replace(
+                ".attn.indexer.compressor.",
+                ".attn.indexer.",
+            )
 
         if new_key.endswith(".scale"):
             new_key = new_key.removesuffix(".scale") + ".weight_scale"

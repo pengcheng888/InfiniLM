@@ -2,28 +2,18 @@
 
 #include "../models/infinilm_model.hpp"
 
-#include <stdexcept>
-
 namespace infinilm::global_state {
 
 struct DeepSeekV4AttentionMetadata {
     infinicore::Tensor swa_indices;
     infinicore::Tensor swa_topk_lengths;
-    infinicore::Tensor c4_indices;
-    infinicore::Tensor c4_topk_lengths;
-    infinicore::Tensor c128_indices;
-    infinicore::Tensor c128_topk_lengths;
 
     infinicore::Tensor raw_out_loc;
     infinicore::Tensor page_table;
-    infinicore::Tensor seq_lens_casual;
-    infinicore::Tensor positions_casual;
 
     infinicore::Tensor c4_out_loc;
     infinicore::Tensor c4_positions;
     infinicore::Tensor c4_topk_lengths_raw;
-    infinicore::Tensor c4_topk_lengths_clamp1;
-    infinicore::Tensor c4_sparse_indices;
     infinicore::Tensor c4_sparse_topk_lengths;
 
     infinicore::Tensor c128_out_loc;
@@ -33,53 +23,18 @@ struct DeepSeekV4AttentionMetadata {
 
     infinicore::Tensor c4_compress_write_loc;
     infinicore::Tensor c4_compress_extra_loc;
-    infinicore::Tensor c4_compress_state_indices;
     infinicore::Tensor c128_compress_write_loc;
-    infinicore::Tensor c128_compress_state_indices;
-
-    infinicore::Tensor flashmla_swa_tile_scheduler_metadata;
-    infinicore::Tensor flashmla_swa_num_splits;
-    infinicore::Tensor flashmla_c4_tile_scheduler_metadata;
-    infinicore::Tensor flashmla_c4_num_splits;
-    infinicore::Tensor flashmla_c128_tile_scheduler_metadata;
-    infinicore::Tensor flashmla_c128_num_splits;
-
-    struct FlashMLAScheduleTensors {
-        infinicore::Tensor *tile_scheduler_metadata;
-        infinicore::Tensor *num_splits;
-    };
-
-    FlashMLAScheduleTensors flashmla_schedule_for_compress_ratio(size_t compress_ratio) {
-        if (compress_ratio == 0) {
-            return {&flashmla_swa_tile_scheduler_metadata, &flashmla_swa_num_splits};
-        }
-        if (compress_ratio == 4) {
-            return {&flashmla_c4_tile_scheduler_metadata, &flashmla_c4_num_splits};
-        }
-        if (compress_ratio == 128) {
-            return {&flashmla_c128_tile_scheduler_metadata, &flashmla_c128_num_splits};
-        }
-        throw std::runtime_error("DeepSeekV4AttentionMetadata: invalid FlashMLA compress ratio");
-    }
 
     DeepSeekV4AttentionMetadata() = default;
 
     explicit DeepSeekV4AttentionMetadata(const infinilm::InfinilmModel::Input &input)
         : swa_indices(input.deepseek_v4.swa_indices),
           swa_topk_lengths(input.deepseek_v4.swa_topk_lengths),
-          c4_indices(input.deepseek_v4.c4_indices),
-          c4_topk_lengths(input.deepseek_v4.c4_topk_lengths),
-          c128_indices(input.deepseek_v4.c128_indices),
-          c128_topk_lengths(input.deepseek_v4.c128_topk_lengths),
           raw_out_loc(input.deepseek_v4.raw_out_loc),
           page_table(input.deepseek_v4.page_table),
-          seq_lens_casual(input.deepseek_v4.seq_lens_casual),
-          positions_casual(input.deepseek_v4.positions_casual),
           c4_out_loc(input.deepseek_v4.c4_out_loc),
           c4_positions(input.deepseek_v4.c4_positions),
           c4_topk_lengths_raw(input.deepseek_v4.c4_topk_lengths_raw),
-          c4_topk_lengths_clamp1(input.deepseek_v4.c4_topk_lengths_clamp1),
-          c4_sparse_indices(input.deepseek_v4.c4_sparse_indices),
           c4_sparse_topk_lengths(input.deepseek_v4.c4_sparse_topk_lengths),
           c128_out_loc(input.deepseek_v4.c128_out_loc),
           c128_positions(input.deepseek_v4.c128_positions),
@@ -87,24 +42,18 @@ struct DeepSeekV4AttentionMetadata {
           c128_topk_lengths_clamp1(input.deepseek_v4.c128_topk_lengths_clamp1),
           c4_compress_write_loc(input.deepseek_v4.c4_compress_write_loc),
           c4_compress_extra_loc(input.deepseek_v4.c4_compress_extra_loc),
-          c4_compress_state_indices(input.deepseek_v4.c4_compress_state_indices),
-          c128_compress_write_loc(input.deepseek_v4.c128_compress_write_loc),
-          c128_compress_state_indices(input.deepseek_v4.c128_compress_state_indices),
-          flashmla_swa_tile_scheduler_metadata(tensor_or_empty(input.dsv4_flashmla_swa_tile_scheduler_metadata)),
-          flashmla_swa_num_splits(tensor_or_empty(input.dsv4_flashmla_swa_num_splits)),
-          flashmla_c4_tile_scheduler_metadata(tensor_or_empty(input.dsv4_flashmla_c4_tile_scheduler_metadata)),
-          flashmla_c4_num_splits(tensor_or_empty(input.dsv4_flashmla_c4_num_splits)),
-          flashmla_c128_tile_scheduler_metadata(tensor_or_empty(input.dsv4_flashmla_c128_tile_scheduler_metadata)),
-          flashmla_c128_num_splits(tensor_or_empty(input.dsv4_flashmla_c128_num_splits)) {}
+          c128_compress_write_loc(input.deepseek_v4.c128_compress_write_loc) {}
+};
 
-    bool has_flashmla_indices() const {
-        return swa_indices && swa_topk_lengths && c4_indices && c4_topk_lengths && c128_indices && c128_topk_lengths;
-    }
+struct DeepSeekV4FlashMLAScheduleCache {
+    infinicore::Tensor swa_tile_scheduler_metadata;
+    infinicore::Tensor swa_num_splits;
+    infinicore::Tensor c4_tile_scheduler_metadata;
+    infinicore::Tensor c4_num_splits;
+    infinicore::Tensor c128_tile_scheduler_metadata;
+    infinicore::Tensor c128_num_splits;
 
-private:
-    static infinicore::Tensor tensor_or_empty(const std::optional<infinicore::Tensor> &tensor) {
-        return tensor.has_value() ? tensor.value() : infinicore::Tensor{};
-    }
+    DeepSeekV4FlashMLAScheduleCache() = default;
 };
 
 struct AttentionMetadata {
@@ -120,7 +69,6 @@ struct AttentionMetadata {
     std::optional<infinicore::Tensor> block_tables;
     /// Slot ids for each token `[seq]`. Used for paged cache.
     std::optional<infinicore::Tensor> slot_mapping;
-    DeepSeekV4AttentionMetadata deepseek_v4;
 
     AttentionMetadata() = default;
 
@@ -129,22 +77,19 @@ struct AttentionMetadata {
                       std::optional<infinicore::Tensor> input_offsets,
                       std::optional<infinicore::Tensor> cu_seqlens,
                       std::optional<infinicore::Tensor> block_tables,
-                      std::optional<infinicore::Tensor> slot_mapping,
-                      DeepSeekV4AttentionMetadata deepseek_v4 = {}) : past_sequence_lengths(past_sequence_lengths),
-                                                                      total_sequence_lengths(total_sequence_lengths),
-                                                                      input_offsets(input_offsets),
-                                                                      cu_seqlens(cu_seqlens),
-                                                                      block_tables(block_tables),
-                                                                      slot_mapping(slot_mapping),
-                                                                      deepseek_v4(deepseek_v4) {}
+                      std::optional<infinicore::Tensor> slot_mapping) : past_sequence_lengths(past_sequence_lengths),
+                                                                        total_sequence_lengths(total_sequence_lengths),
+                                                                        input_offsets(input_offsets),
+                                                                        cu_seqlens(cu_seqlens),
+                                                                        block_tables(block_tables),
+                                                                        slot_mapping(slot_mapping) {}
 
     explicit AttentionMetadata(const infinilm::InfinilmModel::Input &input) : AttentionMetadata(input.past_sequence_lengths,
                                                                                                 input.total_sequence_lengths,
                                                                                                 input.input_offsets,
                                                                                                 input.cu_seqlens,
                                                                                                 input.block_tables,
-                                                                                                input.slot_mapping,
-                                                                                                DeepSeekV4AttentionMetadata(input)) {}
+                                                                                                input.slot_mapping) {}
 };
 
 struct DeepSeekV4LayerKVCache {
@@ -174,6 +119,8 @@ struct MambaMetadata {
 
 struct ForwardContext {
     AttentionMetadata attn_metadata;
+    DeepSeekV4AttentionMetadata deepseek_v4_attention_metadata;
+    DeepSeekV4FlashMLAScheduleCache deepseek_v4_flashmla_schedule_cache;
     MambaMetadata mamba_metadata;
     MultiModalMetadata mm_metadata;
     std::vector<infinicore::Tensor> kv_cache_vec;

@@ -15,39 +15,23 @@ struct DeepSeekV4Input {
     infinicore::Tensor swa_indices;
     /// DeepSeek-V4 SWA top-k lengths, shape `[seq]`.
     infinicore::Tensor swa_topk_lengths;
-    /// DeepSeek-V4 C4 compressed FlashMLA indices, shape `[seq, 512]`.
-    infinicore::Tensor c4_indices;
-    /// DeepSeek-V4 C4 compressed top-k lengths, shape `[seq]`.
-    infinicore::Tensor c4_topk_lengths;
-    /// DeepSeek-V4 C128 compressed FlashMLA indices, shape `[seq, 64]`.
-    infinicore::Tensor c128_indices;
-    /// DeepSeek-V4 C128 compressed top-k lengths, shape `[seq]`.
-    infinicore::Tensor c128_topk_lengths;
     /// DeepSeek-V4 raw output cache locations, shape `[seq]`.
     infinicore::Tensor raw_out_loc;
     /// DeepSeek-V4 repeated page table, shape `[seq, max_pages]`.
     infinicore::Tensor page_table;
-    /// DeepSeek-V4 causal sequence lengths per query token, shape `[seq]`.
-    infinicore::Tensor seq_lens_casual;
-    /// DeepSeek-V4 raw positions per query token, shape `[seq]`.
-    infinicore::Tensor positions_casual;
     /// DeepSeek-V4 C4 compressed output locations, shape `[seq]`.
     infinicore::Tensor c4_out_loc;
     /// DeepSeek-V4 C4 compression RoPE positions, shape `[seq]`.
     infinicore::Tensor c4_positions;
     /// DeepSeek-V4 C4 raw compressed lengths, shape `[seq]`.
     infinicore::Tensor c4_topk_lengths_raw;
-    /// DeepSeek-V4 C4 compressed lengths clamped to at least 1, shape `[seq]`.
-    infinicore::Tensor c4_topk_lengths_clamp1;
-    /// DeepSeek-V4 C4 sparse page indices, shape `[seq, 512]`.
-    infinicore::Tensor c4_sparse_indices;
     /// DeepSeek-V4 C4 sparse top-k lengths, shape `[seq]`.
     infinicore::Tensor c4_sparse_topk_lengths;
     /// DeepSeek-V4 C128 compressed output locations, shape `[seq]`.
     infinicore::Tensor c128_out_loc;
     /// DeepSeek-V4 C128 compression RoPE positions, shape `[seq]`.
     infinicore::Tensor c128_positions;
-    /// DeepSeek-V4 C128 page indices, shape `[seq, 64]` in the current adapter.
+    /// DeepSeek-V4 C128 compressed-cache page indices for FlashMLA extra attention, shape `[seq, c128_width]`.
     infinicore::Tensor c128_page_indices;
     /// DeepSeek-V4 C128 top-k lengths clamped to at least 1, shape `[seq]`.
     infinicore::Tensor c128_topk_lengths_clamp1;
@@ -55,12 +39,8 @@ struct DeepSeekV4Input {
     infinicore::Tensor c4_compress_write_loc;
     /// DeepSeek-V4 C4 compressor overlap locations, shape `[seq, 1]`.
     infinicore::Tensor c4_compress_extra_loc;
-    /// DeepSeek-V4 C4 compressor state indices, shape `[seq]`.
-    infinicore::Tensor c4_compress_state_indices;
     /// DeepSeek-V4 C128 compressor write locations, shape `[seq]`.
     infinicore::Tensor c128_compress_write_loc;
-    /// DeepSeek-V4 C128 compressor state indices, shape `[seq]`.
-    infinicore::Tensor c128_compress_state_indices;
 };
 
 class InfinilmModel : public infinicore::nn::Module {
@@ -110,14 +90,6 @@ public:
         std::optional<std::vector<size_t>> visual_token_ranges;
         /// Target model hidden states consumed by draft/MTP models.
         std::optional<infinicore::Tensor> target_hidden_states;
-        /// DeepSeek-V4 FlashMLA graph schedule metadata for SWA/C4/C128 decode paths.
-        /// These fields are graph-compiler owned and are not supplied by Python requests.
-        std::optional<infinicore::Tensor> dsv4_flashmla_swa_tile_scheduler_metadata;
-        std::optional<infinicore::Tensor> dsv4_flashmla_swa_num_splits;
-        std::optional<infinicore::Tensor> dsv4_flashmla_c4_tile_scheduler_metadata;
-        std::optional<infinicore::Tensor> dsv4_flashmla_c4_num_splits;
-        std::optional<infinicore::Tensor> dsv4_flashmla_c128_tile_scheduler_metadata;
-        std::optional<infinicore::Tensor> dsv4_flashmla_c128_num_splits;
     };
 
     struct Output {

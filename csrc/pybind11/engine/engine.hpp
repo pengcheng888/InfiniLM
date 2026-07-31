@@ -134,19 +134,11 @@ inline void bind_infer_engine(py::module &m) {
             py::init([](
                          std::optional<infinicore::Tensor> swa_indices,
                          std::optional<infinicore::Tensor> swa_topk_lengths,
-                         std::optional<infinicore::Tensor> c4_indices,
-                         std::optional<infinicore::Tensor> c4_topk_lengths,
-                         std::optional<infinicore::Tensor> c128_indices,
-                         std::optional<infinicore::Tensor> c128_topk_lengths,
                          std::optional<infinicore::Tensor> raw_out_loc,
                          std::optional<infinicore::Tensor> page_table,
-                         std::optional<infinicore::Tensor> seq_lens_casual,
-                         std::optional<infinicore::Tensor> positions_casual,
                          std::optional<infinicore::Tensor> c4_out_loc,
                          std::optional<infinicore::Tensor> c4_positions,
                          std::optional<infinicore::Tensor> c4_topk_lengths_raw,
-                         std::optional<infinicore::Tensor> c4_topk_lengths_clamp1,
-                         std::optional<infinicore::Tensor> c4_sparse_indices,
                          std::optional<infinicore::Tensor> c4_sparse_topk_lengths,
                          std::optional<infinicore::Tensor> c128_out_loc,
                          std::optional<infinicore::Tensor> c128_positions,
@@ -154,28 +146,18 @@ inline void bind_infer_engine(py::module &m) {
                          std::optional<infinicore::Tensor> c128_topk_lengths_clamp1,
                          std::optional<infinicore::Tensor> c4_compress_write_loc,
                          std::optional<infinicore::Tensor> c4_compress_extra_loc,
-                         std::optional<infinicore::Tensor> c4_compress_state_indices,
-                         std::optional<infinicore::Tensor> c128_compress_write_loc,
-                         std::optional<infinicore::Tensor> c128_compress_state_indices) {
+                         std::optional<infinicore::Tensor> c128_compress_write_loc) {
                 auto tensor_or_empty = [](std::optional<infinicore::Tensor> tensor) {
                     return tensor.has_value() ? std::move(tensor.value()) : infinicore::Tensor{};
                 };
                 return infinilm::DeepSeekV4Input{
                     tensor_or_empty(std::move(swa_indices)),
                     tensor_or_empty(std::move(swa_topk_lengths)),
-                    tensor_or_empty(std::move(c4_indices)),
-                    tensor_or_empty(std::move(c4_topk_lengths)),
-                    tensor_or_empty(std::move(c128_indices)),
-                    tensor_or_empty(std::move(c128_topk_lengths)),
                     tensor_or_empty(std::move(raw_out_loc)),
                     tensor_or_empty(std::move(page_table)),
-                    tensor_or_empty(std::move(seq_lens_casual)),
-                    tensor_or_empty(std::move(positions_casual)),
                     tensor_or_empty(std::move(c4_out_loc)),
                     tensor_or_empty(std::move(c4_positions)),
                     tensor_or_empty(std::move(c4_topk_lengths_raw)),
-                    tensor_or_empty(std::move(c4_topk_lengths_clamp1)),
-                    tensor_or_empty(std::move(c4_sparse_indices)),
                     tensor_or_empty(std::move(c4_sparse_topk_lengths)),
                     tensor_or_empty(std::move(c128_out_loc)),
                     tensor_or_empty(std::move(c128_positions)),
@@ -183,26 +165,16 @@ inline void bind_infer_engine(py::module &m) {
                     tensor_or_empty(std::move(c128_topk_lengths_clamp1)),
                     tensor_or_empty(std::move(c4_compress_write_loc)),
                     tensor_or_empty(std::move(c4_compress_extra_loc)),
-                    tensor_or_empty(std::move(c4_compress_state_indices)),
                     tensor_or_empty(std::move(c128_compress_write_loc)),
-                    tensor_or_empty(std::move(c128_compress_state_indices)),
                 };
             }),
             py::arg("swa_indices") = std::nullopt,
             py::arg("swa_topk_lengths") = std::nullopt,
-            py::arg("c4_indices") = std::nullopt,
-            py::arg("c4_topk_lengths") = std::nullopt,
-            py::arg("c128_indices") = std::nullopt,
-            py::arg("c128_topk_lengths") = std::nullopt,
             py::arg("raw_out_loc") = std::nullopt,
             py::arg("page_table") = std::nullopt,
-            py::arg("seq_lens_casual") = std::nullopt,
-            py::arg("positions_casual") = std::nullopt,
             py::arg("c4_out_loc") = std::nullopt,
             py::arg("c4_positions") = std::nullopt,
             py::arg("c4_topk_lengths_raw") = std::nullopt,
-            py::arg("c4_topk_lengths_clamp1") = std::nullopt,
-            py::arg("c4_sparse_indices") = std::nullopt,
             py::arg("c4_sparse_topk_lengths") = std::nullopt,
             py::arg("c128_out_loc") = std::nullopt,
             py::arg("c128_positions") = std::nullopt,
@@ -210,24 +182,14 @@ inline void bind_infer_engine(py::module &m) {
             py::arg("c128_topk_lengths_clamp1") = std::nullopt,
             py::arg("c4_compress_write_loc") = std::nullopt,
             py::arg("c4_compress_extra_loc") = std::nullopt,
-            py::arg("c4_compress_state_indices") = std::nullopt,
-            py::arg("c128_compress_write_loc") = std::nullopt,
-            py::arg("c128_compress_state_indices") = std::nullopt)
+            py::arg("c128_compress_write_loc") = std::nullopt)
         .def_readwrite("swa_indices", &infinilm::DeepSeekV4Input::swa_indices)
         .def_readwrite("swa_topk_lengths", &infinilm::DeepSeekV4Input::swa_topk_lengths)
-        .def_readwrite("c4_indices", &infinilm::DeepSeekV4Input::c4_indices)
-        .def_readwrite("c4_topk_lengths", &infinilm::DeepSeekV4Input::c4_topk_lengths)
-        .def_readwrite("c128_indices", &infinilm::DeepSeekV4Input::c128_indices)
-        .def_readwrite("c128_topk_lengths", &infinilm::DeepSeekV4Input::c128_topk_lengths)
         .def_readwrite("raw_out_loc", &infinilm::DeepSeekV4Input::raw_out_loc)
         .def_readwrite("page_table", &infinilm::DeepSeekV4Input::page_table)
-        .def_readwrite("seq_lens_casual", &infinilm::DeepSeekV4Input::seq_lens_casual)
-        .def_readwrite("positions_casual", &infinilm::DeepSeekV4Input::positions_casual)
         .def_readwrite("c4_out_loc", &infinilm::DeepSeekV4Input::c4_out_loc)
         .def_readwrite("c4_positions", &infinilm::DeepSeekV4Input::c4_positions)
         .def_readwrite("c4_topk_lengths_raw", &infinilm::DeepSeekV4Input::c4_topk_lengths_raw)
-        .def_readwrite("c4_topk_lengths_clamp1", &infinilm::DeepSeekV4Input::c4_topk_lengths_clamp1)
-        .def_readwrite("c4_sparse_indices", &infinilm::DeepSeekV4Input::c4_sparse_indices)
         .def_readwrite("c4_sparse_topk_lengths", &infinilm::DeepSeekV4Input::c4_sparse_topk_lengths)
         .def_readwrite("c128_out_loc", &infinilm::DeepSeekV4Input::c128_out_loc)
         .def_readwrite("c128_positions", &infinilm::DeepSeekV4Input::c128_positions)
@@ -235,9 +197,7 @@ inline void bind_infer_engine(py::module &m) {
         .def_readwrite("c128_topk_lengths_clamp1", &infinilm::DeepSeekV4Input::c128_topk_lengths_clamp1)
         .def_readwrite("c4_compress_write_loc", &infinilm::DeepSeekV4Input::c4_compress_write_loc)
         .def_readwrite("c4_compress_extra_loc", &infinilm::DeepSeekV4Input::c4_compress_extra_loc)
-        .def_readwrite("c4_compress_state_indices", &infinilm::DeepSeekV4Input::c4_compress_state_indices)
-        .def_readwrite("c128_compress_write_loc", &infinilm::DeepSeekV4Input::c128_compress_write_loc)
-        .def_readwrite("c128_compress_state_indices", &infinilm::DeepSeekV4Input::c128_compress_state_indices);
+        .def_readwrite("c128_compress_write_loc", &infinilm::DeepSeekV4Input::c128_compress_write_loc);
 
     py::class_<InferEngine::Input>(infer_engine, "Input")
         .def(

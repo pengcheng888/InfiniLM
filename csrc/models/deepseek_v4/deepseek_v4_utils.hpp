@@ -50,4 +50,35 @@ inline std::string env_string_or(const char *name, const std::string &fallback) 
     return std::string(value);
 }
 
+inline bool debug_dump_enabled() {
+    return env_flag_enabled("INFINILM_DSV4_DEBUG_DUMP");
+}
+
+inline bool moe_allreduce_outplace_enabled() {
+    const std::string backend = env_string_or("INFINILM_DSV4_MOE_ALLREDUCE", "inplace");
+    if (backend == "outplace") {
+        return true;
+    }
+    if (backend == "inplace" || backend == "custom" || backend == "dcu_custom" || backend == "custom_ar") {
+        return false;
+    }
+    throw std::runtime_error("INFINILM_DSV4_MOE_ALLREDUCE must be one of inplace, outplace, custom");
+}
+
+inline bool moe_custom_allreduce_enabled() {
+    const std::string backend = env_string_or("INFINILM_DSV4_MOE_ALLREDUCE", "inplace");
+    return backend == "custom" || backend == "dcu_custom" || backend == "custom_ar";
+}
+
+inline bool fused_shared_output_enabled() {
+    const std::string mode = env_string_or("INFINILM_DSV4_FUSED_SHARED_OUTPUT", "auto");
+    if (mode == "auto" || mode == "1" || mode == "true" || mode == "TRUE" || mode == "on" || mode == "ON") {
+        return true;
+    }
+    if (mode == "0" || mode == "false" || mode == "FALSE" || mode == "off" || mode == "OFF") {
+        return false;
+    }
+    throw std::runtime_error("INFINILM_DSV4_FUSED_SHARED_OUTPUT must be one of auto, on, off");
+}
+
 } // namespace infinilm::models::deepseek_v4::utils
