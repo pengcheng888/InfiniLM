@@ -2,6 +2,7 @@ import json
 import os
 import sys
 import time
+import uuid
 from collections import OrderedDict
 
 import infinicore
@@ -11,6 +12,7 @@ from infinilm.cache import PagedKVCacheConfig, StaticKVCacheConfig
 from infinilm.distributed import DistConfig
 from infinilm.infer_engine import GenerationConfig, InferEngine
 from infinilm.llm.llm import LLM
+from infinilm.llm.request import InferenceRequest
 from infinilm.llm.sampling_params import SamplingParams
 from infinilm.modeling_utils import load_model_state_dict_by_file
 from infinilm.moe_config import configure_moe_ep_backend
@@ -93,6 +95,13 @@ def read_json_file(file_path):
     """Load and return JSON content from file_path."""
     with open(file_path, "r") as file:
         return json.load(file)
+
+
+def read_model_type(model_path: str) -> str:
+    config = read_json_file(os.path.join(os.path.expanduser(model_path), "config.json"))
+    if "text_config" in config:
+        config = config["text_config"]
+    return config.get("model_type", "")
 
 
 def get_test_cases(
@@ -210,6 +219,8 @@ class TestModel:
         self.use_mla = use_mla
         self.weight_load_mode = weight_load_mode
         self.skip_load = skip_load
+        self.is_deepseek_v4 = read_model_type(model_path) == "deepseek_v4"
+        self.llm = None
 
         if draft_model_path is not None:
             self.processor = AutoInfinilmProcessor.from_pretrained(model_path)
@@ -221,6 +232,42 @@ class TestModel:
             )
             self.input_ids_list = [self.tokenizer.encode(input_content)]
             self.model = None
+            return
+
+        if self.is_deepseek_v4:
+            if cache_config is None:
+                raise RuntimeError("DeepSeek V4 bench requires --enable-paged-attn")
+
+            self.processor = AutoInfinilmProcessor.from_pretrained(model_path)
+            self.tokenizer = self.processor.get_tokenizer()
+            input_content = self.processor.apply_chat_template(
+                conversation=[{"role": "user", "content": prompt}],
+                add_generation_prompt=True,
+                tokenize=False,
+            )
+            self.input_ids_list = [self.tokenizer.encode(input_content)]
+            self.model = None
+            self.llm = LLM(
+                model_path=self.model_path,
+                device=self.device_str,
+                tensor_parallel_size=self.tp,
+                moe_ep_backend=moe_ep_backend,
+                moe_ep_size=moe_ep_size,
+                cache_type="paged",
+                max_batch_size=cfg._bench_max_batch_size,
+                max_tokens=cfg._bench_max_output_len,
+                num_blocks=cache_config.num_blocks(),
+                block_size=cache_config.block_size(),
+                temperature=cfg.temperature,
+                top_p=cfg.top_p,
+                top_k=cfg.top_k,
+                enable_graph=self.enable_graph,
+                attn_backend=self.attn_backend,
+                use_mla=self.use_mla,
+                weight_load_mode=self.weight_load_mode,
+                skip_load=self.skip_load,
+                skip_legacy_moe=cfg.skip_legacy_moe,
+            )
             return
 
         # ---------------------------------------------------------------------------- #
@@ -282,6 +329,45 @@ class TestModel:
         self.weight_load_mode = weight_load_mode
         self.skip_load = skip_load
 
+    def _run_llm_from_input_ids(
+        self,
+        input_ids: list[int],
+        batch_size: int,
+        output_len: int,
+        top_k: int,
+        top_p: float,
+        temperature: float,
+    ):
+        if self.llm is None:
+            raise RuntimeError("LLM engine is not initialized")
+
+        prompt_text = self.tokenizer.decode(input_ids, skip_special_tokens=False)
+        sampling_params = SamplingParams(
+            max_tokens=output_len,
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
+            ignore_eos=True,
+        )
+        requests = []
+        for _ in range(batch_size):
+            req = InferenceRequest(
+                request_id=f"bench-{uuid.uuid4().hex}",
+                prompt=prompt_text,
+                prompt_token_ids=list(input_ids),
+                sampling_params=sampling_params,
+                eos_token_ids=[],
+            )
+            requests.append(req)
+            self.llm.engine.add_request(req)
+
+        while not all(req.is_finished() for req in requests):
+            did_work, _ = self.llm.engine.step()
+            if not did_work and not all(req.is_finished() for req in requests):
+                raise RuntimeError("LLM engine made no progress during benchmark")
+
+        return [req.to_request_output() for req in requests]
+
     def run(
         self,
         batch_size: int,
@@ -325,8 +411,31 @@ class TestModel:
                 use_tqdm=False,
             )
             t2 = time.time()
-            if cfg.verbose and not skip_load:
+            if cfg.verbose and not self.skip_load:
                 if output_len <= 256:
+                    for output in outputs:
+                        print(output.outputs[0].text)
+                else:
+                    print(
+                        f"[bench] output text omitted because output_len={output_len} > 256."
+                    )
+            print(f"total_time: {round((t2 - t1) * 1000, 2)} ms")
+            return
+
+        if self.is_deepseek_v4:
+            t1 = time.time()
+            print("=================== start generate ====================")
+            outputs = self._run_llm_from_input_ids(
+                input_ids,
+                batch_size,
+                output_len,
+                top_k,
+                top_p,
+                temperature,
+            )
+            t2 = time.time()
+            if cfg.verbose and not self.skip_load:
+                if output_len <= 256*1000:
                     for output in outputs:
                         print(output.outputs[0].text)
                 else:
@@ -357,7 +466,7 @@ class TestModel:
         numpy_output_ids = np.array(
             [output_id.to_numpy()[0] for output_id in output_ids]
         )
-        if not skip_load:
+        if not self.skip_load:
             print(self.tokenizer.decode(numpy_output_ids, skip_special_tokens=True))
 
         print(
@@ -406,9 +515,15 @@ if __name__ == "__main__":
     cases_dict = get_test_cases(
         model_path, batch_size, input_len, output_len, use_mla=cfg.use_mla
     )
+    is_deepseek_v4 = read_model_type(model_path) == "deepseek_v4"
+    cfg._bench_max_batch_size = max(batch_size)
+    cfg._bench_max_output_len = max(output_len)
     # -------------------------------------------------------- #
     #             测试
     # -------------------------------------------------------- #
+    if is_deepseek_v4 and not enable_paged_attn:
+        raise RuntimeError("DeepSeek V4 bench requires --enable-paged-attn")
+
     if enable_paged_attn:
         paged_kv_block_size = _PAGED_KV_BLOCK_SIZE
         max_num_blocks = max(
@@ -421,6 +536,8 @@ if __name__ == "__main__":
                 for _, c_ in cases_dict.items()
             ]
         )
+        if is_deepseek_v4:
+            max_num_blocks = max(max_num_blocks * 10, 10)
         cache_config = PagedKVCacheConfig(max_num_blocks, paged_kv_block_size)
     else:
         cache_config = None
@@ -448,58 +565,64 @@ if __name__ == "__main__":
     #                                Warmup
     # ---------------------------------------------------------------------------- #
     if cfg.warmup:
-        warmup_steps = 1
-
         # warmup cache capacity
-        warmup_case = next(iter(cases_dict.values()))
         warmup_batch = 1 # warmup_case["batch_size"]
         warmup_input_len = 12 #warmup_case["input_len"]
         warmup_decode_len = 5
-
-        if enable_paged_attn:
-            warmup_num_blocks = (
-                (warmup_input_len + warmup_decode_len + paged_kv_block_size - 1)
-                // paged_kv_block_size
-            ) * warmup_batch
-            warmup_cache_config = PagedKVCacheConfig(
-                warmup_num_blocks, paged_kv_block_size
-            )
-        else:
-            warmup_cache_config = StaticKVCacheConfig(
-                max_batch_size=warmup_batch,
-                max_cache_len=warmup_input_len + warmup_decode_len,
-            )
-
-        test.model.reset_cache(warmup_cache_config)
-
-        warmup_prompt_ids = repeat_prompt(test.input_ids_list[0], warmup_input_len)
-        warmup_ids = [warmup_prompt_ids] * warmup_batch
-
-        input_ids_infini = infinicore.from_list(warmup_ids, dtype=infinicore.int64)
 
         print(
             f"\033[93m[warmup] batch={warmup_batch}, input_len={warmup_input_len}, "
             f"will prefill + {warmup_decode_len} decode steps\033[0m"
         )
         print("=================== warmup start ===================")
-
-        for _ in range(warmup_steps):
-            _ = test.model.generate(
-                input_ids_infini,
-                GenerationConfig(
-                    max_new_tokens=warmup_decode_len,  # decode kernel warmup
-                    temperature=cfg.temperature,
-                    top_k=cfg.top_k,
-                    top_p=cfg.top_p,
-                    stop_on_eos=False,
-                ),
-                _measure_and_log_time=False,
+        if test.is_deepseek_v4:
+            test.run(
+                batch_size=warmup_batch,
+                input_len=warmup_input_len,
+                output_len=warmup_decode_len,
+                top_k=cfg.top_k,
+                top_p=cfg.top_p,
+                temperature=cfg.temperature,
             )
+        else:
+            warmup_steps = 1
+            if enable_paged_attn:
+                warmup_num_blocks = (
+                    (warmup_input_len + warmup_decode_len + paged_kv_block_size - 1)
+                    // paged_kv_block_size
+                ) * warmup_batch
+                warmup_cache_config = PagedKVCacheConfig(
+                    warmup_num_blocks, paged_kv_block_size
+                )
+            else:
+                warmup_cache_config = StaticKVCacheConfig(
+                    max_batch_size=warmup_batch,
+                    max_cache_len=warmup_input_len + warmup_decode_len,
+                )
+
+            test.model.reset_cache(warmup_cache_config)
+
+            warmup_prompt_ids = repeat_prompt(test.input_ids_list[0], warmup_input_len)
+            warmup_ids = [warmup_prompt_ids] * warmup_batch
+            input_ids_infini = infinicore.from_list(warmup_ids, dtype=infinicore.int64)
+
+            for _ in range(warmup_steps):
+                _ = test.model.generate(
+                    input_ids_infini,
+                    GenerationConfig(
+                        max_new_tokens=warmup_decode_len,  # decode kernel warmup
+                        temperature=cfg.temperature,
+                        top_k=cfg.top_k,
+                        top_p=cfg.top_p,
+                        stop_on_eos=False,
+                    ),
+                    _measure_and_log_time=False,
+                )
 
         print("=================== warmup done ====================")
 
         # reset cache back to benchmark config
-        if cache_config is not None:
+        if cache_config is not None and not test.is_deepseek_v4:
             test.model.reset_cache(cache_config)
 
     # ---------------------------------------------------------------------------- #

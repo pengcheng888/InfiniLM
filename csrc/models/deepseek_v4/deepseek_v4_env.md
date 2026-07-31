@@ -73,6 +73,14 @@ InfiniCore distributed allreduce 还支持一个更底层的 DeepSeek V4/Hygon f
 
 测试注意：开启该变量后，FlashMLA sparse attention 的测试应使用容差比较或可用性 smoke test，不应要求与 FlashMLA kernel `torch.equal` 位级一致。
 
+## InfiniCore FlashMLA 兼容开关
+
+| 环境变量 | 默认值 | 可选值 | 读取位置 | 作用 |
+| --- | --- | --- | --- | --- |
+| `INFINICORE_DSV4_FLASHMLA_FORCE_NAIVE` | 关闭 | `1`, `true`, `TRUE`, `on`, `ON` | InfiniCore `deepseek_v4_flashmla_sparse_attention_*` 首次调用 | 强制 DeepSeek V4 FlashMLA sparse attention 不加载 `flash_mla` SO，改走 ATen naive/reference 计算。用于目标容器没有可用 `flash_mla` wheel/SO、或 FlashMLA 符号不兼容时验证服务可用性；该路径性能很慢，不应用作性能测试口径。开启后 `with_metadata` 返回空 schedule，带 graph 的 decode 不会复用 FlashMLA metadata 路径。 |
+
+测试注意：开启该变量后，FlashMLA sparse attention 的测试应使用容差比较或可用性 smoke test，不应要求与 FlashMLA kernel `torch.equal` 位级一致。
+
 
 ## Marlin GEMM 调参覆盖
 
