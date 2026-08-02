@@ -2,6 +2,7 @@
 
 #include "../../config/model_config.hpp"
 #include "../../layers/linear/linear.hpp"
+#include "deepseek_v4_c4_indexer.hpp"
 #include "deepseek_v4_compressor.hpp"
 #include "deepseek_v4_rms_norm.hpp"
 #include "infinicore/nn/module.hpp"
@@ -89,6 +90,19 @@ private:
                                           const infinicore::Shape &shape,
                                           infinicore::DataType dtype,
                                           const infinicore::Device &device) const;
+    infinicore::Tensor compute_sparse_attention(
+        const infinicore::Tensor &q,
+        size_t seq_len,
+        infinicore::DataType output_dtype,
+        const infinicore::Device &device,
+        const infinicore::Tensor &swa_cache_raw,
+        const infinicore::Tensor &swa_indices,
+        const infinicore::Tensor &swa_topk_lengths,
+        std::optional<infinicore::Tensor> extra_raw_cache,
+        std::optional<infinicore::Tensor> extra_indices,
+        std::optional<infinicore::Tensor> extra_topk_lengths,
+        int extra_page_size,
+        infinilm::global_state::DeepSeekV4FlashMLAScheduleCache &flashmla_schedule_cache) const;
     void validate_forward_metadata_and_cache(
         const infinilm::global_state::ForwardContext &forward_context) const;
 
@@ -111,7 +125,7 @@ private:
     mutable std::vector<infinicore::Tensor> flashmla_lse_workspaces_;
     mutable std::vector<infinicore::Tensor> flashmla_lse_accum_workspaces_;
     mutable std::vector<infinicore::Tensor> flashmla_o_accum_workspaces_;
-    mutable bool flashmla_out_workspace_disabled_{false};
+    mutable bool flashmla_out_workspace_enabled_{true};
 
     size_t layer_idx_;
     size_t hidden_size_;
