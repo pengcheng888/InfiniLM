@@ -76,7 +76,17 @@ class DeepSeekV4Processor(BasicLLMProcessor):
         )
         base_ms = (time.perf_counter() - start) * 1000.0
         meta_start = time.perf_counter()
-        metadata = self._build_dsv4_attention_metadata(scheduler_output)
+        use_cpp_metadata = os.getenv("INFINILM_DSV4_METADATA_CPP", "1").lower() not in (
+            "0",
+            "false",
+            "no",
+            "off",
+        )
+        metadata = (
+            self._build_dsv4_attention_metadata_cpp(result, scheduler_output)
+            if use_cpp_metadata
+            else self._build_dsv4_attention_metadata(scheduler_output)
+        )
         meta_ms = (time.perf_counter() - meta_start) * 1000.0
         result.update(metadata)
         if profile:
@@ -89,6 +99,42 @@ class DeepSeekV4Processor(BasicLLMProcessor):
                 flush=True,
             )
         return result
+
+    def _build_dsv4_attention_metadata_cpp(self, base_inputs, scheduler_output) -> dict:
+        from infinilm.lib import _infinilm
+
+        def unwrap_tensor(tensor):
+            return getattr(tensor, "_underlying", tensor) if tensor is not None else None
+
+        full_to_swa_block_ids = getattr(
+            scheduler_output, "dsv4_full_to_swa_block_ids", None
+        )
+        block_size = getattr(scheduler_output, "dsv4_swa_block_size", 256) or 256
+        metadata = _infinilm.build_deepseek_v4_attention_metadata(
+            unwrap_tensor(base_inputs["block_tables"]),
+            unwrap_tensor(base_inputs["slot_mapping"]),
+            unwrap_tensor(base_inputs["position_ids"]),
+            unwrap_tensor(base_inputs["input_offsets"]),
+            full_to_swa_block_ids,
+            block_size,
+        )
+        return {
+            "dsv4_swa_indices": metadata.swa_indices,
+            "dsv4_swa_topk_lengths": metadata.swa_topk_lengths,
+            "dsv4_raw_out_loc": metadata.raw_out_loc,
+            "dsv4_page_table": metadata.page_table,
+            "dsv4_c4_out_loc": metadata.c4_out_loc,
+            "dsv4_c4_positions": metadata.c4_positions,
+            "dsv4_c4_topk_lengths_raw": metadata.c4_topk_lengths_raw,
+            "dsv4_c4_sparse_topk_lengths": metadata.c4_sparse_topk_lengths,
+            "dsv4_c128_out_loc": metadata.c128_out_loc,
+            "dsv4_c128_positions": metadata.c128_positions,
+            "dsv4_c128_page_indices": metadata.c128_page_indices,
+            "dsv4_c128_topk_lengths_clamp1": metadata.c128_topk_lengths_clamp1,
+            "dsv4_c4_compress_write_loc": metadata.c4_compress_write_loc,
+            "dsv4_c4_compress_extra_loc": metadata.c4_compress_extra_loc,
+            "dsv4_c128_compress_write_loc": metadata.c128_compress_write_loc,
+        }
 
     @staticmethod
     def _dsv4_slot_for_position(block_table, position: int, block_size: int = 256):

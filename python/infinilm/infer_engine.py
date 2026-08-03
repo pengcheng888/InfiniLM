@@ -404,68 +404,28 @@ class InferEngine(_infinilm.InferEngine):
             slot_mapping = (
                 slot_mapping._underlying if slot_mapping is not None else None
             )
-            dsv4_swa_indices = (
-                dsv4_swa_indices._underlying if dsv4_swa_indices is not None else None
+
+            def unwrap_tensor(tensor):
+                return getattr(tensor, "_underlying", tensor) if tensor is not None else None
+
+            dsv4_swa_indices = unwrap_tensor(dsv4_swa_indices)
+            dsv4_swa_topk_lengths = unwrap_tensor(dsv4_swa_topk_lengths)
+            dsv4_raw_out_loc = unwrap_tensor(dsv4_raw_out_loc)
+            dsv4_page_table = unwrap_tensor(dsv4_page_table)
+            dsv4_c4_out_loc = unwrap_tensor(dsv4_c4_out_loc)
+            dsv4_c4_positions = unwrap_tensor(dsv4_c4_positions)
+            dsv4_c4_topk_lengths_raw = unwrap_tensor(dsv4_c4_topk_lengths_raw)
+            dsv4_c4_sparse_topk_lengths = unwrap_tensor(dsv4_c4_sparse_topk_lengths)
+            dsv4_c128_out_loc = unwrap_tensor(dsv4_c128_out_loc)
+            dsv4_c128_positions = unwrap_tensor(dsv4_c128_positions)
+            dsv4_c128_page_indices = unwrap_tensor(dsv4_c128_page_indices)
+            dsv4_c128_topk_lengths_clamp1 = unwrap_tensor(
+                dsv4_c128_topk_lengths_clamp1
             )
-            dsv4_swa_topk_lengths = (
-                dsv4_swa_topk_lengths._underlying
-                if dsv4_swa_topk_lengths is not None
-                else None
-            )
-            dsv4_raw_out_loc = (
-                dsv4_raw_out_loc._underlying if dsv4_raw_out_loc is not None else None
-            )
-            dsv4_page_table = (
-                dsv4_page_table._underlying if dsv4_page_table is not None else None
-            )
-            dsv4_c4_out_loc = (
-                dsv4_c4_out_loc._underlying if dsv4_c4_out_loc is not None else None
-            )
-            dsv4_c4_positions = (
-                dsv4_c4_positions._underlying if dsv4_c4_positions is not None else None
-            )
-            dsv4_c4_topk_lengths_raw = (
-                dsv4_c4_topk_lengths_raw._underlying
-                if dsv4_c4_topk_lengths_raw is not None
-                else None
-            )
-            dsv4_c4_sparse_topk_lengths = (
-                dsv4_c4_sparse_topk_lengths._underlying
-                if dsv4_c4_sparse_topk_lengths is not None
-                else None
-            )
-            dsv4_c128_out_loc = (
-                dsv4_c128_out_loc._underlying if dsv4_c128_out_loc is not None else None
-            )
-            dsv4_c128_positions = (
-                dsv4_c128_positions._underlying
-                if dsv4_c128_positions is not None
-                else None
-            )
-            dsv4_c128_page_indices = (
-                dsv4_c128_page_indices._underlying
-                if dsv4_c128_page_indices is not None
-                else None
-            )
-            dsv4_c128_topk_lengths_clamp1 = (
-                dsv4_c128_topk_lengths_clamp1._underlying
-                if dsv4_c128_topk_lengths_clamp1 is not None
-                else None
-            )
-            dsv4_c4_compress_write_loc = (
-                dsv4_c4_compress_write_loc._underlying
-                if dsv4_c4_compress_write_loc is not None
-                else None
-            )
-            dsv4_c4_compress_extra_loc = (
-                dsv4_c4_compress_extra_loc._underlying
-                if dsv4_c4_compress_extra_loc is not None
-                else None
-            )
-            dsv4_c128_compress_write_loc = (
-                dsv4_c128_compress_write_loc._underlying
-                if dsv4_c128_compress_write_loc is not None
-                else None
+            dsv4_c4_compress_write_loc = unwrap_tensor(dsv4_c4_compress_write_loc)
+            dsv4_c4_compress_extra_loc = unwrap_tensor(dsv4_c4_compress_extra_loc)
+            dsv4_c128_compress_write_loc = unwrap_tensor(
+                dsv4_c128_compress_write_loc
             )
             mamba_init_state_indices = (
                 mamba_init_state_indices._underlying

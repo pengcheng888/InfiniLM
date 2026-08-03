@@ -1,4 +1,5 @@
 #include "../../debug_utils/hooks.hpp"
+#include "../../engine/deepseek_v4_metadata.hpp"
 #include "../../engine/infer_engine.hpp"
 #include "infinicore/tensor.hpp"
 #include <pybind11/pybind11.h>
@@ -198,6 +199,16 @@ inline void bind_infer_engine(py::module &m) {
         .def_readwrite("c4_compress_write_loc", &infinilm::DeepSeekV4Input::c4_compress_write_loc)
         .def_readwrite("c4_compress_extra_loc", &infinilm::DeepSeekV4Input::c4_compress_extra_loc)
         .def_readwrite("c128_compress_write_loc", &infinilm::DeepSeekV4Input::c128_compress_write_loc);
+
+    m.def("build_deepseek_v4_attention_metadata",
+          &build_deepseek_v4_attention_metadata,
+          py::arg("block_tables"),
+          py::arg("slot_mapping"),
+          py::arg("position_ids"),
+          py::arg("input_offsets"),
+          py::arg("full_to_swa_block_ids") = std::nullopt,
+          py::arg("block_size") = 256,
+          "Build DeepSeek-V4 attention metadata tensors from base paged-attention inputs.");
 
     py::class_<InferEngine::Input>(infer_engine, "Input")
         .def(
