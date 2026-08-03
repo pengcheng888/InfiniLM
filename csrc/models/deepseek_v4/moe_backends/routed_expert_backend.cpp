@@ -202,13 +202,13 @@ infinicore::Tensor forward_fused_experts_int8_marlin(const RoutedExpertContext &
             {hidden_states->size(0), ctx.hidden_size},
             hidden_states->dtype(),
             hidden_states->device());
-        contiguous_hidden->copy_from(hidden_states);
+        // contiguous_hidden->copy_from(hidden_states);
     }
     {
         profile::ScopedTimer timer(profile::Event::MoeExpertsFusedCall, hidden_states->size(0));
         infinicore::op::deepseek_v4_fused_experts_impl_int8_marlin_(
             contiguous_hidden,
-            contiguous_hidden,
+            hidden_states,
             ctx.w13_weight_marlin,
             ctx.w2_weight_marlin,
             topk_weights,
