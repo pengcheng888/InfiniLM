@@ -4,6 +4,7 @@
 #include "deepseek_v4_attention.hpp"
 #include "deepseek_v4_moe.hpp"
 #include "deepseek_v4_rms_norm.hpp"
+#include "deepseek_v4_scratch.hpp"
 #include "infinicore/nn/module.hpp"
 #include "infinicore/tensor.hpp"
 
@@ -11,23 +12,6 @@
 #include <tuple>
 
 namespace infinilm::models::deepseek_v4 {
-
-struct DeepseekV4DecoderLayerScratch {
-    infinicore::Tensor attn_in;
-    infinicore::Tensor attn_post;
-    infinicore::Tensor attn_comb;
-    infinicore::Tensor attn_posted;
-    infinicore::Tensor ffn_in;
-    infinicore::Tensor ffn_post;
-    infinicore::Tensor ffn_comb;
-    infinicore::Tensor layer_out;
-
-    void ensure_decode(size_t hidden_size,
-                       size_t hc_mult,
-                       infinicore::DataType dtype,
-                       const infinicore::Device &device);
-    bool ready() const;
-};
 
 class DeepseekV4DecoderLayer : public infinicore::nn::Module {
 public:
@@ -70,7 +54,7 @@ private:
     int hc_sinkhorn_iters_{20};
     size_t compress_ratio_{0};
     bool debug_dump_enabled_{false};
-    DeepseekV4DecoderLayerScratch decode_scratch_;
+    static thread_local DeepseekV4DecoderLayerSharedScratch shared_scratch_;
 };
 
 } // namespace infinilm::models::deepseek_v4

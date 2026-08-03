@@ -28,6 +28,9 @@ bool deepseek_v4_dcu_custom_allreduce_(infinicore::Tensor output,
 
 namespace infinilm::models::deepseek_v4 {
 
+thread_local DeepseekV4SharedExpertScratch DeepseekV4SharedExperts::shared_scratch_;
+thread_local DeepseekV4RoutedExpertScratch DeepseekV4PackedExperts::shared_scratch_;
+
 namespace {
 
 void debug_dump_tensor(const infinicore::Tensor &tensor, size_t layer_idx, const std::string &name, bool enabled) {
@@ -112,6 +115,8 @@ DeepseekV4MoEGate::forward(const infinicore::Tensor &hidden_states,
 DeepseekV4SharedExperts::DeepseekV4SharedExperts(std::shared_ptr<infinilm::config::ModelConfig> model_config,
                                                  const infinicore::Device &device) {
     const auto dtype = model_config->get_dtype();
+    dtype_ = dtype;
+    device_ = device;
     const auto quantization_method = model_config->get_quantization_method();
     const size_t hidden_size = model_config->get<size_t>("hidden_size");
     const size_t intermediate_size = model_config->get<size_t>("moe_intermediate_size") * model_config->get_or<size_t>("n_shared_experts", 1);
@@ -121,6 +126,7 @@ DeepseekV4SharedExperts::DeepseekV4SharedExperts(std::shared_ptr<infinilm::confi
     if (tp_size == 0 || intermediate_size % tp_size != 0) {
         throw std::runtime_error("infinilm::models::deepseek_v4::DeepseekV4SharedExperts: intermediate_size must be divisible by tp_size");
     }
+    intermediate_size_per_partition_ = intermediate_size / tp_size;
 
     auto register_fn = [this](const std::string &name, infinicore::nn::Parameter param) {
         this->register_parameter(name, std::move(param));
@@ -141,12 +147,13 @@ DeepseekV4SharedExperts::DeepseekV4SharedExperts(std::shared_ptr<infinilm::confi
 }
 
 infinicore::Tensor DeepseekV4SharedExperts::forward(infinicore::Tensor hidden_states) const {
-    auto gate_up = gate_up_proj_->forward(hidden_states);
-    const auto last_dim = gate_up->ndim() - 1;
-    const auto intermediate_size = gate_up->size(last_dim) / 2;
-    auto activated = scratch_.activated(
-        gate_up->size(0),
-        intermediate_size,
+    auto gate_up = shared_scratch_.get_gate_up(
+        {hidden_states->size(0), intermediate_size_per_partition_ * 2},
+        hidden_states->dtype(),
+        hidden_states->device());
+    gate_up_proj_->forward_(gate_up, hidden_states);
+    auto activated = shared_scratch_.get_activated(
+        {hidden_states->size(0), intermediate_size_per_partition_},
         gate_up->dtype(),
         gate_up->device());
     infinicore::op::deepseek_v4_silu_and_mul_(activated, gate_up);
@@ -156,6 +163,7 @@ infinicore::Tensor DeepseekV4SharedExperts::forward(infinicore::Tensor hidden_st
 void DeepseekV4SharedExperts::process_weights_after_loading() {
     gate_up_proj_->process_weights_after_loading();
     w2_->process_weights_after_loading();
+    shared_scratch_.preallocate_scratch(intermediate_size_per_partition_, dtype_, device_);
 }
 
 void DeepseekV4SharedExperts::reset_runtime_state() const {
@@ -165,6 +173,8 @@ void DeepseekV4SharedExperts::reset_runtime_state() const {
 
 DeepseekV4PackedExperts::DeepseekV4PackedExperts(std::shared_ptr<infinilm::config::ModelConfig> model_config,
                                                  const infinicore::Device &device) {
+    dtype_ = model_config->get_dtype();
+    device_ = device;
     num_experts_ = model_config->get_or_alias<size_t>("n_routed_experts", "num_experts", 0);
     hidden_size_ = model_config->get<size_t>("hidden_size");
     intermediate_size_ = model_config->get<size_t>("moe_intermediate_size");
@@ -253,6 +263,7 @@ DeepseekV4PackedExperts::DeepseekV4PackedExperts(std::shared_ptr<infinilm::confi
 }
 
 void DeepseekV4PackedExperts::process_weights_after_loading() {
+    shared_scratch_.preallocate_scratch(hidden_size_, dtype_, device_);
     if (!moe_backends::requires_marlin_repack(routed_expert_backend_.backend) || marlin_only_weights_) {
         return;
     }
@@ -322,7 +333,7 @@ infinicore::Tensor DeepseekV4PackedExperts::forward(const infinicore::Tensor &hi
     return moe_backends::forward_routed_experts(
         routed_expert_backend_,
         make_backend_context(),
-        scratch_,
+        shared_scratch_,
         hidden_states,
         topk_weights,
         topk_indices,

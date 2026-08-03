@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../deepseek_v4_moe_scratch.hpp"
+#include "../deepseek_v4_scratch.hpp"
 #include "infinicore/tensor.hpp"
 
 #include <optional>

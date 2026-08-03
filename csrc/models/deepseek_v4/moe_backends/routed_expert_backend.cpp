@@ -48,7 +48,10 @@ infinicore::Tensor forward_naive(const RoutedExpertContext &ctx,
     if (!ctx.w13_weight || !ctx.w2_weight) {
         throw std::runtime_error("DeepseekV4 routed expert naive backend requires original packed weights, but they were released after Marlin repack");
     }
-    auto output = scratch.output(hidden_states->size(0), ctx.hidden_size, hidden_states->dtype(), hidden_states->device());
+    auto output = scratch.get_output(
+        {hidden_states->size(0), ctx.hidden_size},
+        hidden_states->dtype(),
+        hidden_states->device());
     infinicore::op::deepseek_v4_moe_w8a8_(
         output,
         hidden_states,
@@ -195,7 +198,10 @@ infinicore::Tensor forward_fused_experts_int8_marlin(const RoutedExpertContext &
     infinicore::Tensor contiguous_hidden;
     {
         profile::ScopedTimer timer(profile::Event::MoeExpertsContiguous, hidden_states->size(0));
-        contiguous_hidden = scratch.contiguous_hidden(hidden_states->size(0), ctx.hidden_size, hidden_states->dtype(), hidden_states->device());
+        contiguous_hidden = scratch.get_contiguous_hidden(
+            {hidden_states->size(0), ctx.hidden_size},
+            hidden_states->dtype(),
+            hidden_states->device());
         contiguous_hidden->copy_from(hidden_states);
     }
     {

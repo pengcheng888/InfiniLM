@@ -22,27 +22,7 @@ void debug_dump_tensor(const infinicore::Tensor &tensor, size_t layer_idx, const
 
 } // namespace
 
-void DeepseekV4DecoderLayerScratch::ensure_decode(size_t hidden_size,
-                                                  size_t hc_mult,
-                                                  infinicore::DataType dtype,
-                                                  const infinicore::Device &device) {
-    if (attn_in && attn_in->size(1) == hidden_size && attn_in->dtype() == dtype && attn_in->device() == device) {
-        return;
-    }
-
-    attn_in = infinicore::Tensor::empty({1, hidden_size}, dtype, device);
-    attn_post = infinicore::Tensor::empty({1, hc_mult}, infinicore::DataType::F32, device);
-    attn_comb = infinicore::Tensor::empty({1, hc_mult, hc_mult}, infinicore::DataType::F32, device);
-    attn_posted = infinicore::Tensor::empty({1, hc_mult, hidden_size}, dtype, device);
-    ffn_in = infinicore::Tensor::empty({1, hidden_size}, dtype, device);
-    ffn_post = infinicore::Tensor::empty({1, hc_mult}, infinicore::DataType::F32, device);
-    ffn_comb = infinicore::Tensor::empty({1, hc_mult, hc_mult}, infinicore::DataType::F32, device);
-    layer_out = infinicore::Tensor::empty({1, hc_mult, hidden_size}, dtype, device);
-}
-
-bool DeepseekV4DecoderLayerScratch::ready() const {
-    return static_cast<bool>(attn_in);
-}
+thread_local DeepseekV4DecoderLayerSharedScratch DeepseekV4DecoderLayer::shared_scratch_;
 
 DeepseekV4DecoderLayer::DeepseekV4DecoderLayer(std::shared_ptr<infinilm::config::ModelConfig> model_config,
                                                size_t layer_idx,
@@ -86,21 +66,20 @@ DeepseekV4DecoderLayer::forward(const infinicore::Tensor &positions,
     if (hidden_states->ndim() != 3) {
         throw std::runtime_error("infinilm::models::deepseek_v4::DeepseekV4DecoderLayer::forward expects hidden_states [tokens, hc, hidden]");
     }
-    const size_t token_count = hidden_states->size(0);
+    const size_t token_count = hidden_states->size(0); // [tokens, hc, hidden]
     profile::ScopedLayerContext layer_context(profile::layer_type_from_compress_ratio(compress_ratio_));
     profile::ScopedTimer layer_timer(profile::Event::DecoderLayer, token_count);
     debug_dump_tensor(hidden_states, layer_idx_, "layer_input", debug_dump_enabled_);
     residual = hidden_states;
-    const bool use_decode_scratch = token_count == 1 && decode_scratch_.ready();
-    auto attn_in = use_decode_scratch
-                     ? decode_scratch_.attn_in
-                     : infinicore::Tensor::empty({hidden_states->size(0), hidden_size_}, hidden_states->dtype(), hidden_states->device());
-    auto attn_post = use_decode_scratch
-                       ? decode_scratch_.attn_post
-                       : infinicore::Tensor::empty({hidden_states->size(0), hc_mult_}, infinicore::DataType::F32, hidden_states->device());
-    auto attn_comb = use_decode_scratch
-                       ? decode_scratch_.attn_comb
-                       : infinicore::Tensor::empty({hidden_states->size(0), hc_mult_, hc_mult_}, infinicore::DataType::F32, hidden_states->device());
+    auto attn_in = shared_scratch_.get_attn_in({token_count, hidden_size_},
+                                               hidden_states->dtype(),
+                                               hidden_states->device());
+    auto attn_post = shared_scratch_.get_attn_post({token_count, hc_mult_},
+                                                   infinicore::DataType::F32,
+                                                   hidden_states->device());
+    auto attn_comb = shared_scratch_.get_attn_comb({token_count, hc_mult_, hc_mult_},
+                                                   infinicore::DataType::F32,
+                                                   hidden_states->device());
     {
         profile::ScopedTimer timer(profile::Event::DecoderAttnHcPre, token_count);
         infinicore::op::deepseek_v4_mhc_pre_(
@@ -127,9 +106,9 @@ DeepseekV4DecoderLayer::forward(const infinicore::Tensor &positions,
     hidden_states = attn_->forward(positions, hidden_states);
 
     debug_dump_tensor(hidden_states, layer_idx_, "attn_out", debug_dump_enabled_);
-    auto attn_posted = use_decode_scratch
-                         ? decode_scratch_.attn_posted
-                         : infinicore::Tensor::empty(residual->shape(), residual->dtype(), residual->device());
+    auto attn_posted = infinicore::Tensor::empty(residual->shape(),
+                                                 residual->dtype(),
+                                                 residual->device());
     {
         profile::ScopedTimer timer(profile::Event::DecoderAttnHcPost, token_count);
         infinicore::op::deepseek_v4_mhc_post_(attn_posted, hidden_states, residual, attn_post, attn_comb);
@@ -137,15 +116,15 @@ DeepseekV4DecoderLayer::forward(const infinicore::Tensor &positions,
     debug_dump_tensor(attn_posted, layer_idx_, "attn_posted", debug_dump_enabled_);
 
     residual = attn_posted;
-    auto ffn_in = use_decode_scratch
-                    ? decode_scratch_.ffn_in
-                    : infinicore::Tensor::empty({attn_posted->size(0), hidden_size_}, attn_posted->dtype(), attn_posted->device());
-    auto ffn_post = use_decode_scratch
-                      ? decode_scratch_.ffn_post
-                      : infinicore::Tensor::empty({attn_posted->size(0), hc_mult_}, infinicore::DataType::F32, attn_posted->device());
-    auto ffn_comb = use_decode_scratch
-                      ? decode_scratch_.ffn_comb
-                      : infinicore::Tensor::empty({attn_posted->size(0), hc_mult_, hc_mult_}, infinicore::DataType::F32, attn_posted->device());
+    auto ffn_in = shared_scratch_.get_ffn_in({token_count, hidden_size_},
+                                             attn_posted->dtype(),
+                                             attn_posted->device());
+    auto ffn_post = shared_scratch_.get_ffn_post({token_count, hc_mult_},
+                                                 infinicore::DataType::F32,
+                                                 attn_posted->device());
+    auto ffn_comb = shared_scratch_.get_ffn_comb({token_count, hc_mult_, hc_mult_},
+                                                 infinicore::DataType::F32,
+                                                 attn_posted->device());
     {
         profile::ScopedTimer timer(profile::Event::DecoderFfnHcPre, token_count);
         infinicore::op::deepseek_v4_mhc_pre_(
@@ -178,9 +157,9 @@ DeepseekV4DecoderLayer::forward(const infinicore::Tensor &positions,
 
     // ffn_out = ffn_normed;
 
-    hidden_states = use_decode_scratch
-                      ? decode_scratch_.layer_out
-                      : infinicore::Tensor::empty(residual->shape(), residual->dtype(), residual->device());
+    hidden_states = infinicore::Tensor::empty(residual->shape(),
+                                              residual->dtype(),
+                                              residual->device());
     {
         profile::ScopedTimer timer(profile::Event::DecoderFfnHcPost, token_count);
         infinicore::op::deepseek_v4_mhc_post_(hidden_states, ffn_out, residual, ffn_post, ffn_comb);
@@ -200,7 +179,7 @@ infinicore::Tensor DeepseekV4DecoderLayer::forward(const infinicore::Tensor &pos
 void DeepseekV4DecoderLayer::process_weights_after_loading() {
     attn_->process_weights_after_loading();
     ffn_->process_weights_after_loading();
-    decode_scratch_.ensure_decode(hidden_size_, hc_mult_, dtype_, device_);
+    shared_scratch_.preallocate_scratch(hidden_size_, hc_mult_, dtype_, device_);
 }
 
 void DeepseekV4DecoderLayer::reset_runtime_state() const {

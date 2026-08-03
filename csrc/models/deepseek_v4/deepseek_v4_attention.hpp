@@ -5,6 +5,7 @@
 #include "deepseek_v4_c4_indexer.hpp"
 #include "deepseek_v4_compressor.hpp"
 #include "deepseek_v4_rms_norm.hpp"
+#include "deepseek_v4_scratch.hpp"
 #include "infinicore/nn/module.hpp"
 #include "infinicore/tensor.hpp"
 
@@ -50,6 +51,7 @@ public:
         if (indexer_) {
             indexer_->process_weights_after_loading();
         }
+        attention_scratch_.preallocate_attn_out(num_local_attention_heads_, head_dim_, dtype_, device_);
     }
 
     void reset_runtime_state() const override {
@@ -80,14 +82,10 @@ private:
     void cache_flashmla_schedule_metadata(
         infinilm::global_state::DeepSeekV4FlashMLAScheduleCache &schedule_cache,
         const infinicore::op::DeepseekV4FlashMLASparseAttentionSchedule &flashmla_schedule) const;
-    infinicore::Tensor flashmla_workspace(std::vector<infinicore::Tensor> &cache,
-                                          const infinicore::Shape &shape,
-                                          infinicore::DataType dtype,
-                                          const infinicore::Device &device) const;
-    infinicore::Tensor compute_sparse_attention(
+    void compute_sparse_attention(
+        infinicore::Tensor attn_out,
         const infinicore::Tensor &q,
         size_t seq_len,
-        infinicore::DataType output_dtype,
         const infinicore::Device &device,
         const infinicore::Tensor &swa_cache_raw,
         const infinicore::Tensor &swa_indices,
@@ -112,12 +110,11 @@ private:
     INFINICORE_NN_PARAMETER(attn_sink);
 
     infinicore::DataType dtype_;
+    infinicore::Device device_;
     infinicore::Tensor rope_freqs_cis_;
     infinicore::Tensor attn_sink_for_flash_;
-    mutable infinicore::Tensor attn_out_workspace_;
-    mutable std::vector<infinicore::Tensor> flashmla_lse_workspaces_;
-    mutable std::vector<infinicore::Tensor> flashmla_lse_accum_workspaces_;
-    mutable std::vector<infinicore::Tensor> flashmla_o_accum_workspaces_;
+    static thread_local DeepseekV4AttentionScratch attention_scratch_;
+    static thread_local DeepseekV4MLAScratch mla_scratch_;
     mutable bool flashmla_out_workspace_enabled_{true};
 
     size_t layer_idx_;

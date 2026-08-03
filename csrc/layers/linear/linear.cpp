@@ -81,6 +81,10 @@ infinicore::Tensor Linear::forward(infinicore::Tensor &input) const {
     return BaseLinear::forward(input);
 }
 
+void Linear::forward_(infinicore::Tensor output, infinicore::Tensor &input) const {
+    BaseLinear::forward_(output, input);
+}
+
 std::string Linear::extra_repr() const {
     return "Linear(in_features=" + std::to_string(in_features_) + ", out_features=" + std::to_string(out_features_) + ", bias=" + (has_bias_ ? "true" : "false") + ", dtype=" + std::to_string(static_cast<int>(dtype_)) + ")";
 }
@@ -111,6 +115,10 @@ ColumnParallelLinear::ColumnParallelLinear(size_t in_features, size_t out_featur
 
 infinicore::Tensor ColumnParallelLinear::forward(infinicore::Tensor &input) const {
     return BaseLinear::forward(input);
+}
+
+void ColumnParallelLinear::forward_(infinicore::Tensor output, infinicore::Tensor &input) const {
+    BaseLinear::forward_(output, input);
 }
 
 std::string ColumnParallelLinear::extra_repr() const {
@@ -174,6 +182,40 @@ infinicore::Tensor RowParallelLinear::forward(infinicore::Tensor &input) const {
         }
     }
     return output;
+}
+
+void RowParallelLinear::forward_(infinicore::Tensor output, infinicore::Tensor &input) const {
+    BaseLinear::forward_(output, input);
+
+    if ((tp_size_ > 1) && (communicator_ != nullptr)) {
+        if (row_parallel_allreduce_profile_enabled()) {
+            static std::atomic<size_t> log_count{0};
+            const size_t seq = log_count.fetch_add(1, std::memory_order_relaxed);
+            const bool should_log = seq < row_parallel_allreduce_profile_limit();
+            const auto t0 = std::chrono::steady_clock::now();
+            infinicore::context::syncStream();
+            const auto t1 = std::chrono::steady_clock::now();
+            infinicore::op::distributed::allreduce_(output, output, INFINICCL_SUM, communicator_);
+            const auto t2 = std::chrono::steady_clock::now();
+            infinicore::context::syncStream();
+            const auto t3 = std::chrono::steady_clock::now();
+            if (should_log) {
+                spdlog::info(
+                    "[INFINILM_ROW_PARALLEL_ALLREDUCE_PROFILE] seq={} tp_rank={} device={} shape={} numel={} bytes={} pre_sync_ms={:.6f} call_host_ms={:.6f} post_sync_ms={:.6f}",
+                    seq,
+                    tp_rank_,
+                    output->device().getIndex(),
+                    shape_to_string(output->shape()),
+                    output->numel(),
+                    output->nbytes(),
+                    elapsed_ms(t0, t1),
+                    elapsed_ms(t1, t2),
+                    elapsed_ms(t2, t3));
+            }
+        } else {
+            infinicore::op::distributed::allreduce_(output, output, INFINICCL_SUM, communicator_);
+        }
+    }
 }
 
 std::string RowParallelLinear::extra_repr() const {

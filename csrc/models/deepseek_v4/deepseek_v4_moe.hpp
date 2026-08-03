@@ -2,7 +2,7 @@
 
 #include "../../config/model_config.hpp"
 #include "../../layers/linear/linear.hpp"
-#include "deepseek_v4_moe_scratch.hpp"
+#include "deepseek_v4_scratch.hpp"
 #include "infinicore/nn/module.hpp"
 #include "infinicore/tensor.hpp"
 #include "moe_backends/routed_expert_backend.hpp"
@@ -49,7 +49,10 @@ public:
 private:
     std::shared_ptr<infinilm::layers::linear::GateUpParallelLinear> gate_up_proj_;
     std::shared_ptr<infinilm::layers::linear::RowParallelLinear> w2_;
-    mutable DeepseekV4SharedExpertScratch scratch_;
+    static thread_local DeepseekV4SharedExpertScratch shared_scratch_;
+    size_t intermediate_size_per_partition_{0};
+    infinicore::DataType dtype_{infinicore::DataType::BF16};
+    infinicore::Device device_;
 };
 
 class DeepseekV4PackedExperts : public infinicore::nn::Module {
@@ -90,7 +93,9 @@ private:
     moe_backends::MarlinGemmOverride marlin_gemm_override_;
     mutable infinicore::Tensor w13_weight_marlin_;
     mutable infinicore::Tensor w2_weight_marlin_;
-    mutable DeepseekV4RoutedExpertScratch scratch_;
+    static thread_local DeepseekV4RoutedExpertScratch shared_scratch_;
+    infinicore::DataType dtype_{infinicore::DataType::BF16};
+    infinicore::Device device_;
     bool marlin_only_weights_{false};
 };
 
