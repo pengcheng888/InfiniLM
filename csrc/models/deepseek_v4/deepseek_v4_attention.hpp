@@ -44,14 +44,11 @@ public:
         wq_b_->process_weights_after_loading();
         wo_a_->process_weights_after_loading();
         wo_b_->process_weights_after_loading();
-        if (csa_compressor_) {
-            csa_compressor_->process_weights_after_loading();
+        if (compressor_) {
+            compressor_->process_weights_after_loading();
         }
         if (indexer_) {
             indexer_->process_weights_after_loading();
-        }
-        if (hca_compressor_) {
-            hca_compressor_->process_weights_after_loading();
         }
     }
 
@@ -61,14 +58,11 @@ public:
         wq_b_->reset_runtime_state();
         wo_a_->reset_runtime_state();
         wo_b_->reset_runtime_state();
-        if (csa_compressor_) {
-            csa_compressor_->reset_runtime_state();
+        if (compressor_) {
+            compressor_->reset_runtime_state();
         }
         if (indexer_) {
             indexer_->reset_runtime_state();
-        }
-        if (hca_compressor_) {
-            hca_compressor_->reset_runtime_state();
         }
     }
 
@@ -113,9 +107,8 @@ private:
     INFINICORE_NN_MODULE(DeepseekV4RMSNorm, kv_norm);
     std::shared_ptr<infinilm::layers::linear::ColumnParallelLinear> wo_a_;
     std::shared_ptr<infinilm::layers::linear::RowParallelLinear> wo_b_;
-    std::shared_ptr<DeepseekV4CSACompressor> csa_compressor_;
+    std::shared_ptr<DeepseekV4Compressor> compressor_;
     INFINICORE_NN_MODULE(DeepseekV4C4Indexer, indexer);
-    std::shared_ptr<DeepseekV4HCACompressor> hca_compressor_;
     INFINICORE_NN_PARAMETER(attn_sink);
 
     infinicore::DataType dtype_;

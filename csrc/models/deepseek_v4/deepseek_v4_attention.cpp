@@ -117,10 +117,10 @@ DeepseekV4Attention::DeepseekV4Attention(std::shared_ptr<infinilm::config::Model
     const auto compress_ratios = model_config->get<std::vector<size_t>>("compress_ratios");
     compress_ratio_ = layer_idx_ < compress_ratios.size() ? compress_ratios[layer_idx_] : 0;
     if (compress_ratio_ == 4) {
-        csa_compressor_ = this->register_module<DeepseekV4CSACompressor>("compressor", model_config, head_dim_, device);
+        compressor_ = this->register_module<DeepseekV4Compressor>("compressor", model_config, head_dim_, compress_ratio_, device);
         INFINICORE_NN_MODULE_INIT(indexer, model_config, device);
     } else if (compress_ratio_ == 128) {
-        hca_compressor_ = this->register_module<DeepseekV4HCACompressor>("compressor", model_config, head_dim_, device);
+        compressor_ = this->register_module<DeepseekV4Compressor>("compressor", model_config, head_dim_, compress_ratio_, device);
     } else if (compress_ratio_ != 0) {
         throw std::runtime_error("infinilm::models::deepseek_v4::DeepseekV4Attention: unsupported compress_ratio");
     }
@@ -289,23 +289,23 @@ infinicore::Tensor DeepseekV4Attention::compute_sparse_attention(
     if (has_flashmla_schedule && flashmla_out_workspace_enabled_) {
         profile::ScopedTimer timer(profile::Event::AttentionFlashMLA, seq_len);
         const auto num_sm_parts = flashmla_tile_scheduler_metadata_opt.value()->size(0);
-        infinicore::Tensor lse;
-        infinicore::Tensor lse_accum;
-        infinicore::Tensor o_accum;
+        infinicore::Tensor flashmla_lse_workspace;
+        infinicore::Tensor flashmla_lse_accum_workspace;
+        infinicore::Tensor flashmla_o_accum_workspace;
         {
             profile::ScopedTimer sub_timer(profile::Event::AttentionFlashMLAWorkspace, seq_len);
-            lse = flashmla_workspace(flashmla_lse_workspaces_,
-                                     infinicore::Shape{seq_len, num_local_attention_heads_},
-                                     infinicore::DataType::F32,
-                                     device);
-            lse_accum = flashmla_workspace(flashmla_lse_accum_workspaces_,
-                                           infinicore::Shape{seq_len + num_sm_parts, num_local_attention_heads_},
-                                           infinicore::DataType::F32,
-                                           device);
-            o_accum = flashmla_workspace(flashmla_o_accum_workspaces_,
-                                         infinicore::Shape{seq_len + num_sm_parts, num_local_attention_heads_, head_dim_},
-                                         infinicore::DataType::F32,
-                                         device);
+            flashmla_lse_workspace = flashmla_workspace(flashmla_lse_workspaces_,
+                                                        infinicore::Shape{seq_len, num_local_attention_heads_},
+                                                        infinicore::DataType::F32,
+                                                        device);
+            flashmla_lse_accum_workspace = flashmla_workspace(flashmla_lse_accum_workspaces_,
+                                                              infinicore::Shape{seq_len + num_sm_parts, num_local_attention_heads_},
+                                                              infinicore::DataType::F32,
+                                                              device);
+            flashmla_o_accum_workspace = flashmla_workspace(flashmla_o_accum_workspaces_,
+                                                            infinicore::Shape{seq_len + num_sm_parts, num_local_attention_heads_, head_dim_},
+                                                            infinicore::DataType::F32,
+                                                            device);
         }
         try {
             profile::ScopedTimer sub_timer(profile::Event::AttentionFlashMLAOutWorkspaceCall, seq_len);
@@ -315,9 +315,9 @@ infinicore::Tensor DeepseekV4Attention::compute_sparse_attention(
                                                                                  swa_topk_lengths,
                                                                                  attn_sink_for_flash_,
                                                                                  attn_out,
-                                                                                 lse,
-                                                                                 lse_accum,
-                                                                                 o_accum,
+                                                                                 flashmla_lse_workspace,
+                                                                                 flashmla_lse_accum_workspace,
+                                                                                 flashmla_o_accum_workspace,
                                                                                  flashmla_tile_scheduler_metadata_opt.value(),
                                                                                  flashmla_num_splits_opt.value(),
                                                                                  flashmla_softmax_scale_,
@@ -402,14 +402,14 @@ void DeepseekV4Attention::validate_forward_metadata_and_cache(
     if (compress_ratio_ == 0) {
         ;
     } else if (compress_ratio_ == 4) {
-        if (!csa_compressor_ || !indexer_ || !layer_cache.c4_cache_raw || !layer_cache.compressor_state || !dsv4_metadata.c4_out_loc || !dsv4_metadata.c4_positions || !dsv4_metadata.c4_topk_lengths_raw || !dsv4_metadata.c4_sparse_topk_lengths || !dsv4_metadata.c4_compress_write_loc || !dsv4_metadata.c4_compress_extra_loc || !dsv4_metadata.page_table) {
+        if (!compressor_ || !indexer_ || !layer_cache.c4_cache_raw || !layer_cache.compressor_state || !dsv4_metadata.c4_out_loc || !dsv4_metadata.c4_positions || !dsv4_metadata.c4_topk_lengths_raw || !dsv4_metadata.c4_sparse_topk_lengths || !dsv4_metadata.c4_compress_write_loc || !dsv4_metadata.c4_compress_extra_loc || !dsv4_metadata.page_table) {
             throw std::runtime_error("DeepseekV4Attention::forward requires C4 compressor/cache/state/metadata for compressed layer");
         }
         if (!layer_cache.c4_indexer_cache_raw || !layer_cache.indexer_compressor_state) {
             throw std::runtime_error("DeepseekV4Attention::forward requires C4 indexer/cache/state for compressed C4 layer");
         }
     } else if (compress_ratio_ == 128) {
-        if (!hca_compressor_ || !layer_cache.c128_cache_raw || !layer_cache.compressor_state || !dsv4_metadata.c128_out_loc || !dsv4_metadata.c128_positions || !dsv4_metadata.c128_page_indices || !dsv4_metadata.c128_topk_lengths_clamp1 || !dsv4_metadata.c128_compress_write_loc) {
+        if (!compressor_ || !layer_cache.c128_cache_raw || !layer_cache.compressor_state || !dsv4_metadata.c128_out_loc || !dsv4_metadata.c128_positions || !dsv4_metadata.c128_page_indices || !dsv4_metadata.c128_topk_lengths_clamp1 || !dsv4_metadata.c128_compress_write_loc) {
             throw std::runtime_error("DeepseekV4Attention::forward requires C128 compressor/cache/state/metadata for compressed layer");
         }
 
@@ -520,16 +520,16 @@ infinicore::Tensor DeepseekV4Attention::forward(const infinicore::Tensor &positi
         const auto &c4_positions = dsv4_metadata.c4_positions;
         const auto &c4_write_loc = dsv4_metadata.c4_compress_write_loc;
         const auto &c4_extra_loc = dsv4_metadata.c4_compress_extra_loc;
-        csa_compressor_->forward(hidden_states,
-                                 pos_ids,
-                                 seq_len,
-                                 rope_freqs_cis_,
-                                 layer_cache.compressor_state,
-                                 layer_cache.c4_cache_raw,
-                                 c4_out_loc,
-                                 c4_positions,
-                                 c4_write_loc,
-                                 c4_extra_loc);
+        compressor_->forward(hidden_states,
+                             pos_ids,
+                             seq_len,
+                             rope_freqs_cis_,
+                             layer_cache.compressor_state,
+                             layer_cache.c4_cache_raw,
+                             c4_out_loc,
+                             c4_positions,
+                             c4_write_loc,
+                             c4_extra_loc);
         infinicore::Tensor c4_sparse_indices;
         {
             profile::ScopedTimer timer(profile::Event::AttentionC4SparseAlloc, seq_len);
@@ -563,15 +563,16 @@ infinicore::Tensor DeepseekV4Attention::forward(const infinicore::Tensor &positi
         const auto &c128_positions = dsv4_metadata.c128_positions;
         const auto &c128_write_loc = dsv4_metadata.c128_compress_write_loc;
 
-        hca_compressor_->forward(hidden_states,
-                                 pos_ids,
-                                 seq_len,
-                                 rope_freqs_cis_,
-                                 layer_cache.compressor_state,
-                                 layer_cache.c128_cache_raw,
-                                 c128_out_loc,
-                                 c128_positions,
-                                 c128_write_loc);
+        compressor_->forward(hidden_states,
+                             pos_ids,
+                             seq_len,
+                             rope_freqs_cis_,
+                             layer_cache.compressor_state,
+                             layer_cache.c128_cache_raw,
+                             c128_out_loc,
+                             c128_positions,
+                             c128_write_loc,
+                             std::nullopt);
 
         extra_raw_cache = layer_cache.c128_cache_raw;
         extra_indices = dsv4_metadata.c128_page_indices;
@@ -598,6 +599,7 @@ infinicore::Tensor DeepseekV4Attention::forward(const infinicore::Tensor &positi
 
     {
         profile::ScopedTimer timer(profile::Event::AttentionOutRope, seq_len);
+        // attn_out是 [seq_len, num_local_attention_heads_, head_dim_]
         auto out_rope = attn_out->narrow({{2, head_dim_ - qk_rope_head_dim_, qk_rope_head_dim_}});
         apply_rope_(pos_ids, out_rope, std::nullopt, true);
     }
@@ -606,9 +608,14 @@ infinicore::Tensor DeepseekV4Attention::forward(const infinicore::Tensor &positi
     infinicore::Tensor wo_a_out;
     {
         profile::ScopedTimer timer(profile::Event::AttentionWoA, seq_len);
+        //  [seq_len, num_local_attention_heads_ * head_dim_ / o_groups_]
+        // =>  [seq_len, o_groups_ * o_lora_rank_ ]
         wo_a_out = wo_a_->forward(wo_a_in);
     }
     {
+
+        // [seq_len, o_groups_ * o_lora_rank_ ]
+        //  => [seq_len, hidden_size_ ]
         profile::ScopedTimer timer(profile::Event::AttentionWoB, seq_len);
         return wo_b_->forward(wo_a_out);
     }
