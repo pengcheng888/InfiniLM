@@ -190,6 +190,44 @@ void DeepseekV4Attention::cache_flashmla_schedule_metadata(
     flashmla_metadata.have_initialized = flashmla_metadata.tile_scheduler_metadata && flashmla_metadata.num_splits;
 }
 
+void DeepseekV4Attention::refresh_flashmla_schedule_metadata(
+    infinilm::global_state::FlashMLASchedMeta &flashmla_metadata,
+    const infinicore::Tensor &indices,
+    const infinicore::Tensor &topk_lengths,
+    std::optional<infinicore::Tensor> extra_indices,
+    std::optional<infinicore::Tensor> extra_topk_lengths) const {
+    if (!flashmla_metadata.tile_scheduler_metadata || !flashmla_metadata.num_splits) {
+        throw std::runtime_error("DeepseekV4Attention: graph FlashMLA schedule tensors must be preallocated");
+    }
+    if (!indices || indices->ndim() < 2) {
+        throw std::runtime_error("DeepseekV4Attention: FlashMLA indices must be a 2D tensor");
+    }
+    if (!topk_lengths) {
+        throw std::runtime_error("DeepseekV4Attention: FlashMLA topk_lengths must not be empty");
+    }
+
+    const int topk = static_cast<int>(indices->size(indices->ndim() - 1));
+    int extra_topk = -1;
+    if (extra_topk_lengths.has_value() && extra_topk_lengths.value()) {
+        if (!extra_indices.has_value() || !extra_indices.value() || extra_indices.value()->ndim() < 2) {
+            throw std::runtime_error("DeepseekV4Attention: FlashMLA extra_indices must be a 2D tensor when extra_topk_lengths is set");
+        }
+        const auto &extra_indices_tensor = extra_indices.value();
+        extra_topk = static_cast<int>(extra_indices_tensor->size(extra_indices_tensor->ndim() - 1));
+    } else {
+        extra_topk_lengths = std::nullopt;
+    }
+
+    infinicore::op::deepseek_v4_flashmla_sparse_attention_metadata_(flashmla_metadata.tile_scheduler_metadata,
+                                                                    flashmla_metadata.num_splits,
+                                                                    topk_lengths,
+                                                                    topk,
+                                                                    extra_topk_lengths,
+                                                                    extra_topk);
+    flashmla_metadata.have_initialized = true;
+    flashmla_metadata.graph_refresh_recorded = true;
+}
+
 void DeepseekV4Attention::compute_sparse_attention(
     infinicore::Tensor attn_out,
     const infinicore::Tensor &q, // [tokens, num_attention_heads , head_dim]
@@ -212,6 +250,13 @@ void DeepseekV4Attention::compute_sparse_attention(
     {
         profile::ScopedTimer timer(profile::Event::AttentionFlashMLASchedule, seq_len);
         flashmla_metadata = &dsv4_metadata.get_flashmla_metadata(compress_ratio_);
+        if (infinicore::context::isGraphRecording() && !flashmla_metadata->graph_refresh_recorded) {
+            refresh_flashmla_schedule_metadata(*flashmla_metadata,
+                                               swa_indices,
+                                               swa_topk_lengths,
+                                               extra_indices,
+                                               extra_topk_lengths);
+        }
         if (flashmla_metadata->tile_scheduler_metadata) {
             flashmla_tile_scheduler_metadata_opt = flashmla_metadata->tile_scheduler_metadata;
         }

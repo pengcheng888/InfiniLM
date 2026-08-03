@@ -78,6 +78,12 @@ private:
     void cache_flashmla_schedule_metadata(
         infinilm::global_state::FlashMLASchedMeta &flashmla_metadata,
         const infinicore::op::DeepseekV4FlashMLASparseAttentionSchedule &flashmla_schedule) const;
+    void refresh_flashmla_schedule_metadata(
+        infinilm::global_state::FlashMLASchedMeta &flashmla_metadata,
+        const infinicore::Tensor &indices,
+        const infinicore::Tensor &topk_lengths,
+        std::optional<infinicore::Tensor> extra_indices,
+        std::optional<infinicore::Tensor> extra_topk_lengths) const;
     void compute_sparse_attention(
         infinicore::Tensor attn_out,
         const infinicore::Tensor &q,

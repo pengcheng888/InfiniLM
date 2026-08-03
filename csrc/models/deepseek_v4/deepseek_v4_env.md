@@ -71,6 +71,12 @@ InfiniCore distributed allreduce 还支持一个更底层的 DeepSeek V4/Hygon f
 
 测试注意：开启该变量后，FlashMLA sparse attention 的测试应使用容差比较或可用性 smoke test，不应要求与 FlashMLA kernel `torch.equal` 位级一致。
 
+## InfiniLM FlashMLA schedule 预分配
+
+| 环境变量 | 默认值 | 可选值 | 读取位置 | 作用 |
+| --- | --- | --- | --- | --- |
+| `INFINILM_DSV4_FLASHMLA_PREALLOC_METADATA` | 开启 | 关闭值：`0`, `false`, `FALSE`, `off`, `OFF`, `no`, `NO` | DeepSeek V4 graph metadata 绑定 | 在 InfiniLM 中提前分配 FlashMLA schedule tensor：`tile_scheduler_metadata=[160, 8]`、`num_splits=[tokens + 1]`。默认开启后 schedule 空间不再依赖首次 `attn_->forward`/`with_metadata_` 创建，graph capture 仍会通过 `deepseek_v4_flashmla_sparse_attention_metadata_` 刷新内容；显式关闭可回到旧路径。 |
+
 ## InfiniCore FlashMLA 兼容开关
 
 | 环境变量 | 默认值 | 可选值 | 读取位置 | 作用 |

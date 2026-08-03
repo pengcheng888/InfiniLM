@@ -9,6 +9,7 @@ namespace infinilm::global_state {
 
 struct FlashMLASchedMeta {
     bool have_initialized{false};
+    bool graph_refresh_recorded{false};
     infinicore::Tensor tile_scheduler_metadata;
     infinicore::Tensor num_splits;
 
@@ -39,7 +40,8 @@ public:
     infinicore::Tensor c128_compress_write_loc;
 
 public:
-    // FlashMLA schedule 运行期生成：首次同类 attention 调用 with_metadata_ 填充，后续同一 forward/graph 中复用。
+    // FlashMLA schedule 运行期生成：默认由 eager 首次同类 attention 填充；
+    // 开启预分配后 graph metadata 绑定阶段创建 tensor，capture 时刷新内容。
     FlashMLASchedMeta c1_flashmla_metadata;
     FlashMLASchedMeta c4_flashmla_metadata;
     FlashMLASchedMeta c128_flashmla_metadata;
