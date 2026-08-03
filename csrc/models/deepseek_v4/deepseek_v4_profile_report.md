@@ -12,7 +12,7 @@
 - Paged KV Cache：启用，`num_blocks=512`
 - Gate TopK：`INFINILM_DSV4_GATE_TOPK=kernel`
 - Routed expert 后端：`INFINILM_DSV4_ROUTED_EXPERT_BACKEND=fused_experts_int8_marlin`
-- Shared output 融合：`INFINILM_DSV4_FUSED_SHARED_OUTPUT=true`
+- Shared output 融合：固定启用
 - Profile 开关：`INFINILM_DSV4_PROFILE=1`
 - Startup warmup：启用，`prompt_tokens=7`，`max_new_tokens=2`
 - 原始日志：`csrc/models/deepseek_v4/profile_logs/deepseek_v4_full_tp8_nograph_attention_fine_20260731.log`

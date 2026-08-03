@@ -6,7 +6,6 @@
 #include "infinicore/ops/deepseek_v4_fused_experts_impl_int8_marlin.hpp"
 #include "infinicore/ops/deepseek_v4_lightop_moe_marlin.hpp"
 #include "infinicore/ops/deepseek_v4_moe_align_block_size.hpp"
-#include "infinicore/ops/deepseek_v4_moe_lmslim_marlin_w8a8.hpp"
 #include "infinicore/ops/deepseek_v4_moe_marlin_w8a8.hpp"
 #include "infinicore/ops/deepseek_v4_moe_sum.hpp"
 #include "infinicore/ops/deepseek_v4_moe_w8a8.hpp"
@@ -25,9 +24,6 @@ RoutedExpertBackend parse_backend(const std::string &text) {
     if (text == "reference" || text == "naive") {
         return RoutedExpertBackend::Naive;
     }
-    if (text == "lmslim" || text == "lmslim_fused" || text == "fused") {
-        return RoutedExpertBackend::LmslimFused;
-    }
     if (text == "fused_experts_int8_marlin" || text == "int8_marlin" || text == "sglang_int8_marlin") {
         return RoutedExpertBackend::FusedExpertsInt8Marlin;
     }
@@ -37,7 +33,7 @@ RoutedExpertBackend parse_backend(const std::string &text) {
     if (text == "lightop" || text == "lightop_split" || text == "split_lightop") {
         return RoutedExpertBackend::LightopSplit;
     }
-    throw std::runtime_error("INFINILM_DSV4_ROUTED_EXPERT_BACKEND must be one of: naive, lmslim_fused, fused_experts_int8_marlin, aiter_split, lightop_split");
+    throw std::runtime_error("INFINILM_DSV4_ROUTED_EXPERT_BACKEND must be one of: naive, fused_experts_int8_marlin, aiter_split, lightop_split");
 }
 
 infinicore::Tensor forward_naive(const RoutedExpertContext &ctx,
@@ -160,34 +156,6 @@ MarlinPreparedInputs prepare_marlin_inputs(RoutedExpertBackendChoice choice,
     return prep;
 }
 
-infinicore::Tensor forward_lmslim_fused(const RoutedExpertContext &ctx,
-                                        const infinicore::Tensor &hidden_states,
-                                        const infinicore::Tensor &topk_weights,
-                                        const infinicore::Tensor &topk_indices) {
-    require_marlin_weights(RoutedExpertBackend::LmslimFused, ctx);
-    infinicore::Tensor contiguous_hidden;
-    {
-        profile::ScopedTimer timer(profile::Event::MoeExpertsContiguous, hidden_states->size(0));
-        contiguous_hidden = hidden_states->contiguous();
-    }
-    {
-        profile::ScopedTimer timer(profile::Event::MoeExpertsFusedCall, hidden_states->size(0));
-        infinicore::op::deepseek_v4_fused_experts_impl_int8_marlin_(
-            contiguous_hidden,
-            contiguous_hidden,
-            ctx.w13_weight_marlin,
-            ctx.w2_weight_marlin,
-            topk_weights,
-            topk_indices,
-            ctx.w13_weight_scale,
-            ctx.w2_weight_scale,
-            static_cast<int64_t>(ctx.num_experts),
-            ctx.routed_scaling_factor,
-            true);
-    }
-    return contiguous_hidden;
-}
-
 infinicore::Tensor forward_fused_experts_int8_marlin(const RoutedExpertContext &ctx,
                                                      DeepseekV4RoutedExpertScratch &scratch,
                                                      const infinicore::Tensor &hidden_states,
@@ -195,19 +163,18 @@ infinicore::Tensor forward_fused_experts_int8_marlin(const RoutedExpertContext &
                                                      const infinicore::Tensor &topk_indices,
                                                      const std::optional<infinicore::Tensor> &shared_output) {
     require_marlin_weights(RoutedExpertBackend::FusedExpertsInt8Marlin, ctx);
-    infinicore::Tensor contiguous_hidden;
+    infinicore::Tensor fused_output;
     {
         profile::ScopedTimer timer(profile::Event::MoeExpertsContiguous, hidden_states->size(0));
-        contiguous_hidden = scratch.get_contiguous_hidden(
+        fused_output = scratch.get_fused_output(
             {hidden_states->size(0), ctx.hidden_size},
             hidden_states->dtype(),
             hidden_states->device());
-        // contiguous_hidden->copy_from(hidden_states);
     }
     {
         profile::ScopedTimer timer(profile::Event::MoeExpertsFusedCall, hidden_states->size(0));
         infinicore::op::deepseek_v4_fused_experts_impl_int8_marlin_(
-            contiguous_hidden,
+            fused_output,
             hidden_states,
             ctx.w13_weight_marlin,
             ctx.w2_weight_marlin,
@@ -220,7 +187,7 @@ infinicore::Tensor forward_fused_experts_int8_marlin(const RoutedExpertContext &
             true,
             shared_output);
     }
-    return contiguous_hidden;
+    return fused_output;
 }
 
 infinicore::Tensor forward_aiter_split(const RoutedExpertContext &ctx,
@@ -352,8 +319,6 @@ const char *to_string(RoutedExpertBackend backend) {
     switch (backend) {
     case RoutedExpertBackend::Naive:
         return "naive";
-    case RoutedExpertBackend::LmslimFused:
-        return "lmslim_fused";
     case RoutedExpertBackend::FusedExpertsInt8Marlin:
         return "fused_experts_int8_marlin";
     case RoutedExpertBackend::AiterSplit:
@@ -478,18 +443,8 @@ infinicore::Tensor forward_routed_experts(RoutedExpertBackendChoice choice,
     }
 
     switch (choice.backend) {
-    case RoutedExpertBackend::LmslimFused:
-        return forward_lmslim_fused(ctx, hidden_states, topk_weights, topk_indices);
     case RoutedExpertBackend::FusedExpertsInt8Marlin:
         return forward_fused_experts_int8_marlin(ctx, scratch, hidden_states, topk_weights, topk_indices, shared_output);
-    case RoutedExpertBackend::AiterSplit:
-    case RoutedExpertBackend::LightopSplit:
-        break;
-    case RoutedExpertBackend::Naive:
-        return forward_naive(ctx, scratch, hidden_states, topk_weights, topk_indices);
-    }
-
-    switch (choice.backend) {
     case RoutedExpertBackend::AiterSplit: {
         auto prep = prepare_marlin_inputs(choice, ctx, hidden_states, topk_indices);
         return forward_aiter_split(ctx, prep, hidden_states, topk_weights);
@@ -498,10 +453,8 @@ infinicore::Tensor forward_routed_experts(RoutedExpertBackendChoice choice,
         auto prep = prepare_marlin_inputs(choice, ctx, hidden_states, topk_indices);
         return forward_lightop_split(ctx, prep, hidden_states, topk_weights);
     }
-    case RoutedExpertBackend::LmslimFused:
-    case RoutedExpertBackend::FusedExpertsInt8Marlin:
     case RoutedExpertBackend::Naive:
-        break;
+        return forward_naive(ctx, scratch, hidden_states, topk_weights, topk_indices);
     }
     return forward_naive(ctx, scratch, hidden_states, topk_weights, topk_indices);
 }

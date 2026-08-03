@@ -22,7 +22,7 @@ private:
 
     struct CompiledResult {
         InfinilmModel::Input input;
-        infinilm::global_state::DeepSeekV4FlashMLAScheduleCache deepseek_v4_flashmla_schedule_cache;
+        infinilm::global_state::DSV4AttnMetadata dsv4_attn_metadata;
         Compiled compiled;
     };
 

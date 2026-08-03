@@ -10,7 +10,6 @@ namespace infinilm::models::deepseek_v4::moe_backends {
 
 enum class RoutedExpertBackend {
     Naive,
-    LmslimFused,
     FusedExpertsInt8Marlin,
     AiterSplit,
     LightopSplit,

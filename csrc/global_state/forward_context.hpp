@@ -2,9 +2,22 @@
 
 #include "../models/infinilm_model.hpp"
 
+#include <cstddef>
+#include <stdexcept>
+
 namespace infinilm::global_state {
 
-struct DeepSeekV4AttentionMetadata {
+struct FlashMLASchedMeta {
+    bool have_initialized{false};
+    infinicore::Tensor tile_scheduler_metadata;
+    infinicore::Tensor num_splits;
+
+    FlashMLASchedMeta() = default;
+};
+
+// 参考sglang\srt\layers\attention\deepseek_v4_backend.py中的DSV4AttnMetadata类
+struct DSV4AttnMetadata {
+public:
     infinicore::Tensor swa_indices;
     infinicore::Tensor swa_topk_lengths;
 
@@ -25,9 +38,15 @@ struct DeepSeekV4AttentionMetadata {
     infinicore::Tensor c4_compress_extra_loc;
     infinicore::Tensor c128_compress_write_loc;
 
-    DeepSeekV4AttentionMetadata() = default;
+public:
+    // FlashMLA schedule 运行期生成：首次同类 attention 调用 with_metadata_ 填充，后续同一 forward/graph 中复用。
+    FlashMLASchedMeta c1_flashmla_metadata;
+    FlashMLASchedMeta c4_flashmla_metadata;
+    FlashMLASchedMeta c128_flashmla_metadata;
 
-    explicit DeepSeekV4AttentionMetadata(const infinilm::InfinilmModel::Input &input)
+    DSV4AttnMetadata() = default;
+
+    explicit DSV4AttnMetadata(const infinilm::InfinilmModel::Input &input)
         : swa_indices(input.deepseek_v4.swa_indices),
           swa_topk_lengths(input.deepseek_v4.swa_topk_lengths),
           raw_out_loc(input.deepseek_v4.raw_out_loc),
@@ -43,17 +62,28 @@ struct DeepSeekV4AttentionMetadata {
           c4_compress_write_loc(input.deepseek_v4.c4_compress_write_loc),
           c4_compress_extra_loc(input.deepseek_v4.c4_compress_extra_loc),
           c128_compress_write_loc(input.deepseek_v4.c128_compress_write_loc) {}
-};
 
-struct DeepSeekV4FlashMLAScheduleCache {
-    infinicore::Tensor swa_tile_scheduler_metadata;
-    infinicore::Tensor swa_num_splits;
-    infinicore::Tensor c4_tile_scheduler_metadata;
-    infinicore::Tensor c4_num_splits;
-    infinicore::Tensor c128_tile_scheduler_metadata;
-    infinicore::Tensor c128_num_splits;
+    FlashMLASchedMeta &get_flashmla_metadata(size_t compress_ratio) {
+        if (compress_ratio == 0) {
+            return c1_flashmla_metadata;
+        } else if (compress_ratio == 4) {
+            return c4_flashmla_metadata;
+        } else if (compress_ratio == 128) {
+            return c128_flashmla_metadata;
+        }
+        throw std::runtime_error("DSV4AttnMetadata: invalid FlashMLA compress ratio");
+    }
 
-    DeepSeekV4FlashMLAScheduleCache() = default;
+    const FlashMLASchedMeta &get_flashmla_metadata(size_t compress_ratio) const {
+        if (compress_ratio == 0) {
+            return c1_flashmla_metadata;
+        } else if (compress_ratio == 4) {
+            return c4_flashmla_metadata;
+        } else if (compress_ratio == 128) {
+            return c128_flashmla_metadata;
+        }
+        throw std::runtime_error("DSV4AttnMetadata: invalid FlashMLA compress ratio");
+    }
 };
 
 struct AttentionMetadata {
@@ -119,8 +149,7 @@ struct MambaMetadata {
 
 struct ForwardContext {
     AttentionMetadata attn_metadata;
-    DeepSeekV4AttentionMetadata deepseek_v4_attention_metadata;
-    DeepSeekV4FlashMLAScheduleCache deepseek_v4_flashmla_schedule_cache;
+    DSV4AttnMetadata dsv4_attn_metadata;
     MambaMetadata mamba_metadata;
     MultiModalMetadata mm_metadata;
     std::vector<infinicore::Tensor> kv_cache_vec;

@@ -31,20 +31,18 @@ MHC 后端选择环境变量已删除；模型 forward 不再读取环境变量�
 
 | 环境变量 | 默认值 | 可选值 | 读取位置 | 作用 |
 | --- | --- | --- | --- | --- |
-| `INFINILM_DSV4_ROUTED_EXPERT_BACKEND` | `fused_experts_int8_marlin` | `naive`, `lmslim_fused`, `fused_experts_int8_marlin`, `aiter_split`, `lightop_split` | `DeepseekV4PackedExperts` 构造函数 | 选择 routed expert 的计算路径。 |
-| `INFINILM_DSV4_FUSED_SHARED_OUTPUT` | `auto` | `auto`, `1`, `true`, `TRUE`, `on`, `ON`, `0`, `false`, `FALSE`, `off`, `OFF` | `DeepseekV4MoE` 构造函数 | 当前源码会读取并保存该变量，但 `forward_impl` 中 `fuse_shared_output` 暂时硬编码为 `true`，因此该变量目前不实际控制 forward 行为。 |
+| `INFINILM_DSV4_ROUTED_EXPERT_BACKEND` | `fused_experts_int8_marlin` | `naive`, `fused_experts_int8_marlin`, `aiter_split`, `lightop_split` | `DeepseekV4PackedExperts` 构造函数 | 选择 routed expert 的计算路径。 |
 
-兼容别名：`reference` 等价于 `naive`，`lmslim` 和 `fused` 等价于 `lmslim_fused`，`int8_marlin` 和 `sglang_int8_marlin` 等价于 `fused_experts_int8_marlin`，`aiter` 等价于 `aiter_split`，`lightop` 和 `split_lightop` 等价于 `lightop_split`。
+兼容别名：`reference` 等价于 `naive`，`int8_marlin` 和 `sglang_int8_marlin` 等价于 `fused_experts_int8_marlin`，`aiter` 等价于 `aiter_split`，`lightop` 和 `split_lightop` 等价于 `lightop_split`。
 
-当前 `fused_shared_output` 实际总是启用：`DeepseekV4MoE::forward_impl` 会把 shared experts 输出作为可选参数传给 routed expert backend。只有在恢复 `fused_shared_output_enabled_ && shared && experts_->supports_fused_shared_output()` 判断后，`INFINILM_DSV4_FUSED_SHARED_OUTPUT` 才会重新成为有效开关。
+当前 shared output 融合固定启用：`DeepseekV4MoE::forward` 会把 shared experts 输出作为可选参数传给 routed expert backend。
 
 后端行为：
 
 | 后端 | 说明 |
 | --- | --- |
 | `naive` | 调用 InfiniCore 的 naive W8A8 MoE 参考算子。 |
-| `lmslim_fused` | 保留的旧 fused lmslim/Marlin 后端名，调用旧 InfiniCore 入口，内部同样走 SGLang `fused_experts_impl_int8_marlin`。 |
-| `fused_experts_int8_marlin` | 新增的显式 SGLang fused expert 后端名，调用 InfiniCore `deepseek_v4_fused_experts_impl_int8_marlin_`，最终走 `sglang::fused_experts_impl_int8_marlin`。 |
+| `fused_experts_int8_marlin` | 显式 INT8 Marlin fused expert 后端名，调用 InfiniCore native `deepseek_v4_fused_experts_impl_int8_marlin_`。 |
 | `aiter_split` | 运行 AITER 风格的拆分 Marlin 路径：量化、对齐、GEMM、激活、GEMM、求和。 |
 | `lightop_split` | 运行 lightop 风格的拆分 Marlin 路径。 |
 

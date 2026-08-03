@@ -11,11 +11,10 @@
 
 #include <memory>
 #include <optional>
-#include <utility>
 
 namespace infinilm::global_state {
-struct DeepSeekV4AttentionMetadata;
-struct DeepSeekV4FlashMLAScheduleCache;
+struct DSV4AttnMetadata;
+struct FlashMLASchedMeta;
 struct DeepSeekV4LayerKVCache;
 struct ForwardContext;
 } // namespace infinilm::global_state
@@ -76,11 +75,8 @@ private:
     infinicore::Tensor prepare_attn_out_workspace(size_t seq_len,
                                                   infinicore::DataType dtype,
                                                   const infinicore::Device &device) const;
-    std::pair<std::optional<infinicore::Tensor>, std::optional<infinicore::Tensor>>
-    prepare_flashmla_schedule_metadata(
-        const infinilm::global_state::DeepSeekV4FlashMLAScheduleCache &schedule_cache) const;
     void cache_flashmla_schedule_metadata(
-        infinilm::global_state::DeepSeekV4FlashMLAScheduleCache &schedule_cache,
+        infinilm::global_state::FlashMLASchedMeta &flashmla_metadata,
         const infinicore::op::DeepseekV4FlashMLASparseAttentionSchedule &flashmla_schedule) const;
     void compute_sparse_attention(
         infinicore::Tensor attn_out,
@@ -94,7 +90,7 @@ private:
         std::optional<infinicore::Tensor> extra_indices,
         std::optional<infinicore::Tensor> extra_topk_lengths,
         int extra_page_size,
-        infinilm::global_state::DeepSeekV4FlashMLAScheduleCache &flashmla_schedule_cache) const;
+        infinilm::global_state::DSV4AttnMetadata &dsv4_metadata) const;
     void validate_forward_metadata_and_cache(
         const infinilm::global_state::ForwardContext &forward_context) const;
 
@@ -115,7 +111,6 @@ private:
     infinicore::Tensor attn_sink_for_flash_;
     static thread_local DeepseekV4AttentionScratch attention_scratch_;
     static thread_local DeepseekV4MLAScratch mla_scratch_;
-    mutable bool flashmla_out_workspace_enabled_{true};
 
     size_t layer_idx_;
     size_t hidden_size_;

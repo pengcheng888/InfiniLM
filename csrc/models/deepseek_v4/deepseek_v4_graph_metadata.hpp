@@ -16,6 +16,6 @@ void bind_graph_forward_context_from_input(const infinilm::InfinilmModel::Input 
 
 void bind_graph_forward_context_from_input(
     const infinilm::InfinilmModel::Input &input,
-    const infinilm::global_state::DeepSeekV4FlashMLAScheduleCache &schedule_cache);
+    const infinilm::global_state::DSV4AttnMetadata &dsv4_metadata);
 
 } // namespace infinilm::models::deepseek_v4

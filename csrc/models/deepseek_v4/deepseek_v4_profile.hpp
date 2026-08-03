@@ -34,7 +34,6 @@ enum class Event : size_t {
     MoeExpertsContiguous,
     MoeExpertsFusedCall,
     MoeSharedExperts,
-    MoeAddShared,
     MoeAllReduce,
     AttentionForward,
     AttentionQProjection,
@@ -148,8 +147,6 @@ inline const char *event_name(Event event) {
         return "moe.experts.fused_call";
     case Event::MoeSharedExperts:
         return "moe.shared_experts";
-    case Event::MoeAddShared:
-        return "moe.add_shared";
     case Event::MoeAllReduce:
         return "moe.allreduce";
     case Event::AttentionForward:

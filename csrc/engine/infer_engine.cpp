@@ -208,8 +208,7 @@ InferEngine::Input::to_model_input(infinicore::Device device) const {
 
     auto &forward_context = infinilm::global_state::get_forward_context();
     forward_context.attn_metadata = infinilm::global_state::AttentionMetadata(input);
-    forward_context.deepseek_v4_attention_metadata = infinilm::global_state::DeepSeekV4AttentionMetadata(input);
-    forward_context.deepseek_v4_flashmla_schedule_cache = infinilm::global_state::DeepSeekV4FlashMLAScheduleCache{};
+    forward_context.dsv4_attn_metadata = infinilm::global_state::DSV4AttnMetadata(input);
 
     forward_context.mamba_metadata = {
         input.input_offsets,

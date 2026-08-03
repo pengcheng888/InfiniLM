@@ -6,7 +6,6 @@
 #include "deepseek_v4_utils.hpp"
 
 #include "infinicore/context/context.hpp"
-#include "infinicore/ops/add.hpp"
 #include "infinicore/ops/deepseek_v4_biased_topk.hpp"
 #include "infinicore/ops/deepseek_v4_hash_topk.hpp"
 #include "infinicore/ops/deepseek_v4_linear_bf16_fp32.hpp"
@@ -340,16 +339,11 @@ infinicore::Tensor DeepseekV4PackedExperts::forward(const infinicore::Tensor &hi
         shared_output);
 }
 
-bool DeepseekV4PackedExperts::supports_fused_shared_output() const {
-    return routed_expert_backend_.backend == moe_backends::RoutedExpertBackend::FusedExpertsInt8Marlin && w13_weight_marlin_ && w2_weight_marlin_;
-}
-
 DeepseekV4MoE::DeepseekV4MoE(std::shared_ptr<infinilm::config::ModelConfig> model_config,
                              size_t layer_idx,
                              const infinicore::Device &device) {
     layer_idx_ = layer_idx;
     debug_dump_enabled_ = utils::debug_dump_enabled();
-    fused_shared_output_enabled_ = utils::fused_shared_output_enabled();
     moe_allreduce_outplace_enabled_ = utils::moe_allreduce_outplace_enabled();
     moe_custom_allreduce_enabled_ = utils::moe_custom_allreduce_enabled();
     const auto &rank_info = infinilm::global_state::get_tensor_model_parallel_rank_info();
@@ -365,11 +359,6 @@ DeepseekV4MoE::DeepseekV4MoE(std::shared_ptr<infinilm::config::ModelConfig> mode
 
 infinicore::Tensor DeepseekV4MoE::forward(const infinicore::Tensor &hidden_states,
                                           const infinicore::Tensor &input_ids) const {
-    return forward_impl(hidden_states, input_ids);
-}
-
-infinicore::Tensor DeepseekV4MoE::forward_impl(const infinicore::Tensor &hidden_states,
-                                               const infinicore::Tensor &input_ids) const {
     const size_t token_count = hidden_states->size(0);
     profile::ScopedTimer moe_timer(profile::Event::MoeForward, token_count);
     debug_dump_tensor(hidden_states, layer_idx_, "moe_input", debug_dump_enabled_);
@@ -388,7 +377,6 @@ infinicore::Tensor DeepseekV4MoE::forward_impl(const infinicore::Tensor &hidden_
         debug_dump_tensor(shared, layer_idx_, "shared", debug_dump_enabled_);
     }
 
-    const bool fuse_shared_output = true;
     infinicore::Tensor routed;
     {
         profile::ScopedTimer timer(profile::Event::MoeExperts, token_count);
@@ -396,17 +384,9 @@ infinicore::Tensor DeepseekV4MoE::forward_impl(const infinicore::Tensor &hidden_
             hidden_states,
             routing_weights,
             selected_experts,
-            fuse_shared_output ? std::optional<infinicore::Tensor>(shared) : std::nullopt);
+            shared ? std::optional<infinicore::Tensor>(shared) : std::nullopt);
     }
-    debug_dump_tensor(routed, layer_idx_, fuse_shared_output ? "after_shared" : "routed", debug_dump_enabled_);
-
-    if (shared && !fuse_shared_output) {
-        {
-            profile::ScopedTimer timer(profile::Event::MoeAddShared, token_count);
-            routed = infinicore::op::add(routed, shared);
-        }
-        debug_dump_tensor(routed, layer_idx_, "after_shared", debug_dump_enabled_);
-    }
+    debug_dump_tensor(routed, layer_idx_, shared ? "after_shared" : "routed", debug_dump_enabled_);
     if (tp_size_ > 1 && communicator_ != nullptr) {
         profile::ScopedTimer timer(profile::Event::MoeAllReduce, token_count);
         bool reduced_by_custom = false;

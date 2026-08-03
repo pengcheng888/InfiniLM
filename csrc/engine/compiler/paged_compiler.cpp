@@ -44,12 +44,13 @@ bool copy_graph_input_optional(std::optional<infinicore::Tensor> &dst,
     return dst.has_value() && src.has_value() && copy_graph_input_tensor(dst.value(), src.value());
 }
 
-bool refresh_flashmla_schedule(infinicore::Tensor &tile_scheduler_metadata,
-                               infinicore::Tensor &num_splits,
+bool refresh_flashmla_schedule(infinilm::global_state::FlashMLASchedMeta &flashmla_metadata,
                                const infinicore::Tensor &topk_lengths,
                                const infinicore::Tensor &indices,
                                std::optional<infinicore::Tensor> extra_topk_lengths = std::nullopt,
                                int extra_topk = -1) {
+    auto &tile_scheduler_metadata = flashmla_metadata.tile_scheduler_metadata;
+    auto &num_splits = flashmla_metadata.num_splits;
     if (!tile_scheduler_metadata || !num_splits || !topk_lengths || !indices || indices->ndim() < 2) {
         return false;
     }
@@ -67,24 +68,22 @@ bool refresh_flashmla_schedule(infinicore::Tensor &tile_scheduler_metadata,
                                                                     topk,
                                                                     extra_topk_lengths,
                                                                     extra_topk);
+    flashmla_metadata.have_initialized = true;
     return true;
 }
 
 bool refresh_deepseek_v4_flashmla_schedules(
     InfinilmModel::Input &graph_input,
-    infinilm::global_state::DeepSeekV4FlashMLAScheduleCache &schedule_cache) {
-    return refresh_flashmla_schedule(schedule_cache.swa_tile_scheduler_metadata,
-                                     schedule_cache.swa_num_splits,
+    infinilm::global_state::DSV4AttnMetadata &dsv4_metadata) {
+    return refresh_flashmla_schedule(dsv4_metadata.c1_flashmla_metadata,
                                      graph_input.deepseek_v4.swa_topk_lengths,
                                      graph_input.deepseek_v4.swa_indices)
-        && refresh_flashmla_schedule(schedule_cache.c4_tile_scheduler_metadata,
-                                     schedule_cache.c4_num_splits,
+        && refresh_flashmla_schedule(dsv4_metadata.c4_flashmla_metadata,
                                      graph_input.deepseek_v4.swa_topk_lengths,
                                      graph_input.deepseek_v4.swa_indices,
                                      graph_input.deepseek_v4.c4_sparse_topk_lengths,
                                      kDeepSeekV4C4SparseTopk)
-        && refresh_flashmla_schedule(schedule_cache.c128_tile_scheduler_metadata,
-                                     schedule_cache.c128_num_splits,
+        && refresh_flashmla_schedule(dsv4_metadata.c128_flashmla_metadata,
                                      graph_input.deepseek_v4.swa_topk_lengths,
                                      graph_input.deepseek_v4.swa_indices,
                                      graph_input.deepseek_v4.c128_topk_lengths_clamp1,
@@ -191,10 +190,10 @@ void PagedCompiler::compile() {
             barrier_->wait();
             (void)model_->forward(input);
             infinicore::context::syncStream();
-            infinilm::global_state::DeepSeekV4FlashMLAScheduleCache deepseek_v4_flashmla_schedule_cache;
+            infinilm::global_state::DSV4AttnMetadata dsv4_attn_metadata;
             if (is_deepseek_v4_model) {
-                deepseek_v4_flashmla_schedule_cache = infinilm::global_state::get_forward_context().deepseek_v4_flashmla_schedule_cache;
-                infinilm::models::deepseek_v4::bind_graph_forward_context_from_input(input, deepseek_v4_flashmla_schedule_cache);
+                dsv4_attn_metadata = infinilm::global_state::get_forward_context().dsv4_attn_metadata;
+                infinilm::models::deepseek_v4::bind_graph_forward_context_from_input(input, dsv4_attn_metadata);
             }
             // Capture must not start with stale Marlin locks from previous
             // warmup/capture attempts. This reset is intentionally outside
@@ -204,7 +203,7 @@ void PagedCompiler::compile() {
             infinicore::context::syncStream();
             infinicore::context::startGraphRecording();
             if (is_deepseek_v4_model &&
-                !refresh_deepseek_v4_flashmla_schedules(input, deepseek_v4_flashmla_schedule_cache)) {
+                !refresh_deepseek_v4_flashmla_schedules(input, dsv4_attn_metadata)) {
                 infinicore::context::stopGraphRecording();
                 throw std::runtime_error("failed to record DeepSeek-V4 FlashMLA schedule metadata refresh");
             }
@@ -217,7 +216,7 @@ void PagedCompiler::compile() {
 
             compiled_map_decode_[b] = CompiledResult{
                 std::move(input),
-                std::move(deepseek_v4_flashmla_schedule_cache),
+                std::move(dsv4_attn_metadata),
                 std::make_tuple(graph, shared_output)};
         }
     }

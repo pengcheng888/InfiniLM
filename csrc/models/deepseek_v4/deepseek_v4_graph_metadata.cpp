@@ -20,6 +20,13 @@ infinicore::Tensor make_i32_tensor(const std::vector<size_t> &shape,
     return tensor;
 }
 
+void copy_flashmla_metadata(infinilm::global_state::DSV4AttnMetadata &dst,
+                            const infinilm::global_state::DSV4AttnMetadata &src) {
+    dst.c1_flashmla_metadata = src.c1_flashmla_metadata;
+    dst.c4_flashmla_metadata = src.c4_flashmla_metadata;
+    dst.c128_flashmla_metadata = src.c128_flashmla_metadata;
+}
+
 } // namespace
 
 void init_graph_decode_metadata(infinilm::InfinilmModel::Input &input,
@@ -54,16 +61,18 @@ void init_graph_decode_metadata(infinilm::InfinilmModel::Input &input,
 }
 
 void bind_graph_forward_context_from_input(const infinilm::InfinilmModel::Input &input) {
-    bind_graph_forward_context_from_input(input, infinilm::global_state::DeepSeekV4FlashMLAScheduleCache{});
+    auto &forward_context = infinilm::global_state::get_forward_context();
+    forward_context.attn_metadata = infinilm::global_state::AttentionMetadata(input);
+    forward_context.dsv4_attn_metadata = infinilm::global_state::DSV4AttnMetadata(input);
 }
 
 void bind_graph_forward_context_from_input(
     const infinilm::InfinilmModel::Input &input,
-    const infinilm::global_state::DeepSeekV4FlashMLAScheduleCache &schedule_cache) {
+    const infinilm::global_state::DSV4AttnMetadata &dsv4_metadata) {
     auto &forward_context = infinilm::global_state::get_forward_context();
     forward_context.attn_metadata = infinilm::global_state::AttentionMetadata(input);
-    forward_context.deepseek_v4_attention_metadata = infinilm::global_state::DeepSeekV4AttentionMetadata(input);
-    forward_context.deepseek_v4_flashmla_schedule_cache = schedule_cache;
+    forward_context.dsv4_attn_metadata = infinilm::global_state::DSV4AttnMetadata(input);
+    copy_flashmla_metadata(forward_context.dsv4_attn_metadata, dsv4_metadata);
 }
 
 } // namespace infinilm::models::deepseek_v4

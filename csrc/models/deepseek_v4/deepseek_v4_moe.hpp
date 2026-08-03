@@ -68,7 +68,6 @@ public:
                                const infinicore::Tensor &topk_weights,
                                const infinicore::Tensor &topk_indices,
                                const std::optional<infinicore::Tensor> &shared_output = std::nullopt) const;
-    bool supports_fused_shared_output() const;
 
     void process_weights_after_loading() override;
 
@@ -112,9 +111,6 @@ public:
     void reset_runtime_state() const override;
 
 private:
-    infinicore::Tensor forward_impl(const infinicore::Tensor &hidden_states,
-                                    const infinicore::Tensor &input_ids) const;
-
     INFINICORE_NN_MODULE(DeepseekV4MoEGate, gate);
     INFINICORE_NN_MODULE(DeepseekV4PackedExperts, experts);
     INFINICORE_NN_MODULE(DeepseekV4SharedExperts, shared_experts);
@@ -124,7 +120,6 @@ private:
     int tp_rank_{0};
     infinicclComm_t communicator_{nullptr};
     bool debug_dump_enabled_{false};
-    bool fused_shared_output_enabled_{false};
     bool moe_allreduce_outplace_enabled_{false};
     bool moe_custom_allreduce_enabled_{false};
     mutable DeepseekV4FlatScratchBuffer allreduce_scratch_;

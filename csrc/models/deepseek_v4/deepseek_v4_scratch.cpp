@@ -145,13 +145,13 @@ void DeepseekV4RoutedExpertScratch::preallocate_scratch(size_t hidden_size,
                                                         infinicore::DataType dtype,
                                                         const infinicore::Device &device) {
     if (can_use_scratch_tensor(max_output, {kMaxDecodeTokens, hidden_size}, dtype, device)
-        && can_use_scratch_tensor(max_contiguous_hidden, {kMaxDecodeTokens, hidden_size}, dtype, device)) {
+        && can_use_scratch_tensor(max_fused_output, {kMaxDecodeTokens, hidden_size}, dtype, device)) {
         return;
     }
 
     max_output = infinicore::Tensor::empty({kMaxDecodeTokens, hidden_size}, dtype, device);
-    max_contiguous_hidden = infinicore::Tensor::empty({kMaxDecodeTokens, hidden_size}, dtype, device);
-    assert(max_output && max_contiguous_hidden);
+    max_fused_output = infinicore::Tensor::empty({kMaxDecodeTokens, hidden_size}, dtype, device);
+    assert(max_output && max_fused_output);
 }
 
 infinicore::Tensor DeepseekV4RoutedExpertScratch::get_output(const infinicore::Shape &shape,
@@ -160,10 +160,10 @@ infinicore::Tensor DeepseekV4RoutedExpertScratch::get_output(const infinicore::S
     return get_scratch_or_empty(max_output, shape, dtype, device);
 }
 
-infinicore::Tensor DeepseekV4RoutedExpertScratch::get_contiguous_hidden(const infinicore::Shape &shape,
-                                                                        infinicore::DataType dtype,
-                                                                        const infinicore::Device &device) const {
-    return get_scratch_or_empty(max_contiguous_hidden, shape, dtype, device);
+infinicore::Tensor DeepseekV4RoutedExpertScratch::get_fused_output(const infinicore::Shape &shape,
+                                                                   infinicore::DataType dtype,
+                                                                   const infinicore::Device &device) const {
+    return get_scratch_or_empty(max_fused_output, shape, dtype, device);
 }
 
 } // namespace infinilm::models::deepseek_v4

@@ -150,13 +150,13 @@ public:
                                   infinicore::DataType dtype,
                                   const infinicore::Device &device) const;
 
-    infinicore::Tensor get_contiguous_hidden(const infinicore::Shape &shape,
-                                             infinicore::DataType dtype,
-                                             const infinicore::Device &device) const;
+    infinicore::Tensor get_fused_output(const infinicore::Shape &shape,
+                                        infinicore::DataType dtype,
+                                        const infinicore::Device &device) const;
 
 private:
     infinicore::Tensor max_output;
-    infinicore::Tensor max_contiguous_hidden;
+    infinicore::Tensor max_fused_output;
 };
 
 } // namespace infinilm::models::deepseek_v4
