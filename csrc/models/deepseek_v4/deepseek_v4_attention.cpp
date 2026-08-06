@@ -14,6 +14,8 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <tuple>
+#include <utility>
 #include <vector>
 
 namespace infinilm::models::deepseek_v4 {
@@ -76,10 +78,19 @@ DeepseekV4Attention::DeepseekV4Attention(std::shared_ptr<infinilm::config::Model
         attn_sink_for_flash_ = attn_sink_->narrow({{0, local_head_start, num_local_attention_heads_}});
     }
 
-    wq_a_ = this->register_module<infinilm::layers::linear::ReplicatedLinear>(
-        "wq_a", hidden_size_, q_lora_rank_, quantization_method, false, dtype, device);
-    wkv_ = this->register_module<infinilm::layers::linear::ReplicatedLinear>(
-        "wkv", hidden_size_, head_dim_, quantization_method, false, dtype, device);
+    auto register_wqkv_a_param = [this](const std::string &name, infinicore::nn::Parameter param) {
+        this->register_parameter(name, std::move(param));
+    };
+    wqkv_a_ = std::make_shared<infinilm::layers::linear::FusedReplicatedLinear>(hidden_size_,
+                                                                                q_lora_rank_,
+                                                                                head_dim_,
+                                                                                "wq_a",
+                                                                                "wkv",
+                                                                                register_wqkv_a_param,
+                                                                                quantization_method,
+                                                                                false,
+                                                                                dtype,
+                                                                                device);
     wq_b_ = this->register_module<infinilm::layers::linear::ColumnParallelLinear>(
         "wq_b",
         q_lora_rank_,
@@ -385,68 +396,78 @@ void DeepseekV4Attention::validate_forward_metadata_and_cache(
     }
 }
 
-infinicore::Tensor DeepseekV4Attention::forward(const infinicore::Tensor &positions,
-                                                const infinicore::Tensor &hidden_states) const {
-    auto shape = hidden_states->shape(); // [tokens, hidden]
-    if (shape.size() != 2) {
-        throw std::runtime_error("DeepseekV4Attention::forward expects hidden_states [tokens, hidden]");
-    }
-    const size_t seq_len = shape[0];
-    profile::ScopedTimer forward_timer(profile::Event::AttentionForward, seq_len);
-
-    const auto pos_shape = positions->shape(); // [tokens]
-    if (pos_shape.size() != 1 || pos_shape[0] != seq_len) {
-        throw std::runtime_error("DeepseekV4Attention::forward expects positions [tokens]");
-    }
-    auto pos_ids = positions;
-
-    auto &forward_context = infinilm::global_state::get_forward_context();
-    {
-        profile::ScopedTimer timer(profile::Event::AttentionMetadata, seq_len);
-        validate_forward_metadata_and_cache(forward_context);
-    }
-
-    auto &attn_metadata = forward_context.attn_metadata;
-    auto &dsv4_metadata = forward_context.dsv4_attn_metadata;
-    auto &layer_cache = forward_context.deepseek_v4_kv_cache_vec[layer_idx_];
+DeepseekV4Attention::ForwardPrepareResult
+DeepseekV4Attention::_forward_prepare(const infinicore::Tensor &hidden_states,
+                                      const infinicore::Tensor &pos_ids,
+                                      size_t seq_len,
+                                      infinilm::global_state::DSV4AttnMetadata &dsv4_metadata,
+                                      infinilm::global_state::DeepSeekV4LayerKVCache &layer_cache) const {
+    auto &attn_metadata = infinilm::global_state::get_forward_context().attn_metadata;
 
     infinicore::Tensor q_lora;
-    infinicore::Tensor q;
+    infinicore::Tensor kv;
     {
-        profile::ScopedTimer timer(profile::Event::AttentionQProjection, seq_len);
-        auto x0 = hidden_states;
-        {
-            profile::ScopedTimer sub_timer(profile::Event::AttentionQProjA, seq_len);
-            q_lora = wq_a_->forward(x0); // [tokens, hidden] => [tokens, q_lora_rank]
-        }
-        {
-            profile::ScopedTimer sub_timer(profile::Event::AttentionQNorm, seq_len);
-            q_lora = q_norm_->forward(q_lora);
-        }
-        auto q_mut = q_lora;
-        {
-            profile::ScopedTimer sub_timer(profile::Event::AttentionQProjB, seq_len);
 
-            // [tokens, q_lora_rank] => [tokens, num_attention_heads * head_dim]
-            q = wq_b_->forward(q_mut)->view({seq_len, num_local_attention_heads_, head_dim_});
-        }
-        {
-            profile::ScopedTimer sub_timer(profile::Event::AttentionQRmsNormSelf, seq_len);
-            q = infinicore::op::deepseek_v4_rmsnorm_self(q, static_cast<float>(rms_norm_eps_));
+        const int repeats = 1; // for test 5000
+        for (int i = 0; i < repeats; ++i) {
+            profile::ScopedTimer timer(profile::Event::AttentionQProjection, seq_len);
+            auto x = hidden_states;
+            {
+                profile::ScopedTimer sub_timer(profile::Event::AttentionQProjA, seq_len);
+                std::tie(q_lora, kv) = wqkv_a_->forward_split(x);
+            }
         }
     }
 
-    infinicore::Tensor kv;
+    {
+        profile::ScopedTimer sub_timer(profile::Event::AttentionQNorm, seq_len);
+        q_lora = q_norm_->forward(q_lora);
+    }
+
+    infinicore::Tensor q;
+    {
+        auto q_mut = q_lora;
+        profile::ScopedTimer sub_timer(profile::Event::AttentionQProjB, seq_len);
+
+        // [tokens, q_lora_rank] => [tokens, num_attention_heads * head_dim]
+        q = wq_b_->forward(q_mut)->view({seq_len, num_local_attention_heads_, head_dim_});
+    }
+    {
+        profile::ScopedTimer sub_timer(profile::Event::AttentionQRmsNormSelf, seq_len);
+        q = infinicore::op::deepseek_v4_rmsnorm_self(q, static_cast<float>(rms_norm_eps_));
+
+        /*
+        下面是sglang
+        q, _ = self.wq_b(q)
+
+        # Fused warp-per-(token, head) rmsnorm-self + RoPE + write to q_out.
+        fused_q_norm_rope(q, q_out, self.eps, self.freqs_cis, positions)
+
+        它将deepseek_v4_rmsnorm_self和rope融合在一起了。
+
+        InfiniLM目前是将q和kv的rope融合在一起了。
+        */
+    }
+
     {
         profile::ScopedTimer timer(profile::Event::AttentionKVProjection, seq_len);
-        auto x1 = hidden_states;
-        {
-            profile::ScopedTimer sub_timer(profile::Event::AttentionKVProj, seq_len);
-            kv = wkv_->forward(x1); // [tokens, hidden] => [tokens, head_dim]
-        }
         {
             profile::ScopedTimer sub_timer(profile::Event::AttentionKVNorm, seq_len);
             kv = kv_norm_->forward(kv);
+
+            /*
+            fused_k_norm_rope_flashmla(
+                kv=kv,
+                kv_weight=kv_weight,
+                eps=eps,
+                freqs_cis=freqs_cis,
+                positions=positions,
+                out_loc=swa_loc,
+                kvcache=self.swa_kv_pool.kv_buffer[self._swa_local_layer_id(layer_id)],
+                page_size=self.swa_kv_pool.page_size,
+            )
+            对于kv,sglang是将 kv_norm_和rope以及store kv融合在一起了。
+            */
         }
     }
 
@@ -544,6 +565,43 @@ infinicore::Tensor DeepseekV4Attention::forward(const infinicore::Tensor &positi
         extra_topk_lengths = dsv4_metadata.c128_topk_lengths_clamp1;
         extra_page_size = static_cast<int>(kDsv4C128PageSize);
     }
+    return ForwardPrepareResult{
+        q,
+        extra_raw_cache,
+        extra_indices,
+        extra_topk_lengths,
+        extra_page_size};
+}
+
+infinicore::Tensor DeepseekV4Attention::forward(const infinicore::Tensor &positions,
+                                                const infinicore::Tensor &hidden_states) const {
+    auto shape = hidden_states->shape(); // [tokens, hidden]
+    if (shape.size() != 2) {
+        throw std::runtime_error("DeepseekV4Attention::forward expects hidden_states [tokens, hidden]");
+    }
+    const size_t seq_len = shape[0];
+    profile::ScopedTimer forward_timer(profile::Event::AttentionForward, seq_len);
+
+    const auto pos_shape = positions->shape(); // [tokens]
+    if (pos_shape.size() != 1 || pos_shape[0] != seq_len) {
+        throw std::runtime_error("DeepseekV4Attention::forward expects positions [tokens]");
+    }
+    auto pos_ids = positions;
+
+    auto &forward_context = infinilm::global_state::get_forward_context();
+    {
+        profile::ScopedTimer timer(profile::Event::AttentionMetadata, seq_len);
+        validate_forward_metadata_and_cache(forward_context);
+    }
+    auto &dsv4_metadata = forward_context.dsv4_attn_metadata;
+    auto &layer_cache = forward_context.deepseek_v4_kv_cache_vec[layer_idx_];
+
+    auto prepared = this->_forward_prepare(hidden_states, pos_ids, seq_len, dsv4_metadata, layer_cache);
+    auto q = prepared.q;
+    auto extra_raw_cache = prepared.extra_raw_cache;
+    auto extra_indices = prepared.extra_indices;
+    auto extra_topk_lengths = prepared.extra_topk_lengths;
+    auto extra_page_size = prepared.extra_page_size;
 
     // swa_indices 是 SWA 稀疏注意力读取的 cache page 索引；
     // swa_topk_lengths 是每个 token 实际使用的 SWA page 数。

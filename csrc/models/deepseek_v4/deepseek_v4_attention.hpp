@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../../config/model_config.hpp"
+#include "../../layers/linear/fused_linear.hpp"
 #include "../../layers/linear/linear.hpp"
 #include "deepseek_v4_c4_indexer.hpp"
 #include "deepseek_v4_compressor.hpp"
@@ -39,8 +40,7 @@ public:
     }
 
     void process_weights_after_loading() override {
-        wq_a_->process_weights_after_loading();
-        wkv_->process_weights_after_loading();
+        wqkv_a_->process_weights_after_loading();
         wq_b_->process_weights_after_loading();
         wo_a_->process_weights_after_loading();
         wo_b_->process_weights_after_loading();
@@ -54,8 +54,7 @@ public:
     }
 
     void reset_runtime_state() const override {
-        wq_a_->reset_runtime_state();
-        wkv_->reset_runtime_state();
+        wqkv_a_->reset_runtime_state();
         wq_b_->reset_runtime_state();
         wo_a_->reset_runtime_state();
         wo_b_->reset_runtime_state();
@@ -68,6 +67,20 @@ public:
     }
 
 private:
+    struct ForwardPrepareResult {
+        infinicore::Tensor q;
+        std::optional<infinicore::Tensor> extra_raw_cache;
+        std::optional<infinicore::Tensor> extra_indices;
+        std::optional<infinicore::Tensor> extra_topk_lengths;
+        int extra_page_size{0};
+    };
+
+    ForwardPrepareResult _forward_prepare(const infinicore::Tensor &hidden_states,
+                                          const infinicore::Tensor &pos_ids,
+                                          size_t seq_len,
+                                          infinilm::global_state::DSV4AttnMetadata &dsv4_metadata,
+                                          infinilm::global_state::DeepSeekV4LayerKVCache &layer_cache) const;
+
     void apply_rope_(const infinicore::Tensor &positions,
                      infinicore::Tensor query,
                      std::optional<infinicore::Tensor> key,
@@ -100,8 +113,7 @@ private:
     void validate_forward_metadata_and_cache(
         const infinilm::global_state::ForwardContext &forward_context) const;
 
-    std::shared_ptr<infinilm::layers::linear::ReplicatedLinear> wq_a_;
-    std::shared_ptr<infinilm::layers::linear::ReplicatedLinear> wkv_;
+    std::shared_ptr<infinilm::layers::linear::FusedReplicatedLinear> wqkv_a_;
     std::shared_ptr<infinilm::layers::linear::ColumnParallelLinear> wq_b_;
     INFINICORE_NN_MODULE(DeepseekV4RMSNorm, q_norm);
     INFINICORE_NN_MODULE(DeepseekV4RMSNorm, kv_norm);

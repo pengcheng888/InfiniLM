@@ -2,10 +2,53 @@
 #include "../../engine/distributed/communication_group.hpp"
 #include "../quantization/quantization.hpp"
 #include "linear.hpp"
+#include <cstddef>
 #include <functional>
+#include <memory>
+#include <string>
+#include <tuple>
+#include <vector>
 
 namespace infinilm::layers::linear {
 using RegisterParamFn = std::function<void(const std::string &, infinicore::nn::Parameter)>;
+
+class FusedReplicatedLinear : public infinilm::nn::Linear {
+public:
+    FusedReplicatedLinear(size_t hidden_size,
+                          size_t split_size,
+                          const std::string &first_name,
+                          const std::string &second_name,
+                          RegisterParamFn register_fn,
+                          const infinicore::DataType &dtype,
+                          const infinicore::Device &device);
+
+    FusedReplicatedLinear(size_t hidden_size,
+                          size_t first_size,
+                          size_t second_size,
+                          const std::string &first_name,
+                          const std::string &second_name,
+                          RegisterParamFn register_fn,
+                          std::shared_ptr<infinilm::quantization::BaseQuantization> quantization,
+                          bool bias,
+                          const infinicore::DataType &dtype,
+                          const infinicore::Device &device);
+
+    void process_weights_after_loading() override;
+
+    infinicore::Tensor forward(const infinicore::Tensor &input) const;
+    void forward_(infinicore::Tensor output, const infinicore::Tensor &input) const;
+    std::tuple<infinicore::Tensor, infinicore::Tensor> forward_split(const infinicore::Tensor &input) const;
+
+private:
+    void register_split_params();
+
+    size_t first_size_{0};
+    size_t second_size_{0};
+    std::string first_name_;
+    std::string second_name_;
+    RegisterParamFn register_fn_;
+    std::vector<infinilm::quantization::SplitInfo> split_infos_;
+};
 
 class QKVParallelLinear : public infinilm::nn::ColumnParallelLinear {
 public:

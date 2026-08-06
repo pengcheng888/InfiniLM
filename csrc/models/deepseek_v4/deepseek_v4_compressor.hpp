@@ -1,7 +1,7 @@
 #pragma once
 
 #include "../../config/model_config.hpp"
-#include "../../layers/linear/linear.hpp"
+#include "../../layers/linear/fused_linear.hpp"
 #include "deepseek_v4_rms_norm.hpp"
 #include "infinicore/nn/module.hpp"
 #include "infinicore/tensor.hpp"
@@ -33,11 +33,10 @@ public:
                  std::optional<infinicore::Tensor> extra_loc) const;
 
 private:
-    infinicore::Tensor forward_kv_score(const infinicore::Tensor &hidden_states) const;
+    infinicore::Tensor compute_kv_score(const infinicore::Tensor &hidden_states) const;
 
     INFINICORE_NN_PARAMETER(ape);
-    std::shared_ptr<infinilm::layers::linear::ReplicatedLinear> wgate_;
-    std::shared_ptr<infinilm::layers::linear::ReplicatedLinear> wkv_;
+    std::shared_ptr<infinilm::layers::linear::FusedReplicatedLinear> wkv_gate_;
     INFINICORE_NN_MODULE(DeepseekV4RMSNorm, norm);
     size_t head_dim_{0};
     size_t compress_ratio_{0};

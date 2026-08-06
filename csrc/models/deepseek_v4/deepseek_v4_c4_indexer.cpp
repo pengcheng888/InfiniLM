@@ -2,7 +2,6 @@
 
 #include "../../global_state/forward_context.hpp"
 #include "deepseek_v4_profile.hpp"
-#include "infinicore/ops/cat.hpp"
 #include "infinicore/ops/deepseek_v4_flashmla_cache.hpp"
 #include "infinicore/ops/deepseek_v4_flashmla_compute.hpp"
 #include "infinicore/ops/deepseek_v4_fused_rope.hpp"
@@ -32,10 +31,17 @@ DeepseekV4C4Indexer::DeepseekV4C4Indexer(std::shared_ptr<infinilm::config::Model
     const double rms_norm_eps = model_config->get<double>("rms_norm_eps");
 
     INFINICORE_NN_PARAMETER_INIT(ape, ({kDsv4C4PageSize / 16, compressor_proj_size}, infinicore::DataType::F32, device));
-    wgate_ = this->register_module<infinilm::layers::linear::ReplicatedLinear>(
-        "wgate", hidden_size, compressor_proj_size, false, dtype, device);
-    wkv_ = this->register_module<infinilm::layers::linear::ReplicatedLinear>(
-        "wkv", hidden_size, compressor_proj_size, false, dtype, device);
+    auto register_fn = [this](const std::string &name, infinicore::nn::Parameter param) {
+        this->register_parameter(name, std::move(param));
+    };
+    wkv_gate_ = std::make_shared<infinilm::layers::linear::FusedReplicatedLinear>(
+        hidden_size,
+        compressor_proj_size,
+        "wkv",
+        "wgate",
+        register_fn,
+        dtype,
+        device);
     INFINICORE_NN_MODULE_INIT(norm, index_head_dim_, rms_norm_eps, dtype, device);
     wq_b_ = this->register_module<infinilm::layers::linear::ReplicatedLinear>(
         "wq_b", q_lora_rank, index_n_heads_ * index_head_dim_, quantization_method, false, dtype, device);
@@ -44,15 +50,13 @@ DeepseekV4C4Indexer::DeepseekV4C4Indexer(std::shared_ptr<infinilm::config::Model
 }
 
 void DeepseekV4C4Indexer::process_weights_after_loading() {
-    wgate_->process_weights_after_loading();
-    wkv_->process_weights_after_loading();
+    wkv_gate_->process_weights_after_loading();
     wq_b_->process_weights_after_loading();
     weights_proj_->process_weights_after_loading();
 }
 
 void DeepseekV4C4Indexer::reset_runtime_state() const {
-    wgate_->reset_runtime_state();
-    wkv_->reset_runtime_state();
+    wkv_gate_->reset_runtime_state();
     wq_b_->reset_runtime_state();
     weights_proj_->reset_runtime_state();
 }
@@ -67,12 +71,8 @@ infinicore::Tensor DeepseekV4C4Indexer::compute_weights(const infinicore::Tensor
     return weights_proj_->forward(x);
 }
 
-infinicore::Tensor DeepseekV4C4Indexer::forward_kv_score(const infinicore::Tensor &hidden_states) const {
-    auto x0 = hidden_states;
-    auto kv = wkv_->forward(x0);
-    auto x1 = hidden_states;
-    auto gate = wgate_->forward(x1);
-    return infinicore::op::cat({kv, gate}, -1);
+infinicore::Tensor DeepseekV4C4Indexer::compute_kv_score(const infinicore::Tensor &hidden_states) const {
+    return wkv_gate_->forward(hidden_states);
 }
 
 void DeepseekV4C4Indexer::forward(
@@ -94,7 +94,14 @@ void DeepseekV4C4Indexer::forward(
     {
         profile::ScopedTimer timer(profile::Event::AttentionC4IndexerCompress, seq_len);
 
-        auto indexer_kv_score = forward_kv_score(hidden_states);
+        infinicore::Tensor indexer_kv_score;
+        {
+            const int repeats = 1; // for test 5000
+            for (int i = 0; i < repeats; ++i) {
+                indexer_kv_score = compute_kv_score(hidden_states);
+            }
+        }
+
         if (indexer_kv_score->ndim() != 2 || indexer_kv_score->size(1) != 4 * index_head_dim_) {
             throw std::runtime_error("DeepseekV4C4Indexer::forward C4 indexer compressor output shape mismatch");
         }

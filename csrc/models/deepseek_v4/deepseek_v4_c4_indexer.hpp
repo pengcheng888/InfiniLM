@@ -1,7 +1,7 @@
 #pragma once
 
 #include "../../config/model_config.hpp"
-#include "../../layers/linear/linear.hpp"
+#include "../../layers/linear/fused_linear.hpp"
 #include "deepseek_v4_rms_norm.hpp"
 #include "infinicore/nn/module.hpp"
 #include "infinicore/tensor.hpp"
@@ -20,7 +20,7 @@ public:
 
     infinicore::Tensor compute_q(const infinicore::Tensor &q_lora, size_t seq_len) const;
     infinicore::Tensor compute_weights(const infinicore::Tensor &hidden_states) const;
-    infinicore::Tensor forward_kv_score(const infinicore::Tensor &hidden_states) const;
+    infinicore::Tensor compute_kv_score(const infinicore::Tensor &hidden_states) const;
     void forward(const infinicore::Tensor &hidden_states,
                  const infinicore::Tensor &q_lora,
                  const infinicore::Tensor &pos_ids,
@@ -45,8 +45,7 @@ public:
 
 private:
     INFINICORE_NN_PARAMETER(ape);
-    std::shared_ptr<infinilm::layers::linear::ReplicatedLinear> wgate_;
-    std::shared_ptr<infinilm::layers::linear::ReplicatedLinear> wkv_;
+    std::shared_ptr<infinilm::layers::linear::FusedReplicatedLinear> wkv_gate_;
     INFINICORE_NN_MODULE(DeepseekV4RMSNorm, norm);
     std::shared_ptr<infinilm::layers::linear::ReplicatedLinear> wq_b_;
     std::shared_ptr<infinilm::layers::linear::ReplicatedLinear> weights_proj_;

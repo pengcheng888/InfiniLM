@@ -1,7 +1,6 @@
 #include "deepseek_v4_compressor.hpp"
 
 #include "deepseek_v4_profile.hpp"
-#include "infinicore/ops/cat.hpp"
 #include "infinicore/ops/deepseek_v4_flashmla_cache.hpp"
 #include "infinicore/ops/deepseek_v4_flashmla_compute.hpp"
 
@@ -33,34 +32,35 @@ DeepseekV4Compressor::DeepseekV4Compressor(
     } else if (compress_ratio_ == 128) {
         proj_size_ = head_dim_;
         page_size_ = kDsv4C128PageSize;
-        INFINICORE_NN_PARAMETER_INIT(ape, ({128, proj_size_}, infinicore::DataType::F32, device));
+        INFINICORE_NN_PARAMETER_INIT(ape, ({128, proj_size_}, infinicore::DataType::F32, device)); // F32
     } else {
         throw std::runtime_error("DeepseekV4Compressor: unsupported compress_ratio");
     }
 
-    wgate_ = this->register_module<infinilm::layers::linear::ReplicatedLinear>(
-        "wgate", hidden_size, proj_size_, false, dtype, device);
-    wkv_ = this->register_module<infinilm::layers::linear::ReplicatedLinear>(
-        "wkv", hidden_size, proj_size_, false, dtype, device);
-    INFINICORE_NN_MODULE_INIT(norm, head_dim_, rms_norm_eps, dtype, device);
+    auto register_fn = [this](const std::string &name, infinicore::nn::Parameter param) {
+        this->register_parameter(name, std::move(param));
+    };
+    wkv_gate_ = std::make_shared<infinilm::layers::linear::FusedReplicatedLinear>(
+        hidden_size,
+        proj_size_,
+        "wkv",
+        "wgate",
+        register_fn,
+        dtype,
+        device);                                                             // BF16
+    INFINICORE_NN_MODULE_INIT(norm, head_dim_, rms_norm_eps, dtype, device); // BF16
 }
 
 void DeepseekV4Compressor::process_weights_after_loading() {
-    wgate_->process_weights_after_loading();
-    wkv_->process_weights_after_loading();
+    wkv_gate_->process_weights_after_loading();
 }
 
 void DeepseekV4Compressor::reset_runtime_state() const {
-    wgate_->reset_runtime_state();
-    wkv_->reset_runtime_state();
+    wkv_gate_->reset_runtime_state();
 }
 
-infinicore::Tensor DeepseekV4Compressor::forward_kv_score(const infinicore::Tensor &hidden_states) const {
-    auto x0 = hidden_states;
-    auto kv = wkv_->forward(x0);
-    auto x1 = hidden_states;
-    auto gate = wgate_->forward(x1);
-    return infinicore::op::cat({kv, gate}, -1);
+infinicore::Tensor DeepseekV4Compressor::compute_kv_score(const infinicore::Tensor &hidden_states) const {
+    return wkv_gate_->forward(hidden_states);
 }
 
 void DeepseekV4Compressor::forward(
@@ -77,7 +77,14 @@ void DeepseekV4Compressor::forward(
     {
         const auto event = compress_ratio_ == 4 ? profile::Event::AttentionC4Compress : profile::Event::AttentionC128Compress;
         profile::ScopedTimer timer(event, seq_len);
-        auto kv_score = forward_kv_score(hidden_states);
+        infinicore::Tensor kv_score;
+        {
+            const int repeats = 1; // for test 5000
+            for (int i = 0; i < repeats; ++i) {
+                kv_score = compute_kv_score(hidden_states);
+            }
+        }
+
         const auto expected_score_dim = 2 * proj_size_;
         if (kv_score->ndim() != 2 || kv_score->size(1) != expected_score_dim) {
             throw std::runtime_error("DeepseekV4Compressor::forward compressor output shape mismatch");
