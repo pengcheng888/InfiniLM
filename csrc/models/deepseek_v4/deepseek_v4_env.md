@@ -12,9 +12,9 @@
 | --- | --- |
 | MHC pre | `deepseek_v4_mhc_pre_kernel_` |
 | MHC post | `deepseek_v4_mhc_post_kernel_` |
-| MHC head | `deepseek_v4_mhc_head_kernel_` |
+| MHC head | `deepseek_v4_hc_head_kernel_` |
 
-MHC 后端选择环境变量已删除；模型 forward 不再读取环境变量，也不再支持切换到 naive 版本。`deepseek_v4_mhc_pre_naive_`、`deepseek_v4_mhc_post_naive_`、`deepseek_v4_mhc_head_naive_` 仅作为 InfiniCore 层历史/测试接口保留，DeepSeek V4 模型路径不再考虑这三个算子。
+MHC 后端选择环境变量已删除；模型 forward 不再读取环境变量，也不再支持切换到 naive 版本。`deepseek_v4_mhc_pre_naive_`、`deepseek_v4_mhc_post_naive_`、`deepseek_v4_hc_head_naive_` 仅作为 InfiniCore 层历史/测试接口保留，DeepSeek V4 模型路径不再考虑这三个算子。
 
 ## Gate/TopK
 

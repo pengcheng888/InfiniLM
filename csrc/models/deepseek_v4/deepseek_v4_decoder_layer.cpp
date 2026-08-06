@@ -3,7 +3,8 @@
 #include "../../global_state/global_state.hpp"
 #include "deepseek_v4_profile.hpp"
 #include "deepseek_v4_utils.hpp"
-#include "infinicore/ops/deepseek_v4_mhc.hpp"
+#include "infinicore/ops/deepseek_v4_mhc_post.hpp"
+#include "infinicore/ops/deepseek_v4_mhc_pre.hpp"
 
 #include <stdexcept>
 #include <string>
@@ -92,6 +93,7 @@ DeepseekV4DecoderLayer::forward(const infinicore::Tensor &positions,
             hc_attn_base_,
             rms_norm_eps_,
             hc_eps_,
+            hc_eps_,
             hc_sinkhorn_iters_);
     }
     debug_dump_tensor(attn_in, layer_idx_, "attn_in", debug_dump_enabled_);
@@ -136,6 +138,7 @@ DeepseekV4DecoderLayer::forward(const infinicore::Tensor &positions,
             hc_ffn_scale_,
             hc_ffn_base_,
             rms_norm_eps_,
+            hc_eps_,
             hc_eps_,
             hc_sinkhorn_iters_);
     }
