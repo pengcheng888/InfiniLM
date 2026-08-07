@@ -26,6 +26,12 @@ struct DeepseekV4FlashMLASparseAttentionSchedule;
 
 namespace infinilm::models::deepseek_v4 {
 
+enum class QbKvMode {
+    q_b_and_kv,
+    fused_q_b_and_kv,
+    fused_q_b_and_kv_to_cache,
+};
+
 class DeepseekV4Attention : public infinicore::nn::Module {
 public:
     DeepseekV4Attention(std::shared_ptr<infinilm::config::ModelConfig> model_config,
@@ -91,6 +97,13 @@ private:
                                                  const infinicore::Tensor &pos_ids,
                                                  size_t seq_len) const;
 
+    infinicore::Tensor _compute_fused_q_b_and_kv_to_cache(const infinicore::Tensor &q_lora,
+                                                          infinicore::Tensor &kv,
+                                                          const infinicore::Tensor &pos_ids,
+                                                          size_t seq_len,
+                                                          const infinicore::Tensor &cache_slots,
+                                                          infinicore::Tensor swa_cache_raw) const;
+
     void apply_rope_(const infinicore::Tensor &positions,
                      infinicore::Tensor query,
                      std::optional<infinicore::Tensor> key,
@@ -154,7 +167,7 @@ private:
     size_t tp_rank_{0};
     size_t tp_size_{1};
     size_t compress_ratio_{0};
-    mutable bool fused_q_b_and_kv_{true};
+    mutable QbKvMode q_b_kv_mode_{QbKvMode::fused_q_b_and_kv};
     float flashmla_softmax_scale_{1.0f};
     size_t max_position_embeddings_{0};
     double rope_theta_{10000.0};

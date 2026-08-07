@@ -1,7 +1,8 @@
 #pragma once
 
 #include "../../config/model_config.hpp"
-#include "../../layers/linear/linear.hpp"
+#include "deepseek_v4_gate.hpp"
+#include "deepseek_v4_mlp.hpp"
 #include "deepseek_v4_scratch.hpp"
 #include "infinicore/nn/module.hpp"
 #include "infinicore/tensor.hpp"
@@ -13,49 +14,6 @@
 #include <tuple>
 
 namespace infinilm::models::deepseek_v4 {
-
-class DeepseekV4MoEGate : public infinicore::nn::Module {
-public:
-    DeepseekV4MoEGate(std::shared_ptr<infinilm::config::ModelConfig> model_config,
-                      size_t layer_idx,
-                      const infinicore::Device &device);
-
-    std::tuple<infinicore::Tensor, infinicore::Tensor> forward(const infinicore::Tensor &hidden_states,
-                                                               const infinicore::Tensor &input_ids) const;
-
-private:
-    INFINICORE_NN_PARAMETER(weight);
-    INFINICORE_NN_PARAMETER(tid2eid);
-    INFINICORE_NN_PARAMETER(bias);
-
-	size_t num_experts_per_tok_{0};
-	size_t num_experts_{0};
-	bool norm_topk_prob_{true};
-	bool is_hash_{true};
-	std::string scoring_func_{"sqrtsoftplus"};
-	mutable DeepseekV4FlatScratchBuffer router_logits_scratch_;
-    mutable DeepseekV4FlatScratchBuffer router_scores_scratch_;
-    mutable DeepseekV4FlatScratchBuffer router_indices_scratch_;
-};
-
-class DeepseekV4SharedExperts : public infinicore::nn::Module {
-public:
-    DeepseekV4SharedExperts(std::shared_ptr<infinilm::config::ModelConfig> model_config,
-                            const infinicore::Device &device);
-
-    infinicore::Tensor forward(infinicore::Tensor hidden_states) const;
-
-    void process_weights_after_loading() override;
-    void reset_runtime_state() const override;
-
-private:
-    std::shared_ptr<infinilm::layers::linear::GateUpParallelLinear> gate_up_proj_;
-    std::shared_ptr<infinilm::layers::linear::RowParallelLinear> w2_;
-    static thread_local DeepseekV4SharedExpertScratch shared_scratch_;
-    size_t intermediate_size_per_partition_{0};
-    infinicore::DataType dtype_{infinicore::DataType::BF16};
-    infinicore::Device device_;
-};
 
 class DeepseekV4PackedExperts : public infinicore::nn::Module {
 public:
@@ -115,7 +73,7 @@ public:
 private:
     INFINICORE_NN_MODULE(DeepseekV4MoEGate, gate);
     INFINICORE_NN_MODULE(DeepseekV4PackedExperts, experts);
-    INFINICORE_NN_MODULE(DeepseekV4SharedExperts, shared_experts);
+    INFINICORE_NN_MODULE(DeepseekV4MLP, shared_experts);
 
     size_t layer_idx_{0};
     size_t tp_size_{1};

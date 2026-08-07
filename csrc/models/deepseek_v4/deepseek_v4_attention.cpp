@@ -6,6 +6,7 @@
 #include "infinicore/context/context.hpp"
 #include "infinicore/ops/deepseek_v4_flashmla_cache.hpp"
 #include "infinicore/ops/deepseek_v4_flashmla_compute.hpp"
+#include "infinicore/ops/deepseek_v4_fused_k_norm_rope_flashmla.hpp"
 #include "infinicore/ops/deepseek_v4_fused_norm_rope_inplace.hpp"
 #include "infinicore/ops/deepseek_v4_fused_q_norm_rope.hpp"
 #include "infinicore/ops/deepseek_v4_fused_rope.hpp"
@@ -14,7 +15,6 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
-#include <cstring>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -26,15 +26,22 @@ namespace infinilm::models::deepseek_v4 {
 
 namespace {
 
-bool env_flag_enabled(const char *name, bool default_value) {
-    const char *value = std::getenv(name);
+QbKvMode parse_q_b_kv_mode() {
+    const char *value = std::getenv("INFINILM_DSV4_Q_B_KV_MODE");
     if (value == nullptr || value[0] == '\0') {
-        return default_value;
+        return QbKvMode::fused_q_b_and_kv;
     }
-    if (std::strcmp(value, "0") == 0 || std::strcmp(value, "false") == 0 || std::strcmp(value, "False") == 0 || std::strcmp(value, "FALSE") == 0 || std::strcmp(value, "off") == 0 || std::strcmp(value, "Off") == 0 || std::strcmp(value, "OFF") == 0 || std::strcmp(value, "no") == 0 || std::strcmp(value, "No") == 0 || std::strcmp(value, "NO") == 0) {
-        return false;
+    const std::string mode(value);
+    if (mode == "q_b_and_kv") {
+        return QbKvMode::q_b_and_kv;
     }
-    return true;
+    if (mode == "fused_q_b_and_kv") {
+        return QbKvMode::fused_q_b_and_kv;
+    }
+    if (mode == "fused_q_b_and_kv_to_cache") {
+        return QbKvMode::fused_q_b_and_kv_to_cache;
+    }
+    throw std::runtime_error("INFINILM_DSV4_Q_B_KV_MODE must be one of q_b_and_kv, fused_q_b_and_kv, fused_q_b_and_kv_to_cache");
 }
 
 } // namespace
@@ -65,7 +72,7 @@ DeepseekV4Attention::DeepseekV4Attention(std::shared_ptr<infinilm::config::Model
     qk_rope_head_dim_ = model_config->get<size_t>("qk_rope_head_dim"); // 64
     o_groups_ = model_config->get<size_t>("o_groups");
     rms_norm_eps_ = model_config->get<double>("rms_norm_eps");
-    fused_q_b_and_kv_ = env_flag_enabled("INFINILM_DSV4_FUSED_Q_B_KV", true);
+    q_b_kv_mode_ = parse_q_b_kv_mode();
     max_position_embeddings_ = model_config->get<size_t>("max_position_embeddings");
     rope_theta_ = model_config->get_or<double>("rope_theta", 10000.0);
     compress_rope_theta_ = model_config->get_or<double>("compress_rope_theta", 160000.0);
@@ -522,6 +529,48 @@ infinicore::Tensor DeepseekV4Attention::_compute_fused_q_b_and_kv(const infinico
     return q;
 }
 
+infinicore::Tensor DeepseekV4Attention::_compute_fused_q_b_and_kv_to_cache(const infinicore::Tensor &q_lora,
+                                                                           infinicore::Tensor &kv,
+                                                                           const infinicore::Tensor &pos_ids,
+                                                                           size_t seq_len,
+                                                                           const infinicore::Tensor &cache_slots,
+                                                                           infinicore::Tensor swa_cache_raw) const {
+    if (head_dim_ != 512 || qk_rope_head_dim_ != 64 || dtype_ != infinicore::DataType::BF16) {
+        throw std::runtime_error("DeepseekV4Attention::_compute_fused_q_b_and_kv_to_cache requires head_dim=512, qk_rope_head_dim=64, dtype=BF16");
+    }
+
+    infinicore::Tensor q;
+    {
+        auto q_mut = q_lora;
+        profile::ScopedTimer sub_timer(profile::Event::AttentionQProjB, seq_len);
+        q = wq_b_->forward(q_mut)->view({seq_len, num_local_attention_heads_, head_dim_});
+    }
+
+    {
+        profile::ScopedTimer sub_timer(profile::Event::AttentionQRmsNormSelf, seq_len);
+        auto q_out = q;
+        infinicore::op::deepseek_v4_fused_q_norm_rope_(q_out,
+                                                       q,
+                                                       static_cast<float>(rms_norm_eps_),
+                                                       rope_freqs_cis_,
+                                                       pos_ids);
+    }
+
+    {
+        profile::ScopedTimer sub_timer(profile::Event::AttentionKVNorm, seq_len);
+        kv = kv->is_contiguous() ? kv : kv->contiguous();
+        infinicore::op::deepseek_v4_fused_k_norm_rope_flashmla_(kv,
+                                                                kv_norm_->weight(),
+                                                                static_cast<float>(rms_norm_eps_),
+                                                                rope_freqs_cis_,
+                                                                pos_ids,
+                                                                cache_slots,
+                                                                swa_cache_raw,
+                                                                static_cast<int>(kDsv4SwaBlockSize));
+    }
+    return q;
+}
+
 DeepseekV4Attention::ForwardPrepareResult
 DeepseekV4Attention::_forward_prepare(const infinicore::Tensor &hidden_states,
                                       const infinicore::Tensor &pos_ids,
@@ -548,30 +597,63 @@ DeepseekV4Attention::_forward_prepare(const infinicore::Tensor &hidden_states,
         q_lora = q_norm_->forward(q_lora);
     }
 
+    auto cache_slots = dsv4_metadata.raw_out_loc ? dsv4_metadata.raw_out_loc : attn_metadata.slot_mapping.value();
+
     infinicore::Tensor q;
-    fused_q_b_and_kv_ = true;
+    bool swa_cache_stored = false;
+    q_b_kv_mode_ = QbKvMode::fused_q_b_and_kv_to_cache;
     {
         const int repeats = 1; // for test 5000
         for (int i = 0; i < repeats; ++i) {
-            if (fused_q_b_and_kv_) {
-                q = _compute_fused_q_b_and_kv(q_lora, kv, pos_ids, seq_len);
-            } else {
+            switch (q_b_kv_mode_) {
+            case QbKvMode::q_b_and_kv:
                 q = _compute_q_b_and_kv(q_lora, kv, pos_ids, seq_len);
+                break;
+            case QbKvMode::fused_q_b_and_kv:
+                q = _compute_fused_q_b_and_kv(q_lora, kv, pos_ids, seq_len);
+                break;
+            case QbKvMode::fused_q_b_and_kv_to_cache:
+                q = _compute_fused_q_b_and_kv_to_cache(q_lora, kv, pos_ids, seq_len, cache_slots, layer_cache.swa_cache_raw);
+                swa_cache_stored = true;
+                break;
+            }
+
+            if (!swa_cache_stored) {
+                profile::ScopedTimer timer(profile::Event::AttentionSWAStore, seq_len);
+                // 该注释不要被删除：swa_cache_raw 存储的是普通 KV 的 FlashMLA raw/FP8 page layout。
+                // "SWA" 表示这份 cache 服务于 Sliding Window Attention；滑窗语义由后续读取时的
+                // swa_indices 和 swa_topk_lengths 选择最近窗口体现，不改变这里写入的 KV 内容。
+
+                /*
+                def fused_store_cache(
+                    input: torch.Tensor,
+                    cache: torch.Tensor,
+                    indices: torch.Tensor,
+                    *,
+                    page_size: int,
+                    type: Literal["flashmla", "indexer"],
+                ) -> None:
+
+                上面是sglang的源码，应该对应着deepseek_v4_store_flashmla_raw_cache_算子。
+                其中有.cu的实现，也有triton的实现。
+                未对比性能。
+
+                HIP/ROCm:
+                fused_store_cache
+                    -> triton_fused_store_cache
+                    -> triton_fused_store_flashmla
+
+                CUDA:
+                fused_store_cache
+                    -> JIT load deepseek_v4/store.cuh
+                    -> FusedStoreCacheFlashMLAKernel::run
+                */
+                infinicore::op::deepseek_v4_store_flashmla_raw_cache_(kv,
+                                                                      layer_cache.swa_cache_raw,
+                                                                      cache_slots,
+                                                                      static_cast<int>(kDsv4SwaBlockSize));
             }
         }
-    }
-
-    auto cache_slots = dsv4_metadata.raw_out_loc ? dsv4_metadata.raw_out_loc : attn_metadata.slot_mapping.value();
-
-    {
-        profile::ScopedTimer timer(profile::Event::AttentionSWAStore, seq_len);
-        // 该注释不要被删除：swa_cache_raw 存储的是普通 KV 的 FlashMLA raw/FP8 page layout。
-        // "SWA" 表示这份 cache 服务于 Sliding Window Attention；滑窗语义由后续读取时的
-        // swa_indices 和 swa_topk_lengths 选择最近窗口体现，不改变这里写入的 KV 内容。
-        infinicore::op::deepseek_v4_store_flashmla_raw_cache_(kv,
-                                                              layer_cache.swa_cache_raw,
-                                                              cache_slots,
-                                                              static_cast<int>(kDsv4SwaBlockSize));
     }
 
     std::optional<infinicore::Tensor> extra_raw_cache = std::nullopt;
