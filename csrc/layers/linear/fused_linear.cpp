@@ -1,7 +1,7 @@
 #include "fused_linear.hpp"
 
-#include <spdlog/spdlog.h>
 #include <memory>
+#include <spdlog/spdlog.h>
 #include <stdexcept>
 #include <utility>
 
@@ -139,14 +139,14 @@ QKVParallelLinear::QKVParallelLinear(size_t hidden_size,
                                      const infinicore::Device &device,
                                      engine::distributed::RankInfo rank_info)
     : infinilm::nn::ColumnParallelLinear(
-        hidden_size,
-        calculate_out_feature_size(num_q_head, q_dim, num_k_head, k_dim, num_v_head, v_dim, rank_info),
-        quantization == nullptr ? std::make_shared<infinilm::quantization::NoneQuantization>() : quantization,
-        (q_bias || k_bias || v_bias),
-        dtype,
-        device,
-        rank_info.tp_rank,
-        rank_info.tp_size),
+          hidden_size,
+          calculate_out_feature_size(num_q_head, q_dim, num_k_head, k_dim, num_v_head, v_dim, rank_info),
+          quantization == nullptr ? std::make_shared<infinilm::quantization::NoneQuantization>() : quantization,
+          (q_bias || k_bias || v_bias),
+          dtype,
+          device,
+          rank_info.tp_rank,
+          rank_info.tp_size),
       q_dim_(q_dim),
       k_dim_(k_dim),
       v_dim_(v_dim),
@@ -242,14 +242,14 @@ GateUpParallelLinear::GateUpParallelLinear(size_t hidden_size, size_t intermedia
                                            const infinicore::DataType &dtype, const infinicore::Device &device,
                                            engine::distributed::RankInfo rank_info)
     : infinilm::nn::ColumnParallelLinear(
-        hidden_size,
-        intermediate_size * 2,
-        quantization == nullptr ? std::make_shared<infinilm::quantization::NoneQuantization>() : quantization,
-        gate_bias || up_bias,
-        dtype,
-        device,
-        rank_info.tp_rank,
-        rank_info.tp_size),
+          hidden_size,
+          intermediate_size * 2,
+          quantization == nullptr ? std::make_shared<infinilm::quantization::NoneQuantization>() : quantization,
+          gate_bias || up_bias,
+          dtype,
+          device,
+          rank_info.tp_rank,
+          rank_info.tp_size),
       gate_bias_(gate_bias),
       up_bias_(up_bias) {
     if (gate_bias_ != up_bias_) {

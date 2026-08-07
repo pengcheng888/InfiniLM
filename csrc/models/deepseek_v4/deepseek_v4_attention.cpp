@@ -6,11 +6,15 @@
 #include "infinicore/context/context.hpp"
 #include "infinicore/ops/deepseek_v4_flashmla_cache.hpp"
 #include "infinicore/ops/deepseek_v4_flashmla_compute.hpp"
+#include "infinicore/ops/deepseek_v4_fused_norm_rope_inplace.hpp"
+#include "infinicore/ops/deepseek_v4_fused_q_norm_rope.hpp"
 #include "infinicore/ops/deepseek_v4_fused_rope.hpp"
 #include "infinicore/ops/deepseek_v4_rmsnorm_self.hpp"
 
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -19,6 +23,21 @@
 #include <vector>
 
 namespace infinilm::models::deepseek_v4 {
+
+namespace {
+
+bool env_flag_enabled(const char *name, bool default_value) {
+    const char *value = std::getenv(name);
+    if (value == nullptr || value[0] == '\0') {
+        return default_value;
+    }
+    if (std::strcmp(value, "0") == 0 || std::strcmp(value, "false") == 0 || std::strcmp(value, "False") == 0 || std::strcmp(value, "FALSE") == 0 || std::strcmp(value, "off") == 0 || std::strcmp(value, "Off") == 0 || std::strcmp(value, "OFF") == 0 || std::strcmp(value, "no") == 0 || std::strcmp(value, "No") == 0 || std::strcmp(value, "NO") == 0) {
+        return false;
+    }
+    return true;
+}
+
+} // namespace
 
 thread_local DeepseekV4AttentionScratch DeepseekV4Attention::attention_scratch_;
 thread_local DeepseekV4MLAScratch DeepseekV4Attention::mla_scratch_;
@@ -46,6 +65,7 @@ DeepseekV4Attention::DeepseekV4Attention(std::shared_ptr<infinilm::config::Model
     qk_rope_head_dim_ = model_config->get<size_t>("qk_rope_head_dim"); // 64
     o_groups_ = model_config->get<size_t>("o_groups");
     rms_norm_eps_ = model_config->get<double>("rms_norm_eps");
+    fused_q_b_and_kv_ = env_flag_enabled("INFINILM_DSV4_FUSED_Q_B_KV", true);
     max_position_embeddings_ = model_config->get<size_t>("max_position_embeddings");
     rope_theta_ = model_config->get_or<double>("rope_theta", 10000.0);
     compress_rope_theta_ = model_config->get_or<double>("compress_rope_theta", 160000.0);
@@ -396,34 +416,10 @@ void DeepseekV4Attention::validate_forward_metadata_and_cache(
     }
 }
 
-DeepseekV4Attention::ForwardPrepareResult
-DeepseekV4Attention::_forward_prepare(const infinicore::Tensor &hidden_states,
-                                      const infinicore::Tensor &pos_ids,
-                                      size_t seq_len,
-                                      infinilm::global_state::DSV4AttnMetadata &dsv4_metadata,
-                                      infinilm::global_state::DeepSeekV4LayerKVCache &layer_cache) const {
-    auto &attn_metadata = infinilm::global_state::get_forward_context().attn_metadata;
-
-    infinicore::Tensor q_lora;
-    infinicore::Tensor kv;
-    {
-
-        const int repeats = 1; // for test 5000
-        for (int i = 0; i < repeats; ++i) {
-            profile::ScopedTimer timer(profile::Event::AttentionQProjection, seq_len);
-            auto x = hidden_states;
-            {
-                profile::ScopedTimer sub_timer(profile::Event::AttentionQProjA, seq_len);
-                std::tie(q_lora, kv) = wqkv_a_->forward_split(x);
-            }
-        }
-    }
-
-    {
-        profile::ScopedTimer sub_timer(profile::Event::AttentionQNorm, seq_len);
-        q_lora = q_norm_->forward(q_lora);
-    }
-
+infinicore::Tensor DeepseekV4Attention::_compute_q_b_and_kv(const infinicore::Tensor &q_lora,
+                                                            infinicore::Tensor &kv,
+                                                            const infinicore::Tensor &pos_ids,
+                                                            size_t seq_len) const {
     infinicore::Tensor q;
     {
         auto q_mut = q_lora;
@@ -482,6 +478,87 @@ DeepseekV4Attention::_forward_prepare(const infinicore::Tensor &hidden_states,
         auto q_rope = q->narrow({{2, head_dim_ - qk_rope_head_dim_, qk_rope_head_dim_}});
         auto kv_rope = kv->narrow({{1, head_dim_ - qk_rope_head_dim_, qk_rope_head_dim_}})->unsqueeze(1);
         apply_rope_(pos_ids, q_rope, kv_rope, false);
+    }
+    return q;
+}
+
+infinicore::Tensor DeepseekV4Attention::_compute_fused_q_b_and_kv(const infinicore::Tensor &q_lora,
+                                                                  infinicore::Tensor &kv,
+                                                                  const infinicore::Tensor &pos_ids,
+                                                                  size_t seq_len) const {
+    if (head_dim_ != 512 || qk_rope_head_dim_ != 64 || dtype_ != infinicore::DataType::BF16) {
+        // return _compute_q_b_and_kv(q_lora, kv, pos_ids, seq_len);
+        throw std::runtime_error("DeepseekV4Attention::_compute_fused_q_b_and_kv ");
+    }
+
+    infinicore::Tensor q;
+    {
+        auto q_mut = q_lora;
+        profile::ScopedTimer sub_timer(profile::Event::AttentionQProjB, seq_len);
+
+        // [tokens, q_lora_rank] => [tokens, num_attention_heads * head_dim] => [tokens, num_attention_heads, head_dim]
+        q = wq_b_->forward(q_mut)->view({seq_len, num_local_attention_heads_, head_dim_});
+    }
+
+    {
+        profile::ScopedTimer sub_timer(profile::Event::AttentionQRmsNormSelf, seq_len);
+        auto q_out = q;
+        infinicore::op::deepseek_v4_fused_q_norm_rope_(q_out,
+                                                       q,
+                                                       static_cast<float>(rms_norm_eps_),
+                                                       rope_freqs_cis_,
+                                                       pos_ids);
+    }
+
+    {
+        profile::ScopedTimer sub_timer(profile::Event::AttentionKVNorm, seq_len);
+        kv = kv->is_contiguous() ? kv : kv->contiguous();
+        infinicore::op::deepseek_v4_fused_norm_rope_inplace(kv,
+                                                            kv_norm_->weight(),
+                                                            static_cast<float>(rms_norm_eps_),
+                                                            rope_freqs_cis_,
+                                                            pos_ids);
+    }
+    return q;
+}
+
+DeepseekV4Attention::ForwardPrepareResult
+DeepseekV4Attention::_forward_prepare(const infinicore::Tensor &hidden_states,
+                                      const infinicore::Tensor &pos_ids,
+                                      size_t seq_len,
+                                      infinilm::global_state::DSV4AttnMetadata &dsv4_metadata,
+                                      infinilm::global_state::DeepSeekV4LayerKVCache &layer_cache) const {
+    auto &attn_metadata = infinilm::global_state::get_forward_context().attn_metadata;
+
+    infinicore::Tensor q_lora;
+    infinicore::Tensor kv;
+    {
+        profile::ScopedTimer timer(profile::Event::AttentionQProjection, seq_len);
+        auto x = hidden_states;
+
+        const int repeats = 1; // for test 5000
+        for (int i = 0; i < repeats; ++i) {
+            profile::ScopedTimer sub_timer(profile::Event::AttentionQProjA, seq_len);
+            std::tie(q_lora, kv) = wqkv_a_->forward_split(x);
+        }
+    }
+
+    {
+        profile::ScopedTimer sub_timer(profile::Event::AttentionQNorm, seq_len);
+        q_lora = q_norm_->forward(q_lora);
+    }
+
+    infinicore::Tensor q;
+    fused_q_b_and_kv_ = true;
+    {
+        const int repeats = 1; // for test 5000
+        for (int i = 0; i < repeats; ++i) {
+            if (fused_q_b_and_kv_) {
+                q = _compute_fused_q_b_and_kv(q_lora, kv, pos_ids, seq_len);
+            } else {
+                q = _compute_q_b_and_kv(q_lora, kv, pos_ids, seq_len);
+            }
+        }
     }
 
     auto cache_slots = dsv4_metadata.raw_out_loc ? dsv4_metadata.raw_out_loc : attn_metadata.slot_mapping.value();
