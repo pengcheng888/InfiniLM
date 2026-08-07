@@ -10,6 +10,7 @@ python/infinilm/lib/*.so
 .vscode/
 
 *.sh
+!serve_deepseek_v4.sh
 model_weight/
 
 # Python
@@ -34,3 +35,12 @@ __pycache__/
 *.http
 
 *.nsys-rep
+csrc/models/deepseek_v4/profile_logs/hipprof_20260723/infinilm_dsv4_tp8_fused_mhc_kernel_4tok.db.hipkernel.csv
+csrc/models/deepseek_v4/profile_logs/hipprof_20260723/infinilm_dsv4_tp8_fused_mhc_kernel_4tok.hipkernel.csv
+csrc/models/deepseek_v4/profile_logs/hipprof_20260723/infinilm_dsv4_tp8_fused_mhc_kernel_4tok.db.hiptrace.csv
+csrc/models/deepseek_v4/profile_logs/hipprof_20260723/infinilm_dsv4_tp8_fused_mhc_kernel_4tok.rcclkernel.csv
+csrc/models/deepseek_v4/profile_logs/hipprof_20260723/infinilm_dsv4_tp8_fused_mhc_kernel_4tok.hiptrace.csv
+csrc/models/deepseek_v4/profile_logs/hipprof_20260723/infinilm_dsv4_tp8_fused_mhc_kernel_4tok.rccltrace.csv
+csrc/models/deepseek_v4/profile_logs/hipprof_20260723/infinilm_dsv4_tp8_fused_mhc_kernel_4tok.db
+csrc/models/deepseek_v4/deepseek_v4_utils.hpp.orig
+csrc/models/deepseek_v4/deepseek_v4_moe.hpp.orig

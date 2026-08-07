@@ -8,6 +8,8 @@ namespace py = pybind11;
 PYBIND11_MODULE(_infinilm, m) {
     m.doc() = "InfiniLM Python bindings";
 
+    py::module_::import("infinicore.lib._infinicore");
+
     infinilm::cache::bind_cache(m);
     infinilm::engine::bind_hook_registry(m);
     infinilm::engine::distributed::bind_dist_config(m);

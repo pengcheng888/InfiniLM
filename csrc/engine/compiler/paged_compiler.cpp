@@ -1,11 +1,57 @@
 #include "paged_compiler.hpp"
 #include "../../global_state/global_state.hpp"
+#include "../../models/deepseek_v4/deepseek_v4_graph_metadata.hpp"
 #include "../../utils.hpp"
+
+#include <cstdint>
+#include <optional>
+#include <vector>
 
 namespace infinilm::engine {
 
+namespace {
+
+void bind_forward_context_from_input(const InfinilmModel::Input &input) {
+    auto &forward_context = infinilm::global_state::get_forward_context();
+    forward_context.attn_metadata = infinilm::global_state::AttentionMetadata(input);
+}
+
+bool copy_graph_input_tensor(infinicore::Tensor &dst, const infinicore::Tensor &src) {
+    if (!dst || !src) {
+        return false;
+    }
+    if (dst->shape() == src->shape()) {
+        dst->copy_from(src);
+        return true;
+    }
+    if (dst->ndim() == 2 && src->ndim() == 2 && dst->size(0) == src->size(0) && src->size(1) <= dst->size(1)) {
+        set_minus_one_device_async(dst);
+        dst->narrow({{1, 0, src->size(1)}})->copy_from(src);
+        return true;
+    }
+    return false;
+}
+
+bool copy_graph_input_optional(std::optional<infinicore::Tensor> &dst,
+                               const std::optional<infinicore::Tensor> &src) {
+    if (!dst.has_value() && !src.has_value()) {
+        return true;
+    }
+    return dst.has_value() && src.has_value() && copy_graph_input_tensor(dst.value(), src.value());
+}
+
+} // namespace
+
 PagedCompiler::PagedCompiler(const std::shared_ptr<InfinilmModel> &model, RankBarrier *barrier)
     : GraphCompiler(model, barrier) {
+    const bool is_deepseek_v4 = model_ && model_->model_type() == "deepseek_v4";
+    if (is_deepseek_v4) {
+        for (size_t b = 1; b <= 10; ++b) {
+            decode_batch_sizes_.push_back(b);
+        }
+        return;
+    }
+
     for (size_t b = 1; b < 64; ++b) {
         decode_batch_sizes_.push_back(b);
     }
@@ -24,17 +70,27 @@ void PagedCompiler::compile() {
     if (model_->get_cache_config() != nullptr && dynamic_cast<const cache::PagedKVCacheConfig *>(model_->get_cache_config())) {
         size_t nblocks = dynamic_cast<const cache::PagedKVCacheConfig *>(model_->get_cache_config())->num_blocks();
         size_t max_batch_size = *std::max_element(decode_batch_sizes_.begin(), decode_batch_sizes_.end());
+        const bool is_deepseek_v4_model = model_ && model_->model_type() == "deepseek_v4";
         compiled_map_decode_.clear();
         block_tables_holder_ = infinicore::Tensor::empty(
             {nblocks * max_batch_size}, infinicore::DataType::I32, infinicore::context::getDevice());
         set_zeros(block_tables_holder_);
 
         auto make_decode_input = [&](size_t b) {
+            const bool is_deepseek_v4 = model_ && model_->model_type() == "deepseek_v4";
             InfinilmModel::Input input;
             input.input_ids = infinicore::Tensor::empty({1, b}, infinicore::DataType::I64, infinicore::context::getDevice());
             input.position_ids = infinicore::Tensor::empty({b}, infinicore::DataType::I64, infinicore::context::getDevice());
             input.total_sequence_lengths = infinicore::Tensor::empty({b}, infinicore::DataType::I32, infinicore::context::getDevice());
-            set_zeros(input.input_ids.value());
+            if (is_deepseek_v4) {
+                // Token 104937 is a known-valid DeepSeek-V4 decode token from
+                // the local correctness tests. Avoid token-id 0 here because
+                // FFN graph capture now exercises hash-topk and MoE kernels.
+                std::vector<int64_t> input_ids_vec(b, 104937);
+                infinicore::context::memcpyH2D(input.input_ids.value()->data(), input_ids_vec.data(), b * sizeof(int64_t), false);
+            } else {
+                set_zeros(input.input_ids.value());
+            }
             set_zeros(input.position_ids.value());
             set_zeros(input.total_sequence_lengths.value());
             std::vector<int32_t> total_sequence_lengths_vec(b, 1);
@@ -52,15 +108,16 @@ void PagedCompiler::compile() {
             input.slot_mapping = infinicore::Tensor::empty({b}, infinicore::DataType::I64, infinicore::context::getDevice());
             set_zeros(input.slot_mapping.value());
 
-            // Attention reads attn_metadata from thread-local forward context.
-            infinilm::global_state::get_forward_context().attn_metadata = {
-                input.past_sequence_lengths,
-                input.total_sequence_lengths,
-                input.input_offsets,
-                input.cu_seqlens,
-                input.block_tables,
-                input.slot_mapping,
-            };
+            if (is_deepseek_v4) {
+                infinilm::models::deepseek_v4::init_graph_decode_metadata(input, b, block_per_req, infinicore::context::getDevice());
+            }
+
+            // Attention reads metadata from thread-local forward context.
+            if (is_deepseek_v4) {
+                infinilm::models::deepseek_v4::bind_graph_forward_context_from_input(input);
+            } else {
+                bind_forward_context_from_input(input);
+            }
             return input;
         };
 
@@ -82,6 +139,12 @@ void PagedCompiler::compile() {
             barrier_->wait();
             (void)model_->forward(input);
             infinicore::context::syncStream();
+            infinilm::global_state::DSV4AttnMetadata dsv4_attn_metadata;
+            if (is_deepseek_v4_model) {
+                dsv4_attn_metadata = infinilm::global_state::get_forward_context().dsv4_attn_metadata;
+                infinilm::models::deepseek_v4::bind_graph_forward_context_from_input(input, dsv4_attn_metadata);
+                dsv4_attn_metadata = infinilm::global_state::get_forward_context().dsv4_attn_metadata;
+            }
             // Capture must not start with stale Marlin locks from previous
             // warmup/capture attempts. This reset is intentionally outside
             // graph capture; the current implementation still pays a memset
@@ -96,7 +159,10 @@ void PagedCompiler::compile() {
             auto shared_output = std::shared_ptr<InfinilmModel::Output>(
                 new InfinilmModel::Output{infinicore::graph::GraphTensor(output.logits)});
 
-            compiled_map_decode_[b] = CompiledResult{std::move(input), std::make_tuple(graph, shared_output)};
+            compiled_map_decode_[b] = CompiledResult{
+                std::move(input),
+                std::move(dsv4_attn_metadata),
+                std::make_tuple(graph, shared_output)};
         }
     }
 }
@@ -135,6 +201,27 @@ PagedCompiler::Compiled PagedCompiler::get_compiled(const InfinilmModel::Input &
             set_minus_one_device_async(graph_block_tables);
             graph_block_tables->narrow({{1, 0, block_per_req}})->copy_from(input.block_tables.value());
             graph_input.slot_mapping.value()->copy_from(input.slot_mapping.value());
+
+            if (model_ && model_->model_type() == "deepseek_v4") {
+                const bool dsv4_copied = copy_graph_input_tensor(graph_input.deepseek_v4.swa_indices, input.deepseek_v4.swa_indices)
+                                      && copy_graph_input_tensor(graph_input.deepseek_v4.swa_topk_lengths, input.deepseek_v4.swa_topk_lengths)
+                                      && copy_graph_input_tensor(graph_input.deepseek_v4.raw_out_loc, input.deepseek_v4.raw_out_loc)
+                                      && copy_graph_input_tensor(graph_input.deepseek_v4.page_table, input.deepseek_v4.page_table)
+                                      && copy_graph_input_tensor(graph_input.deepseek_v4.c4_out_loc, input.deepseek_v4.c4_out_loc)
+                                      && copy_graph_input_tensor(graph_input.deepseek_v4.c4_positions, input.deepseek_v4.c4_positions)
+                                      && copy_graph_input_tensor(graph_input.deepseek_v4.c4_topk_lengths_raw, input.deepseek_v4.c4_topk_lengths_raw)
+                                      && copy_graph_input_tensor(graph_input.deepseek_v4.c4_sparse_topk_lengths, input.deepseek_v4.c4_sparse_topk_lengths)
+                                      && copy_graph_input_tensor(graph_input.deepseek_v4.c128_out_loc, input.deepseek_v4.c128_out_loc)
+                                      && copy_graph_input_tensor(graph_input.deepseek_v4.c128_positions, input.deepseek_v4.c128_positions)
+                                      && copy_graph_input_tensor(graph_input.deepseek_v4.c128_page_indices, input.deepseek_v4.c128_page_indices)
+                                      && copy_graph_input_tensor(graph_input.deepseek_v4.c128_topk_lengths_clamp1, input.deepseek_v4.c128_topk_lengths_clamp1)
+                                      && copy_graph_input_tensor(graph_input.deepseek_v4.c4_compress_write_loc, input.deepseek_v4.c4_compress_write_loc)
+                                      && copy_graph_input_tensor(graph_input.deepseek_v4.c4_compress_extra_loc, input.deepseek_v4.c4_compress_extra_loc)
+                                      && copy_graph_input_tensor(graph_input.deepseek_v4.c128_compress_write_loc, input.deepseek_v4.c128_compress_write_loc);
+                if (!dsv4_copied) {
+                    return {nullptr, nullptr};
+                }
+            }
             // CUDA graph replay reuses the same per-layer Marlin workspaces.
             // The graph itself does not contain a workspace reset, so enqueue
             // one on the same stream before launch. This is correct but costs

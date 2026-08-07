@@ -1,10 +1,32 @@
 #include "rank_worker.hpp"
 #include "../models/model_factory.hpp"
 #include "infinicore/ops.hpp"
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <spdlog/spdlog.h>
 #include <stdexcept>
 
 namespace infinilm::engine {
+
+namespace {
+
+bool rank_worker_detail_profile_enabled() {
+    const char *value = std::getenv("INFINILM_RANK_WORKER_DETAIL_PROFILE");
+    if (value == nullptr) {
+        return false;
+    }
+    std::string v(value);
+    return v == "1" || v == "true" || v == "TRUE" || v == "on" || v == "ON" || v == "yes" || v == "YES";
+}
+
+using DetailClock = std::chrono::steady_clock;
+
+double detail_elapsed_ms(DetailClock::time_point start, DetailClock::time_point end) {
+    return std::chrono::duration<double, std::milli>(end - start).count();
+}
+
+} // namespace
 
 RankWorker::RankWorker(
     std::shared_ptr<infinilm::global_state::InfinilmConfig> infinilm_config,
@@ -415,6 +437,14 @@ void RankWorker::thread_loop() {
                     {
                         std::lock_guard<std::mutex> lk(mutex_);
 
+                        const bool detail_profile = rank_worker_detail_profile_enabled();
+                        const auto run_start = DetailClock::now();
+                        double to_model_input_ms = 0.0;
+                        double model_forward_ms = 0.0;
+                        double sample_ms = 0.0;
+                        double copy_to_cpu_ms = 0.0;
+                        double final_sync_ms = 0.0;
+
                         infinicore::Tensor logits;
                         infinicore::Tensor hidden_states;
                         // All-position speculative/MTP runs need eager mode because
@@ -428,8 +458,19 @@ void RankWorker::thread_loop() {
                         }
                         // Fall back to eager mode
                         if (!logits) {
+                            //  printf(" ---------------> Fall back to eager mode\n");
+                            const auto input_start = DetailClock::now();
                             auto model_args = local_args.to_model_input(rank_info_.device);
+                            const auto input_end = DetailClock::now();
+                            to_model_input_ms = detail_elapsed_ms(input_start, input_end);
+
+                            const auto model_start = DetailClock::now();
                             auto model_output = model_->forward(model_args);
+                            if (detail_profile) {
+                                infinicore::context::syncStream();
+                            }
+                            const auto model_end = DetailClock::now();
+                            model_forward_ms = detail_elapsed_ms(model_start, model_end);
                             logits = model_output.logits;
                             hidden_states = model_output.hidden_states;
                         }
@@ -452,6 +493,7 @@ void RankWorker::thread_loop() {
                             const size_t n_out = sample_all_positions ? static_cast<size_t>(input_offsets[n_req]) : n_req;
                             auto output_ids{infinicore::Tensor::empty({n_out}, infinicore::DataType::I64, rank_info_.device)};
 
+                            const auto sample_start = DetailClock::now();
                             for (size_t i{0}; i < n_out; ++i) {
                                 size_t score_idx = i;
                                 if (!sample_all_positions) {
@@ -463,10 +505,38 @@ void RankWorker::thread_loop() {
                                 infinicore::op::random_sample_(
                                     out, score, random_val, top_p, top_k, temperature);
                             }
+                            if (detail_profile) {
+                                infinicore::context::syncStream();
+                            }
+                            const auto sample_end = DetailClock::now();
+                            sample_ms = detail_elapsed_ms(sample_start, sample_end);
 
+                            const auto copy_start = DetailClock::now();
                             output_ids = output_ids->to(infinicore::Device::cpu());
+                            if (detail_profile) {
+                                infinicore::context::syncStream();
+                            }
+                            const auto copy_end = DetailClock::now();
+                            copy_to_cpu_ms = detail_elapsed_ms(copy_start, copy_end);
 
+                            const auto final_sync_start = DetailClock::now();
                             infinicore::context::syncStream();
+                            const auto final_sync_end = DetailClock::now();
+                            final_sync_ms = detail_elapsed_ms(final_sync_start, final_sync_end);
+
+                            if (detail_profile) {
+                                const size_t input_token_count = local_args.input_ids.has_value() ? local_args.input_ids.value()->numel() : 0;
+                                std::fprintf(stderr,
+                                             "[INFINILM_RANK_WORKER_DETAIL] rank=%d input_tokens=%zu to_model_input_ms=%.3f model_forward_ms=%.3f sample_ms=%.3f copy_to_cpu_ms=%.3f final_sync_ms=%.3f total_ms=%.3f\n",
+                                             rank_info_.tp_rank,
+                                             input_token_count,
+                                             to_model_input_ms,
+                                             model_forward_ms,
+                                             sample_ms,
+                                             copy_to_cpu_ms,
+                                             final_sync_ms,
+                                             detail_elapsed_ms(run_start, final_sync_end));
+                            }
 
                             auto out{Output{output_ids, logits, hidden_states}};
 

@@ -163,6 +163,28 @@ InferEngine::Input::to_model_input(infinicore::Device device) const {
         }
         return result;
     };
+    auto to_device_tensor = [&](const infinicore::Tensor &t) -> infinicore::Tensor {
+        return t ? t->to(device) : infinicore::Tensor{};
+    };
+    auto to_device_deepseek_v4 = [&]() -> infinilm::DeepSeekV4Input {
+        return {
+            to_device_tensor(deepseek_v4.swa_indices),
+            to_device_tensor(deepseek_v4.swa_topk_lengths),
+            to_device_tensor(deepseek_v4.raw_out_loc),
+            to_device_tensor(deepseek_v4.page_table),
+            to_device_tensor(deepseek_v4.c4_out_loc),
+            to_device_tensor(deepseek_v4.c4_positions),
+            to_device_tensor(deepseek_v4.c4_topk_lengths_raw),
+            to_device_tensor(deepseek_v4.c4_sparse_topk_lengths),
+            to_device_tensor(deepseek_v4.c128_out_loc),
+            to_device_tensor(deepseek_v4.c128_positions),
+            to_device_tensor(deepseek_v4.c128_page_indices),
+            to_device_tensor(deepseek_v4.c128_topk_lengths_clamp1),
+            to_device_tensor(deepseek_v4.c4_compress_write_loc),
+            to_device_tensor(deepseek_v4.c4_compress_extra_loc),
+            to_device_tensor(deepseek_v4.c128_compress_write_loc),
+        };
+    };
 
     infinilm::InfinilmModel::Input input = {
         to_device(input_ids), // @todo: on device in the future
@@ -173,6 +195,7 @@ InferEngine::Input::to_model_input(infinicore::Device device) const {
         to_device(cu_seqlens),
         to_device(block_tables),
         to_device(slot_mapping),
+        to_device_deepseek_v4(),
         to_device(mamba_init_state_indices),
         to_device(mamba_final_state_indices),
         to_device_vec(pixel_values),
@@ -183,20 +206,16 @@ InferEngine::Input::to_model_input(infinicore::Device device) const {
         visual_token_ranges,
         to_device(target_hidden_states)};
 
-    infinilm::global_state::get_forward_context().attn_metadata = {
-        input.past_sequence_lengths,
-        input.total_sequence_lengths,
-        input.input_offsets,
-        input.cu_seqlens,
-        input.block_tables,
-        input.slot_mapping};
+    auto &forward_context = infinilm::global_state::get_forward_context();
+    forward_context.attn_metadata = infinilm::global_state::AttentionMetadata(input);
+    forward_context.dsv4_attn_metadata = infinilm::global_state::DSV4AttnMetadata(input);
 
-    infinilm::global_state::get_forward_context().mamba_metadata = {
+    forward_context.mamba_metadata = {
         input.input_offsets,
         input.mamba_init_state_indices,
         input.mamba_final_state_indices};
 
-    global_state::get_forward_context().mm_metadata = {
+    forward_context.mm_metadata = {
         image_req_ids,
         visual_token_ranges};
 

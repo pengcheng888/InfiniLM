@@ -12,6 +12,8 @@ from infinilm.lib import _infinilm
 from .exception_utils import handle_oom_and_exit
 from .modeling_utils import parse_dtype
 
+DeepSeekV4Input = _infinilm.DeepSeekV4Input
+
 _MODEL_DEFAULTS = {
     "gpt2": {"torch_dtype": "float32"},
     "mistral": {"torch_dtype": "bfloat16"},
@@ -220,6 +222,21 @@ class InferEngine(_infinilm.InferEngine):
         cu_seqlens=None,
         block_tables=None,
         slot_mapping=None,
+        dsv4_swa_indices=None,
+        dsv4_swa_topk_lengths=None,
+        dsv4_raw_out_loc=None,
+        dsv4_page_table=None,
+        dsv4_c4_out_loc=None,
+        dsv4_c4_positions=None,
+        dsv4_c4_topk_lengths_raw=None,
+        dsv4_c4_sparse_topk_lengths=None,
+        dsv4_c128_out_loc=None,
+        dsv4_c128_positions=None,
+        dsv4_c128_page_indices=None,
+        dsv4_c128_topk_lengths_clamp1=None,
+        dsv4_c4_compress_write_loc=None,
+        dsv4_c4_compress_extra_loc=None,
+        dsv4_c128_compress_write_loc=None,
         mamba_init_state_indices=None,
         mamba_final_state_indices=None,
         pixel_values=None,
@@ -247,6 +264,21 @@ class InferEngine(_infinilm.InferEngine):
         block_tables = unwrap_tensor(block_tables)
         cu_seqlens = unwrap_tensor(cu_seqlens)
         slot_mapping = unwrap_tensor(slot_mapping)
+        dsv4_swa_indices = unwrap_tensor(dsv4_swa_indices)
+        dsv4_swa_topk_lengths = unwrap_tensor(dsv4_swa_topk_lengths)
+        dsv4_raw_out_loc = unwrap_tensor(dsv4_raw_out_loc)
+        dsv4_page_table = unwrap_tensor(dsv4_page_table)
+        dsv4_c4_out_loc = unwrap_tensor(dsv4_c4_out_loc)
+        dsv4_c4_positions = unwrap_tensor(dsv4_c4_positions)
+        dsv4_c4_topk_lengths_raw = unwrap_tensor(dsv4_c4_topk_lengths_raw)
+        dsv4_c4_sparse_topk_lengths = unwrap_tensor(dsv4_c4_sparse_topk_lengths)
+        dsv4_c128_out_loc = unwrap_tensor(dsv4_c128_out_loc)
+        dsv4_c128_positions = unwrap_tensor(dsv4_c128_positions)
+        dsv4_c128_page_indices = unwrap_tensor(dsv4_c128_page_indices)
+        dsv4_c128_topk_lengths_clamp1 = unwrap_tensor(dsv4_c128_topk_lengths_clamp1)
+        dsv4_c4_compress_write_loc = unwrap_tensor(dsv4_c4_compress_write_loc)
+        dsv4_c4_compress_extra_loc = unwrap_tensor(dsv4_c4_compress_extra_loc)
+        dsv4_c128_compress_write_loc = unwrap_tensor(dsv4_c128_compress_write_loc)
         mamba_init_state_indices = unwrap_tensor(mamba_init_state_indices)
         mamba_final_state_indices = unwrap_tensor(mamba_final_state_indices)
         target_hidden_states = unwrap_tensor(target_hidden_states)
@@ -268,6 +300,23 @@ class InferEngine(_infinilm.InferEngine):
         temperature = 1.0 if temperature is None else temperature
         top_k = 1 if top_k is None else top_k
         top_p = 1.0 if top_p is None else top_p
+        deepseek_v4 = DeepSeekV4Input(
+            swa_indices=dsv4_swa_indices,
+            swa_topk_lengths=dsv4_swa_topk_lengths,
+            raw_out_loc=dsv4_raw_out_loc,
+            page_table=dsv4_page_table,
+            c4_out_loc=dsv4_c4_out_loc,
+            c4_positions=dsv4_c4_positions,
+            c4_topk_lengths_raw=dsv4_c4_topk_lengths_raw,
+            c4_sparse_topk_lengths=dsv4_c4_sparse_topk_lengths,
+            c128_out_loc=dsv4_c128_out_loc,
+            c128_positions=dsv4_c128_positions,
+            c128_page_indices=dsv4_c128_page_indices,
+            c128_topk_lengths_clamp1=dsv4_c128_topk_lengths_clamp1,
+            c4_compress_write_loc=dsv4_c4_compress_write_loc,
+            c4_compress_extra_loc=dsv4_c4_compress_extra_loc,
+            c128_compress_write_loc=dsv4_c128_compress_write_loc,
+        )
 
         return super().Input(
             input_ids,
@@ -278,6 +327,7 @@ class InferEngine(_infinilm.InferEngine):
             cu_seqlens=cu_seqlens,
             block_tables=block_tables,
             slot_mapping=slot_mapping,
+            deepseek_v4=deepseek_v4,
             mamba_init_state_indices=mamba_init_state_indices,
             mamba_final_state_indices=mamba_final_state_indices,
             pixel_values=pixel_values,
@@ -304,6 +354,21 @@ class InferEngine(_infinilm.InferEngine):
         cu_seqlens=None,
         block_tables=None,
         slot_mapping=None,
+        dsv4_swa_indices=None,
+        dsv4_swa_topk_lengths=None,
+        dsv4_raw_out_loc=None,
+        dsv4_page_table=None,
+        dsv4_c4_out_loc=None,
+        dsv4_c4_positions=None,
+        dsv4_c4_topk_lengths_raw=None,
+        dsv4_c4_sparse_topk_lengths=None,
+        dsv4_c128_out_loc=None,
+        dsv4_c128_positions=None,
+        dsv4_c128_page_indices=None,
+        dsv4_c128_topk_lengths_clamp1=None,
+        dsv4_c4_compress_write_loc=None,
+        dsv4_c4_compress_extra_loc=None,
+        dsv4_c128_compress_write_loc=None,
         mamba_init_state_indices=None,
         mamba_final_state_indices=None,
         pixel_values=None,
@@ -338,6 +403,29 @@ class InferEngine(_infinilm.InferEngine):
             cu_seqlens = cu_seqlens._underlying if cu_seqlens is not None else None
             slot_mapping = (
                 slot_mapping._underlying if slot_mapping is not None else None
+            )
+
+            def unwrap_tensor(tensor):
+                return getattr(tensor, "_underlying", tensor) if tensor is not None else None
+
+            dsv4_swa_indices = unwrap_tensor(dsv4_swa_indices)
+            dsv4_swa_topk_lengths = unwrap_tensor(dsv4_swa_topk_lengths)
+            dsv4_raw_out_loc = unwrap_tensor(dsv4_raw_out_loc)
+            dsv4_page_table = unwrap_tensor(dsv4_page_table)
+            dsv4_c4_out_loc = unwrap_tensor(dsv4_c4_out_loc)
+            dsv4_c4_positions = unwrap_tensor(dsv4_c4_positions)
+            dsv4_c4_topk_lengths_raw = unwrap_tensor(dsv4_c4_topk_lengths_raw)
+            dsv4_c4_sparse_topk_lengths = unwrap_tensor(dsv4_c4_sparse_topk_lengths)
+            dsv4_c128_out_loc = unwrap_tensor(dsv4_c128_out_loc)
+            dsv4_c128_positions = unwrap_tensor(dsv4_c128_positions)
+            dsv4_c128_page_indices = unwrap_tensor(dsv4_c128_page_indices)
+            dsv4_c128_topk_lengths_clamp1 = unwrap_tensor(
+                dsv4_c128_topk_lengths_clamp1
+            )
+            dsv4_c4_compress_write_loc = unwrap_tensor(dsv4_c4_compress_write_loc)
+            dsv4_c4_compress_extra_loc = unwrap_tensor(dsv4_c4_compress_extra_loc)
+            dsv4_c128_compress_write_loc = unwrap_tensor(
+                dsv4_c128_compress_write_loc
             )
             mamba_init_state_indices = (
                 mamba_init_state_indices._underlying
@@ -376,6 +464,21 @@ class InferEngine(_infinilm.InferEngine):
                         cu_seqlens=cu_seqlens,
                         block_tables=block_tables,
                         slot_mapping=slot_mapping,
+                        dsv4_swa_indices=dsv4_swa_indices,
+                        dsv4_swa_topk_lengths=dsv4_swa_topk_lengths,
+                        dsv4_raw_out_loc=dsv4_raw_out_loc,
+                        dsv4_page_table=dsv4_page_table,
+                        dsv4_c4_out_loc=dsv4_c4_out_loc,
+                        dsv4_c4_positions=dsv4_c4_positions,
+                        dsv4_c4_topk_lengths_raw=dsv4_c4_topk_lengths_raw,
+                        dsv4_c4_sparse_topk_lengths=dsv4_c4_sparse_topk_lengths,
+                        dsv4_c128_out_loc=dsv4_c128_out_loc,
+                        dsv4_c128_positions=dsv4_c128_positions,
+                        dsv4_c128_page_indices=dsv4_c128_page_indices,
+                        dsv4_c128_topk_lengths_clamp1=dsv4_c128_topk_lengths_clamp1,
+                        dsv4_c4_compress_write_loc=dsv4_c4_compress_write_loc,
+                        dsv4_c4_compress_extra_loc=dsv4_c4_compress_extra_loc,
+                        dsv4_c128_compress_write_loc=dsv4_c128_compress_write_loc,
                         mamba_init_state_indices=mamba_init_state_indices,
                         mamba_final_state_indices=mamba_final_state_indices,
                         pixel_values=pixel_values,
@@ -407,6 +510,21 @@ class InferEngine(_infinilm.InferEngine):
         cu_seqlens=None,
         block_tables=None,
         slot_mapping=None,
+        dsv4_swa_indices=None,
+        dsv4_swa_topk_lengths=None,
+        dsv4_raw_out_loc=None,
+        dsv4_page_table=None,
+        dsv4_c4_out_loc=None,
+        dsv4_c4_positions=None,
+        dsv4_c4_topk_lengths_raw=None,
+        dsv4_c4_sparse_topk_lengths=None,
+        dsv4_c128_out_loc=None,
+        dsv4_c128_positions=None,
+        dsv4_c128_page_indices=None,
+        dsv4_c128_topk_lengths_clamp1=None,
+        dsv4_c4_compress_write_loc=None,
+        dsv4_c4_compress_extra_loc=None,
+        dsv4_c128_compress_write_loc=None,
         pixel_values=None,
         image_bound=None,
         tgt_sizes=None,
@@ -429,6 +547,21 @@ class InferEngine(_infinilm.InferEngine):
                     cu_seqlens=cu_seqlens,
                     block_tables=block_tables,
                     slot_mapping=slot_mapping,
+                    dsv4_swa_indices=dsv4_swa_indices,
+                    dsv4_swa_topk_lengths=dsv4_swa_topk_lengths,
+                    dsv4_raw_out_loc=dsv4_raw_out_loc,
+                    dsv4_page_table=dsv4_page_table,
+                    dsv4_c4_out_loc=dsv4_c4_out_loc,
+                    dsv4_c4_positions=dsv4_c4_positions,
+                    dsv4_c4_topk_lengths_raw=dsv4_c4_topk_lengths_raw,
+                    dsv4_c4_sparse_topk_lengths=dsv4_c4_sparse_topk_lengths,
+                    dsv4_c128_out_loc=dsv4_c128_out_loc,
+                    dsv4_c128_positions=dsv4_c128_positions,
+                    dsv4_c128_page_indices=dsv4_c128_page_indices,
+                    dsv4_c128_topk_lengths_clamp1=dsv4_c128_topk_lengths_clamp1,
+                    dsv4_c4_compress_write_loc=dsv4_c4_compress_write_loc,
+                    dsv4_c4_compress_extra_loc=dsv4_c4_compress_extra_loc,
+                    dsv4_c128_compress_write_loc=dsv4_c128_compress_write_loc,
                     pixel_values=pixel_values,
                     image_bound=image_bound,
                     tgt_sizes=tgt_sizes,

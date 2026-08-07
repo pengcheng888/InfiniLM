@@ -1,3 +1,4 @@
+-- add_requires("pybind11 2.13.6", {system = false})
 add_requires("pybind11")
 
 local INFINI_ROOT = os.getenv("INFINI_ROOT") or (os.getenv(is_host("windows") and "HOMEPATH" or "HOME") .. "/.infini")
@@ -49,6 +50,8 @@ target("_infinilm")
     -- spdlog is already included globally via add_includedirs at the top
 
     add_linkdirs(INFINI_ROOT.."/lib")
+    add_ldflags("-Wl,--disable-new-dtags", "-Wl,-rpath," .. INFINI_ROOT .. "/lib", "-Wl,-rpath,/usr/local/lib/python3.12/dist-packages/torch/lib", {force = true})
+    add_shflags("-Wl,--disable-new-dtags", "-Wl,-rpath," .. INFINI_ROOT .. "/lib", "-Wl,-rpath,/usr/local/lib/python3.12/dist-packages/torch/lib", {force = true})
     add_links("infinicore_cpp_api", "infiniop", "infinirt", "infiniccl")
 
     -- Add src files

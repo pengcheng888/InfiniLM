@@ -75,6 +75,14 @@ class LLMEngine:
                 "max_position_embeddings", config.max_cache_len
             )
             layer_types = llm_config.get("layer_types") or []
+            architectures = llm_config.get("architectures") or []
+            enable_dsv4_swa_mapping = (
+                llm_config.get("model_type") == "deepseek_v4"
+                or "DeepseekV4ForCausalLM" in architectures
+            )
+            dsv4_swa_num_blocks = (
+                max(1, config.num_blocks // 10) if enable_dsv4_swa_mapping else None
+            )
             has_mamba_cache = "linear_attention" in layer_types or (
                 "linear_conv_kernel_dim" in llm_config
                 and "linear_num_key_heads" in llm_config
@@ -95,6 +103,8 @@ class LLMEngine:
                 connector=connector,
                 has_mamba_cache=has_mamba_cache,
                 num_mamba_cache_blocks=num_mamba_cache_blocks,
+                enable_dsv4_swa_mapping=enable_dsv4_swa_mapping,
+                dsv4_swa_num_blocks=dsv4_swa_num_blocks,
             )
             logger.info(f"Using Paged KV Cache with num_blocks={config.num_blocks}")
             if has_mamba_cache:
@@ -107,6 +117,9 @@ class LLMEngine:
 
         self.cache_type = config.cache_type
 
+        if self._should_run_startup_warmup():
+            self._run_startup_warmup()
+
         # Get EOS token IDs from model config
         self.eos_token_ids = self.model_runner.eos_token_id or []
         if isinstance(self.eos_token_ids, int):
@@ -116,6 +129,61 @@ class LLMEngine:
             f"LLMEngine initialized with model at {config.model_path} "
             f"on device {config.device}, "
             f"enable_graph={config.enable_graph}"
+        )
+
+    def _should_run_startup_warmup(self) -> bool:
+        env_value = os.getenv("INFINILM_WARMUP", "").strip().lower()
+        env_enabled = env_value in {"1", "true", "yes", "on"}
+        if not (self.config.warmup or env_enabled):
+            return False
+        if self.config.enable_graph:
+            logger.info("Skipping startup warmup because graph compiling is enabled.")
+            return False
+        if self.config.kv_transfer_config is not None:
+            logger.info("Skipping startup warmup because KV transfer is configured.")
+            return False
+        return True
+
+    def _make_warmup_prompt_token_ids(self, target_len: int = 7) -> List[int]:
+        token_ids = self.tokenizer.encode("InfiniLM warmup")
+        if not token_ids:
+            token_ids = [0]
+        repeats = (target_len + len(token_ids) - 1) // len(token_ids)
+        return (token_ids * repeats)[:target_len]
+
+    def _run_startup_warmup(self) -> None:
+        prompt_token_ids = self._make_warmup_prompt_token_ids()
+        sampling_params = SamplingParams(
+            temperature=self.config.temperature,
+            top_p=self.config.top_p,
+            top_k=self.config.top_k,
+            max_tokens=2,
+            ignore_eos=True,
+        )
+        req = InferenceRequest(
+            request_id=f"warmup-{uuid.uuid4().hex}",
+            prompt="<infinilm warmup>",
+            prompt_token_ids=prompt_token_ids,
+            sampling_params=sampling_params,
+            eos_token_ids=[],
+        )
+        logger.info(
+            "Running startup warmup: prompt_tokens=%d max_new_tokens=%d",
+            len(prompt_token_ids),
+            sampling_params.max_tokens,
+        )
+        start = time.perf_counter()
+        self.add_request(req)
+        steps = 0
+        while not req.is_finished():
+            did_work, _ = self.step()
+            steps += 1
+            if not did_work or steps > sampling_params.max_tokens + 4:
+                raise RuntimeError("Startup warmup did not finish as expected")
+        logger.info(
+            "Startup warmup finished: steps=%d elapsed_ms=%.3f",
+            steps,
+            (time.perf_counter() - start) * 1000.0,
         )
 
     def add_request(self, request: InferenceRequest):
@@ -333,6 +401,7 @@ class LLM:
         weight_load_mode: str = "async",
         skip_load: bool = False,
         skip_legacy_moe: bool = False,
+        warmup: bool = False,
     ):
         """Initialize LLM.
 
@@ -379,6 +448,7 @@ class LLM:
             weight_load_mode=weight_load_mode,
             skip_load=skip_load,
             skip_legacy_moe=skip_legacy_moe,
+            warmup=warmup,
         )
         self.engine = LLMEngine(config)
         self.config = config
@@ -540,6 +610,7 @@ class AsyncLLMEngine:
         use_mla: bool = False,
         weight_load_mode: str = "async",
         skip_legacy_moe: bool = False,
+        warmup: bool = False,
     ):
         """Initialize AsyncLLMEngine.
 
@@ -589,6 +660,7 @@ class AsyncLLMEngine:
             use_mla=use_mla,
             weight_load_mode=weight_load_mode,
             skip_legacy_moe=skip_legacy_moe,
+            warmup=warmup,
         )
         self.engine = LLMEngine(config)
         self.config = config
