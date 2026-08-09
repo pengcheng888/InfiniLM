@@ -49,7 +49,9 @@ DeepseekV4MoEGate::forward(const infinicore::Tensor &hidden_states,
                                                    infinicore::DataType::F32,
                                                    hidden_states->device());
 
-        infinicore::op::deepseek_v4_linear_bf16_fp32_(router_logits, hidden_states, weight_);
+        infinicore::op::deepseek_v4_linear_bf16_fp32_(router_logits, // [ntoken, 256]
+                                                      hidden_states,
+                                                      weight_);
     }
     auto router_scores = router_scores_scratch_.get({hidden_states->size(0), num_experts_per_tok_},
                                                     infinicore::DataType::F32,
@@ -62,8 +64,8 @@ DeepseekV4MoEGate::forward(const infinicore::Tensor &hidden_states,
         profile::ScopedTimer timer(profile::Event::MoeTopk, token_count);
         if (is_hash_) {
             infinicore::op::deepseek_v4_hash_topk_(
-                router_scores,
-                router_indices,
+                router_scores,  // [ntoken, 6]
+                router_indices, // [ntoken, 6]
                 router_logits,
                 input_ids,
                 tid2eid_,
@@ -72,8 +74,8 @@ DeepseekV4MoEGate::forward(const infinicore::Tensor &hidden_states,
                 scoring_func_);
         } else {
             infinicore::op::deepseek_v4_topk_(
-                router_scores,
-                router_indices,
+                router_scores,  // [ntoken, 6]
+                router_indices, // [ntoken, 6]
                 router_logits,
                 bias_,
                 norm_topk_prob_);

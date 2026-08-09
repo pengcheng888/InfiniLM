@@ -27,22 +27,12 @@ DeepseekV4C4Indexer::DeepseekV4C4Indexer(std::shared_ptr<infinilm::config::Model
     index_n_heads_ = model_config->get<size_t>("index_n_heads");
     index_head_dim_ = model_config->get<size_t>("index_head_dim");
     weight_scale_ = static_cast<float>(std::pow(static_cast<double>(index_head_dim_), -0.5) * std::pow(static_cast<double>(index_n_heads_), -0.5));
-    const size_t compressor_proj_size = 2 * index_head_dim_;
-    const double rms_norm_eps = model_config->get<double>("rms_norm_eps");
-
-    INFINICORE_NN_PARAMETER_INIT(ape, ({kDsv4C4PageSize / 16, compressor_proj_size}, infinicore::DataType::F32, device));
-    auto register_fn = [this](const std::string &name, infinicore::nn::Parameter param) {
-        this->register_parameter(name, std::move(param));
-    };
-    wkv_gate_ = std::make_shared<infinilm::layers::linear::FusedReplicatedLinear>(
-        hidden_size,
-        compressor_proj_size,
-        "wkv",
-        "wgate",
-        register_fn,
-        dtype,
-        device);
-    INFINICORE_NN_MODULE_INIT(norm, index_head_dim_, rms_norm_eps, dtype, device);
+    INFINICORE_NN_MODULE_INIT(compressor,
+                              model_config,
+                              index_head_dim_,
+                              static_cast<size_t>(4),
+                              device,
+                              DeepseekV4CompressorStoreKind::Indexer);
     wq_b_ = this->register_module<infinilm::layers::linear::ReplicatedLinear>(
         "wq_b", q_lora_rank, index_n_heads_ * index_head_dim_, quantization_method, false, dtype, device);
     weights_proj_ = this->register_module<infinilm::layers::linear::ReplicatedLinear>(
@@ -50,13 +40,13 @@ DeepseekV4C4Indexer::DeepseekV4C4Indexer(std::shared_ptr<infinilm::config::Model
 }
 
 void DeepseekV4C4Indexer::process_weights_after_loading() {
-    wkv_gate_->process_weights_after_loading();
+    compressor_->process_weights_after_loading();
     wq_b_->process_weights_after_loading();
     weights_proj_->process_weights_after_loading();
 }
 
 void DeepseekV4C4Indexer::reset_runtime_state() const {
-    wkv_gate_->reset_runtime_state();
+    compressor_->reset_runtime_state();
     wq_b_->reset_runtime_state();
     weights_proj_->reset_runtime_state();
 }
@@ -69,10 +59,6 @@ infinicore::Tensor DeepseekV4C4Indexer::compute_q(const infinicore::Tensor &q_lo
 infinicore::Tensor DeepseekV4C4Indexer::compute_weights(const infinicore::Tensor &hidden_states) const {
     auto x = hidden_states;
     return weights_proj_->forward(x);
-}
-
-infinicore::Tensor DeepseekV4C4Indexer::compute_kv_score(const infinicore::Tensor &hidden_states) const {
-    return wkv_gate_->forward(hidden_states);
 }
 
 void DeepseekV4C4Indexer::forward(
@@ -91,40 +77,16 @@ void DeepseekV4C4Indexer::forward(
     const infinicore::Tensor &c4_topk_lengths_raw,
     const infinicore::Tensor &page_table,
     const infinicore::Tensor &c4_sparse_indices) const {
-    {
-        profile::ScopedTimer timer(profile::Event::AttentionC4IndexerCompress, seq_len);
-
-        infinicore::Tensor indexer_kv_score;
-        {
-            const int repeats = 1; // for test 5000
-            for (int i = 0; i < repeats; ++i) {
-                indexer_kv_score = compute_kv_score(hidden_states);
-            }
-        }
-
-        if (indexer_kv_score->ndim() != 2 || indexer_kv_score->size(1) != 4 * index_head_dim_) {
-            throw std::runtime_error("DeepseekV4C4Indexer::forward C4 indexer compressor output shape mismatch");
-        }
-
-        auto indexer_kv = infinicore::op::deepseek_v4_c4_compress_stateful(indexer_kv_score,
-                                                                           ape_,
-                                                                           indexer_compressor_state,
-                                                                           c4_write_loc,
-                                                                           c4_extra_loc,
-                                                                           pos_ids);
-        infinicore::op::deepseek_v4_compress_fused_norm_rope_(indexer_kv,
-                                                              norm_->weight(),
-                                                              norm_->eps(),
-                                                              rope_freqs_cis,
-                                                              c4_positions);
-
-        infinicore::op::deepseek_v4_indexer_rotate_(indexer_kv, true);
-
-        infinicore::op::deepseek_v4_store_indexer_raw_cache_(indexer_kv,
-                                                             c4_indexer_cache_raw,
-                                                             c4_out_loc,
-                                                             static_cast<int>(kDsv4C4PageSize));
-    }
+    compressor_->forward(hidden_states,
+                         pos_ids,
+                         seq_len,
+                         rope_freqs_cis,
+                         indexer_compressor_state,
+                         c4_indexer_cache_raw,
+                         c4_out_loc,
+                         c4_positions,
+                         c4_write_loc,
+                         c4_extra_loc);
 
     infinicore::Tensor indexer_q;
     infinicore::Tensor indexer_weights;

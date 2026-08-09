@@ -133,6 +133,8 @@ private:
         std::optional<infinicore::Tensor> extra_topk_lengths,
         int extra_page_size,
         infinilm::global_state::DSV4AttnMetadata &dsv4_metadata) const;
+    infinicore::Tensor _apply_grouped_output_projection(infinicore::Tensor wo_a_in,
+                                                        size_t seq_len) const;
     void validate_forward_metadata_and_cache(
         const infinilm::global_state::ForwardContext &forward_context) const;
 

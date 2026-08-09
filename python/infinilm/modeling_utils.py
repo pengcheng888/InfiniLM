@@ -776,12 +776,6 @@ def _remap_deepseek_v4(state_dict, config=None):
         else:
             new_key = key
 
-        if ".attn.indexer.compressor." in new_key:
-            new_key = new_key.replace(
-                ".attn.indexer.compressor.",
-                ".attn.indexer.",
-            )
-
         if new_key.endswith(".scale"):
             new_key = new_key.removesuffix(".scale") + ".weight_scale"
         remapped[new_key] = tensor

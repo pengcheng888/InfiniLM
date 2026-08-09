@@ -247,9 +247,9 @@ infinicore::Tensor DeepseekV4MoE::forward(const infinicore::Tensor &hidden_state
     {
         profile::ScopedTimer timer(profile::Event::MoeExperts, token_count);
         routed = experts_->forward(
-            hidden_states,
-            routing_weights,
-            selected_experts,
+            hidden_states,    // [ntoken, hidden_size]
+            routing_weights,  // [ntoken, 6]
+            selected_experts, // [ntoken, 6]
             shared ? std::optional<infinicore::Tensor>(shared) : std::nullopt);
     }
     debug_dump_tensor(routed, layer_idx_, shared ? "after_shared" : "routed", debug_dump_enabled_);

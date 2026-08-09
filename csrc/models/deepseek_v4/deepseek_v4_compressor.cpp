@@ -1,8 +1,10 @@
 #include "deepseek_v4_compressor.hpp"
 
 #include "deepseek_v4_profile.hpp"
+#include "infinicore/ops/deepseek_v4_compress_norm_rope_store.hpp"
 #include "infinicore/ops/deepseek_v4_flashmla_cache.hpp"
 #include "infinicore/ops/deepseek_v4_flashmla_compute.hpp"
+#include "infinicore/ops/deepseek_v4_indexer_compress_norm_rope_store.hpp"
 
 #include <stdexcept>
 
@@ -18,9 +20,11 @@ DeepseekV4Compressor::DeepseekV4Compressor(
     std::shared_ptr<infinilm::config::ModelConfig> model_config,
     size_t head_dim,
     size_t compress_ratio,
-    const infinicore::Device &device)
+    const infinicore::Device &device,
+    DeepseekV4CompressorStoreKind store_kind)
     : head_dim_(head_dim),
-      compress_ratio_(compress_ratio) {
+      compress_ratio_(compress_ratio),
+      store_kind_(store_kind) {
     const auto dtype = model_config->get_dtype();
     const size_t hidden_size = model_config->get<size_t>("hidden_size");
     const double rms_norm_eps = model_config->get<double>("rms_norm_eps");
@@ -63,6 +67,35 @@ infinicore::Tensor DeepseekV4Compressor::compute_kv_score(const infinicore::Tens
     return wkv_gate_->forward(hidden_states);
 }
 
+infinicore::Tensor DeepseekV4Compressor::compress_forward(
+    const infinicore::Tensor &kv_score,
+    const infinicore::Tensor &compressor_state,
+    const infinicore::Tensor &write_loc,
+    std::optional<infinicore::Tensor> extra_loc,
+    const infinicore::Tensor &pos_ids) const {
+    infinicore::Tensor kv_compressed;
+    if (compress_ratio_ == 4) {
+        if (!extra_loc) {
+            throw std::runtime_error("DeepseekV4Compressor::compress_forward requires extra_loc for C4 compression");
+        }
+        kv_compressed = infinicore::op::deepseek_v4_c4_compress_stateful(kv_score,
+                                                                         ape_,
+                                                                         compressor_state,
+                                                                         write_loc,
+                                                                         extra_loc.value(),
+                                                                         pos_ids);
+    } else if (compress_ratio_ == 128) {
+        kv_compressed = infinicore::op::deepseek_v4_c128_compress_stateful(kv_score,
+                                                                           ape_,
+                                                                           compressor_state,
+                                                                           write_loc,
+                                                                           pos_ids);
+    } else {
+        throw std::runtime_error("DeepseekV4Compressor::compress_forward found unsupported compress_ratio");
+    }
+    return kv_compressed;
+}
+
 void DeepseekV4Compressor::forward(
     const infinicore::Tensor &hidden_states,
     const infinicore::Tensor &pos_ids,
@@ -79,10 +112,7 @@ void DeepseekV4Compressor::forward(
         profile::ScopedTimer timer(event, seq_len);
         infinicore::Tensor kv_score;
         {
-            const int repeats = 1; // for test 5000
-            for (int i = 0; i < repeats; ++i) {
-                kv_score = compute_kv_score(hidden_states);
-            }
+            kv_score = compute_kv_score(hidden_states);
         }
 
         const auto expected_score_dim = 2 * proj_size_;
@@ -90,37 +120,72 @@ void DeepseekV4Compressor::forward(
             throw std::runtime_error("DeepseekV4Compressor::forward compressor output shape mismatch");
         }
 
-        infinicore::Tensor compressed_kv;
-        if (compress_ratio_ == 4) {
-            if (!extra_loc) {
-                throw std::runtime_error("DeepseekV4Compressor::forward requires extra_loc for C4 compression");
+        // Step 1: compress_forward  这个函数还没有参考sglang去写
+        auto kv_compressed = compress_forward(kv_score,
+                                              compressor_state,
+                                              write_loc,
+                                              extra_loc,
+                                              pos_ids);
+        // Step 2: norm + rope + store. Keep both fused and split FlashMLA paths for analysis.
+        {
+
+            switch (store_kind_) {
+            case DeepseekV4CompressorStoreKind::FlashMLA: {
+                const bool use_fused_flashmla_store = true;
+                if (use_fused_flashmla_store) {
+                    infinicore::op::deepseek_v4_compress_norm_rope_store_(kv_compressed,
+                                                                          norm_->weight(),
+                                                                          norm_->eps(),
+                                                                          rope_freqs_cis,
+                                                                          compress_positions,
+                                                                          out_loc,
+                                                                          cache_raw,
+                                                                          static_cast<int>(page_size_));
+                } else {
+                    infinicore::op::deepseek_v4_compress_fused_norm_rope_(kv_compressed,
+                                                                          norm_->weight(),
+                                                                          norm_->eps(),
+                                                                          rope_freqs_cis,
+                                                                          compress_positions);
+
+                    infinicore::op::deepseek_v4_store_flashmla_raw_cache_(kv_compressed,
+                                                                          cache_raw,
+                                                                          out_loc,
+                                                                          static_cast<int>(page_size_));
+                }
+                break;
             }
-            compressed_kv = infinicore::op::deepseek_v4_c4_compress_stateful(kv_score,
-                                                                             ape_,
-                                                                             compressor_state,
-                                                                             write_loc,
-                                                                             extra_loc.value(),
-                                                                             pos_ids);
-        } else if (compress_ratio_ == 128) {
-            compressed_kv = infinicore::op::deepseek_v4_c128_compress_stateful(kv_score,
-                                                                               ape_,
-                                                                               compressor_state,
-                                                                               write_loc,
-                                                                               pos_ids);
-        } else {
-            throw std::runtime_error("DeepseekV4Compressor::forward found unsupported compress_ratio");
+            case DeepseekV4CompressorStoreKind::Indexer: {
+                const int repeats = 1; // for test 5000
+                for (int i = 0; i < repeats; ++i) {
+                    const bool use_fused_indexer_compress_norm_rope_store = true;
+                    if (use_fused_indexer_compress_norm_rope_store) {
+                        infinicore::op::deepseek_v4_indexer_compress_norm_rope_store_(kv_compressed,
+                                                                                      norm_->weight(),
+                                                                                      norm_->eps(),
+                                                                                      rope_freqs_cis,
+                                                                                      compress_positions,
+                                                                                      out_loc,
+                                                                                      cache_raw,
+                                                                                      static_cast<int>(page_size_));
+                    } else {
+                        infinicore::op::deepseek_v4_compress_fused_norm_rope_(kv_compressed,
+                                                                              norm_->weight(),
+                                                                              norm_->eps(),
+                                                                              rope_freqs_cis,
+                                                                              compress_positions);
+
+                        infinicore::op::deepseek_v4_indexer_rotate_(kv_compressed, true);
+                        infinicore::op::deepseek_v4_store_indexer_raw_cache_(kv_compressed,
+                                                                             cache_raw,
+                                                                             out_loc,
+                                                                             static_cast<int>(page_size_));
+                    }
+                }
+                break;
+            }
+            }
         }
-
-        infinicore::op::deepseek_v4_compress_fused_norm_rope_(compressed_kv,
-                                                              norm_->weight(),
-                                                              norm_->eps(),
-                                                              rope_freqs_cis,
-                                                              compress_positions);
-
-        infinicore::op::deepseek_v4_store_flashmla_raw_cache_(compressed_kv,
-                                                              cache_raw,
-                                                              out_loc,
-                                                              static_cast<int>(page_size_));
     }
 }
 

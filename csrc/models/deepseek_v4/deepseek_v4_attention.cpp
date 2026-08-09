@@ -732,6 +732,25 @@ DeepseekV4Attention::_forward_prepare(const infinicore::Tensor &hidden_states,
         extra_page_size};
 }
 
+infinicore::Tensor DeepseekV4Attention::_apply_grouped_output_projection(infinicore::Tensor wo_a_in,
+                                                                         size_t seq_len) const {
+
+    infinicore::Tensor wo_a_out;
+    {
+        profile::ScopedTimer timer(profile::Event::AttentionWoA, seq_len);
+        //  [seq_len, num_local_attention_heads_ * head_dim_ / o_groups_]
+        // =>  [seq_len, o_groups_ * o_lora_rank_ ]
+        wo_a_out = wo_a_->forward(wo_a_in);
+    }
+    {
+
+        // [seq_len, o_groups_ * o_lora_rank_ ]
+        //  => [seq_len, hidden_size_ ]
+        profile::ScopedTimer timer(profile::Event::AttentionWoB, seq_len);
+        return wo_b_->forward(wo_a_out);
+    }
+}
+
 infinicore::Tensor DeepseekV4Attention::forward(const infinicore::Tensor &positions,
                                                 const infinicore::Tensor &hidden_states) const {
     auto shape = hidden_states->shape(); // [tokens, hidden]
@@ -792,20 +811,13 @@ infinicore::Tensor DeepseekV4Attention::forward(const infinicore::Tensor &positi
     }
 
     auto wo_a_in = attn_out->view({seq_len, num_local_attention_heads_ * head_dim_ / num_local_groups_});
-    infinicore::Tensor wo_a_out;
-    {
-        profile::ScopedTimer timer(profile::Event::AttentionWoA, seq_len);
-        //  [seq_len, num_local_attention_heads_ * head_dim_ / o_groups_]
-        // =>  [seq_len, o_groups_ * o_lora_rank_ ]
-        wo_a_out = wo_a_->forward(wo_a_in);
-    }
-    {
 
-        // [seq_len, o_groups_ * o_lora_rank_ ]
-        //  => [seq_len, hidden_size_ ]
-        profile::ScopedTimer timer(profile::Event::AttentionWoB, seq_len);
-        return wo_b_->forward(wo_a_out);
+    bool skip_grouped_output_projection = false; // 耗时 2ms 多一点。
+    if (skip_grouped_output_projection) {
+        return hidden_states;
     }
+
+    return _apply_grouped_output_projection(wo_a_in, seq_len);
 }
 
 } // namespace infinilm::models::deepseek_v4
