@@ -18,7 +18,11 @@ public:
     void process_weights_after_loading() override;
     void reset_runtime_state() const override;
 
-    infinicore::Tensor compute_q(const infinicore::Tensor &q_lora, size_t seq_len) const;
+    infinicore::Tensor compute_q(const infinicore::Tensor &q_lora,
+                                 const infinicore::Tensor &pos_ids,
+                                 size_t seq_len,
+                                 const infinicore::Tensor &rope_freqs_cis,
+                                 size_t qk_rope_head_dim) const;
     infinicore::Tensor compute_weights(const infinicore::Tensor &hidden_states) const;
     void forward(const infinicore::Tensor &hidden_states,
                  const infinicore::Tensor &q_lora,
