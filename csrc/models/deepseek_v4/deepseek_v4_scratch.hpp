@@ -7,7 +7,7 @@
 namespace infinilm::models::deepseek_v4 {
 
 struct DeepseekV4DecoderLayerSharedScratch {
-    static constexpr size_t kMaxDecodeTokens = 32;
+    static constexpr size_t kMaxDecodeTokens = 33;
 
     infinicore::Tensor max_attn_in;
     infinicore::Tensor max_attn_post;

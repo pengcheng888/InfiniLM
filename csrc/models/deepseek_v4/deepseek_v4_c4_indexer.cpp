@@ -157,37 +157,24 @@ void DeepseekV4C4Indexer::forward(
 
                 const int repeats = 1;
                 for (int i = 0; i < repeats; ++i) {
-                    // 1000  total_ms=165 // 这个优化相当于没有
-                    bool use_deepseek_v4_c4_paged_mqa_logits_wit_topk_transform_512 = true;
-                    if (use_deepseek_v4_c4_paged_mqa_logits_wit_topk_transform_512) {
-                        infinicore::op::deepseek_v4_c4_paged_mqa_with_topk_transform_512_(q_fp8,
-                                                                                          fused_weights,
-                                                                                          c4_indexer_cache_raw,
-                                                                                          c4_topk_lengths_raw,
-                                                                                          page_table,
-                                                                                          c4_sparse_indices,
-                                                                                          max_c4_seq_len,
-                                                                                          static_cast<int>(kDsv4C4PageSize),
-                                                                                          false);
-                    } else {
-                        // 1000  total_ms=170.244
-                        // 这个函数中有copy操作，将result拷贝到logits变量中。
-                        infinicore::op::deepseek_v4_c4_paged_mqa_logits_(q_fp8,
-                                                                         fused_weights,
-                                                                         c4_indexer_cache_raw,
-                                                                         c4_topk_lengths_raw,
-                                                                         page_table,
-                                                                         logits,
-                                                                         max_c4_seq_len,
-                                                                         static_cast<int>(kDsv4C4PageSize),
-                                                                         false);
-
-                        infinicore::op::deepseek_v4_topk_transform_512_kernel_(logits,
-                                                                               c4_topk_lengths_raw,
-                                                                               page_table,
-                                                                               c4_sparse_indices,
-                                                                               static_cast<int>(kDsv4C4PageSize));
-                    }
+                    // 1000  total_ms=170.244
+                    // 1000  total_ms=165 deepseek_v4_c4_paged_mqa_topk_transform_512 这个优化相当于没有
+                    // 1000  total_ms=22 deepseek_v4_topk_transform_512_sglang_kernel_ 有提升
+                    // 这个函数中有copy操作，将result拷贝到logits变量中。
+                    infinicore::op::deepseek_v4_c4_paged_mqa_logits_(q_fp8,
+                                                                     fused_weights,
+                                                                     c4_indexer_cache_raw,
+                                                                     c4_topk_lengths_raw,
+                                                                     page_table,
+                                                                     logits,
+                                                                     max_c4_seq_len,
+                                                                     static_cast<int>(kDsv4C4PageSize),
+                                                                     false);
+                    infinicore::op::deepseek_v4_topk_transform_512_sglang_kernel_(logits,
+                                                                                  c4_topk_lengths_raw,
+                                                                                  page_table,
+                                                                                  c4_sparse_indices,
+                                                                                  static_cast<int>(kDsv4C4PageSize));
                 }
             }
         } else {
