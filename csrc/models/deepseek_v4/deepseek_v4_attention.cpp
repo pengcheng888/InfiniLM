@@ -584,12 +584,8 @@ DeepseekV4Attention::_forward_prepare(const infinicore::Tensor &hidden_states,
     {
         profile::ScopedTimer timer(profile::Event::AttentionQProjection, seq_len);
         auto x = hidden_states;
-
-        const int repeats = 1; // for test 5000
-        for (int i = 0; i < repeats; ++i) {
-            profile::ScopedTimer sub_timer(profile::Event::AttentionQProjA, seq_len);
-            std::tie(q_lora, kv) = wqkv_a_->forward_split(x);
-        }
+        profile::ScopedTimer sub_timer(profile::Event::AttentionQProjA, seq_len);
+        std::tie(q_lora, kv) = wqkv_a_->forward_split(x);
     }
 
     {
@@ -735,6 +731,12 @@ DeepseekV4Attention::_forward_prepare(const infinicore::Tensor &hidden_states,
 infinicore::Tensor DeepseekV4Attention::_apply_grouped_output_projection(infinicore::Tensor wo_a_in,
                                                                          size_t seq_len) const {
 
+    // Python/SGLang 的 grouped output projection 语义是:
+    //   attn_out [T, G, D] * wo_a.weight [G, R, D] -> [T, G, R],
+    // 再 flatten 后交给 wo_b。当前 DeepSeek V4 Flash 的 TP=8 配置下
+    // num_local_groups_ == 1，grouped linear 退化为普通 linear，所以这里
+    // 用 wo_a_->forward([T, D]) 与 grouped 计算等价；若以后支持
+    // num_local_groups_ > 1，需要改成真正的 grouped/batched GEMM。
     infinicore::Tensor wo_a_out;
     {
         profile::ScopedTimer timer(profile::Event::AttentionWoA, seq_len);

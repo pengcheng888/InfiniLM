@@ -18,7 +18,28 @@ DeepseekV4ForCausalLM::DeepseekV4ForCausalLM(std::shared_ptr<infinilm::config::M
     const auto dtype = model_config->get_dtype();
 
     INFINICORE_NN_MODULE_INIT(model, model_config, device);
-    INFINICORE_NN_MODULE_INIT(lm_head, hidden_size, vocab_size, false, dtype, device);
+    const auto &rank_info = infinilm::global_state::get_tensor_model_parallel_rank_info();
+    use_parallellm_head_ = true;
+    if (use_parallellm_head_) {
+        parallel_lm_head_ = this->register_module<infinilm::layers::lm_head::ParallelLMHead>(
+            "lm_head",
+            hidden_size,
+            vocab_size,
+            false,
+            dtype,
+            device,
+            static_cast<infinicore::Size>(rank_info.tp_rank),
+            static_cast<infinicore::Size>(rank_info.tp_size),
+            rank_info.comm);
+    } else {
+        replicated_lm_head_ = this->register_module<infinilm::layers::linear::ReplicatedLinear>(
+            "lm_head",
+            hidden_size,
+            vocab_size,
+            false,
+            dtype,
+            device);
+    }
 }
 
 void DeepseekV4ForCausalLM::reset_cache(const cache::CacheConfig *cache_config) {
@@ -51,7 +72,11 @@ infinilm::InfinilmModel::Output DeepseekV4ForCausalLM::forward(const infinilm::I
     infinicore::Tensor logits;
     {
         profile::ScopedTimer timer(profile::Event::CausalLmHead, token_count);
-        logits = lm_head_->forward(hidden_states);
+
+        const int repeats = 1; // for test 5000   // false是3868.316 true是1150(新增reduce后是1111.667)
+        for (int i = 0; i < repeats; ++i) {
+            logits = _compute_lm_head_logits(hidden_states);
+        }
     }
 
     {
@@ -63,9 +88,22 @@ infinilm::InfinilmModel::Output DeepseekV4ForCausalLM::forward(const infinilm::I
     return {logits, hidden_states};
 }
 
-infinicore::Tensor DeepseekV4ForCausalLM::logits_from_hidden(const infinicore::Tensor &hidden_states) const {
+infinicore::Tensor DeepseekV4ForCausalLM::_compute_lm_head_logits(const infinicore::Tensor &hidden_states) const {
     auto mutable_hidden = hidden_states;
-    auto logits = lm_head_->forward(mutable_hidden);
+    if (use_parallellm_head_) {
+        if (!parallel_lm_head_) {
+            throw std::runtime_error("DeepseekV4ForCausalLM: parallel lm_head is not initialized.");
+        }
+        return parallel_lm_head_->forward(mutable_hidden);
+    }
+    if (!replicated_lm_head_) {
+        throw std::runtime_error("DeepseekV4ForCausalLM: replicated lm_head is not initialized.");
+    }
+    return replicated_lm_head_->forward(mutable_hidden);
+}
+
+infinicore::Tensor DeepseekV4ForCausalLM::logits_from_hidden(const infinicore::Tensor &hidden_states) const {
+    auto logits = _compute_lm_head_logits(hidden_states);
     if (logits->ndim() == 2) {
         logits = logits->view({1, logits->size(0), logits->size(1)});
     }

@@ -2,6 +2,7 @@
 
 #include "../deepseek_v4_profile.hpp"
 #include "../deepseek_v4_utils.hpp"
+#include "infinicore/ops/add.hpp"
 #include "infinicore/ops/deepseek_v4_dynamic_scaled_int8_quant.hpp"
 #include "infinicore/ops/deepseek_v4_fused_experts_impl_int8_marlin.hpp"
 #include "infinicore/ops/deepseek_v4_lightop_moe_marlin.hpp"
@@ -173,19 +174,45 @@ infinicore::Tensor forward_fused_experts_int8_marlin(const RoutedExpertContext &
     }
     {
         profile::ScopedTimer timer(profile::Event::MoeExpertsFusedCall, hidden_states->size(0));
-        infinicore::op::deepseek_v4_fused_experts_impl_int8_marlin_(
-            fused_output,
-            hidden_states,
-            ctx.w13_weight_marlin,
-            ctx.w2_weight_marlin,
-            topk_weights,
-            topk_indices,
-            ctx.w13_weight_scale,
-            ctx.w2_weight_scale,
-            static_cast<int64_t>(ctx.num_experts),
-            ctx.routed_scaling_factor,
-            true,
-            shared_output);
+
+        const int repeats = 1;
+        for (int i = 0; i < repeats; ++i) {
+            {
+                // total_ms = 194.807
+                infinicore::op::deepseek_v4_fused_experts_impl_int8_marlin_(
+                    fused_output,
+                    hidden_states,
+                    ctx.w13_weight_marlin,
+                    ctx.w2_weight_marlin,
+                    topk_weights,
+                    topk_indices,
+                    ctx.w13_weight_scale,
+                    ctx.w2_weight_scale,
+                    static_cast<int64_t>(ctx.num_experts),
+                    ctx.routed_scaling_factor,
+                    true,
+                    shared_output);
+            }
+            {
+                //   forward_ms=325.504
+                // infinicore::op::deepseek_v4_fused_experts_impl_int8_marlin_(
+                //     fused_output,
+                //     hidden_states,
+                //     ctx.w13_weight_marlin,
+                //     ctx.w2_weight_marlin,
+                //     topk_weights,
+                //     topk_indices,
+                //     ctx.w13_weight_scale,
+                //     ctx.w2_weight_scale,
+                //     static_cast<int64_t>(ctx.num_experts),
+                //     ctx.routed_scaling_factor,
+                //     true,
+                //     std::nullopt);
+                // if (shared_output.has_value()) {
+                //     infinicore::op::add_(fused_output, fused_output, *shared_output);
+                // }
+            }
+        }
     }
     return fused_output;
 }

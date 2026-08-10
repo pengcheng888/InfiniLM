@@ -2,6 +2,7 @@
 
 #include "../../backends/attention_backends.hpp"
 #include "../../global_state/forward_context.hpp"
+#include "../../layers/lm_head/parallel_lm_head.hpp"
 #include "../../layers/linear/linear.hpp"
 #include "../infinilm_model.hpp"
 #include "deepseek_v4_model.hpp"
@@ -22,7 +23,11 @@ public:
 
 protected:
     INFINICORE_NN_MODULE(DeepseekV4Model, model);
-    INFINICORE_NN_MODULE(infinilm::layers::linear::ReplicatedLinear, lm_head);
+    infinicore::Tensor _compute_lm_head_logits(const infinicore::Tensor &hidden_states) const;
+
+    std::shared_ptr<infinilm::layers::linear::ReplicatedLinear> replicated_lm_head_;
+    std::shared_ptr<infinilm::layers::lm_head::ParallelLMHead> parallel_lm_head_;
+    bool use_parallellm_head_{true};
 };
 
 std::shared_ptr<infinilm::config::ModelConfig> create_deepseek_v4_model_config(std::shared_ptr<infinilm::config::ModelConfig> model_config);
