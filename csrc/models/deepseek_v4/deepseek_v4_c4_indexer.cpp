@@ -3,6 +3,7 @@
 #include "../../global_state/forward_context.hpp"
 #include "deepseek_v4_profile.hpp"
 #include "infinicore/ops/deepseek_v4_c4_paged_mqa_logits.hpp"
+#include "infinicore/ops/deepseek_v4_c4_paged_mqa_with_topk_transform_512.hpp"
 #include "infinicore/ops/deepseek_v4_flashmla_cache.hpp"
 #include "infinicore/ops/deepseek_v4_flashmla_compute.hpp"
 #include "infinicore/ops/deepseek_v4_fused_q_indexer_rope_hadamard_quant.hpp"
@@ -105,7 +106,7 @@ void DeepseekV4C4Indexer::forward(
         indexer_weights = compute_weights(hidden_states);
     }
 
-    const int repeats = 1;
+    const int repeats = 1; // 1000
     for (int i = 0; i < repeats; ++i) {
         /*
         use_new_version = true; ms=216.634 ， （当use_sglang = true时，进一步降低到了211 ms)
@@ -125,7 +126,6 @@ void DeepseekV4C4Indexer::forward(
 
                 auto q_fp8 = infinicore::Tensor::empty(indexer_q->shape(), infinicore::DataType::F8, indexer_q->device());
                 infinicore::Tensor fused_weights;
-                auto logits = infinicore::Tensor::empty({seq_len, static_cast<size_t>(max_c4_seq_len)}, infinicore::DataType::F32, indexer_q->device());
 
                 bool use_sglang = true;
                 if (use_sglang) {
@@ -152,22 +152,43 @@ void DeepseekV4C4Indexer::forward(
                                                                                      rope_freqs_cis,
                                                                                      pos_ids);
                 }
-                // 这个函数中有copy操作，将result拷贝到logits变量中。
-                infinicore::op::deepseek_v4_c4_paged_mqa_logits_(q_fp8,
-                                                                 fused_weights,
-                                                                 c4_indexer_cache_raw,
-                                                                 c4_topk_lengths_raw,
-                                                                 page_table,
-                                                                 logits,
-                                                                 max_c4_seq_len,
-                                                                 static_cast<int>(kDsv4C4PageSize),
-                                                                 false);
 
-                infinicore::op::deepseek_v4_topk_transform_512_kernel_(logits,
-                                                                       c4_topk_lengths_raw,
-                                                                       page_table,
-                                                                       c4_sparse_indices,
-                                                                       static_cast<int>(kDsv4C4PageSize));
+                auto logits = infinicore::Tensor::empty({seq_len, static_cast<size_t>(max_c4_seq_len)}, infinicore::DataType::F32, indexer_q->device());
+
+                const int repeats = 1;
+                for (int i = 0; i < repeats; ++i) {
+                    // 1000  total_ms=165 // 这个优化相当于没有
+                    bool use_deepseek_v4_c4_paged_mqa_logits_wit_topk_transform_512 = true;
+                    if (use_deepseek_v4_c4_paged_mqa_logits_wit_topk_transform_512) {
+                        infinicore::op::deepseek_v4_c4_paged_mqa_with_topk_transform_512_(q_fp8,
+                                                                                          fused_weights,
+                                                                                          c4_indexer_cache_raw,
+                                                                                          c4_topk_lengths_raw,
+                                                                                          page_table,
+                                                                                          c4_sparse_indices,
+                                                                                          max_c4_seq_len,
+                                                                                          static_cast<int>(kDsv4C4PageSize),
+                                                                                          false);
+                    } else {
+                        // 1000  total_ms=170.244
+                        // 这个函数中有copy操作，将result拷贝到logits变量中。
+                        infinicore::op::deepseek_v4_c4_paged_mqa_logits_(q_fp8,
+                                                                         fused_weights,
+                                                                         c4_indexer_cache_raw,
+                                                                         c4_topk_lengths_raw,
+                                                                         page_table,
+                                                                         logits,
+                                                                         max_c4_seq_len,
+                                                                         static_cast<int>(kDsv4C4PageSize),
+                                                                         false);
+
+                        infinicore::op::deepseek_v4_topk_transform_512_kernel_(logits,
+                                                                               c4_topk_lengths_raw,
+                                                                               page_table,
+                                                                               c4_sparse_indices,
+                                                                               static_cast<int>(kDsv4C4PageSize));
+                    }
+                }
             }
         } else {
             {

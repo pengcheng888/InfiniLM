@@ -238,7 +238,11 @@ infinicore::Tensor DeepseekV4MoE::forward(const infinicore::Tensor &hidden_state
     infinicore::Tensor shared;
     if (shared_experts_) {
         profile::ScopedTimer timer(profile::Event::MoeSharedExperts, token_count);
-        shared = shared_experts_->forward(hidden_states);
+
+        const int repeats = 1; // 1000   total_ms=160.761
+        for (int i = 0; i < repeats; ++i) {
+            shared = shared_experts_->forward(hidden_states);
+        }
 
         debug_dump_tensor(shared, layer_idx_, "shared", debug_dump_enabled_);
     }

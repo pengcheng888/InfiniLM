@@ -678,21 +678,25 @@ DeepseekV4Attention::_forward_prepare(const infinicore::Tensor &hidden_states,
                                                           infinicore::DataType::I32,
                                                           hidden_states->device());
         }
-        indexer_->forward(hidden_states,
-                          q_lora,
-                          pos_ids,
-                          seq_len,
-                          rope_freqs_cis_,
-                          qk_rope_head_dim_,
-                          layer_cache.indexer_compressor_state,
-                          layer_cache.c4_indexer_cache_raw,
-                          c4_out_loc,
-                          c4_positions,
-                          c4_write_loc,
-                          c4_extra_loc,
-                          dsv4_metadata.c4_topk_lengths_raw,
-                          dsv4_metadata.page_table,
-                          c4_sparse_indices);
+
+        const int repeats = 1; // 1000   total_ms= 260.857
+        for (int i = 0; i < repeats; ++i) {
+            indexer_->forward(hidden_states,
+                              q_lora,
+                              pos_ids,
+                              seq_len,
+                              rope_freqs_cis_,
+                              qk_rope_head_dim_,
+                              layer_cache.indexer_compressor_state,
+                              layer_cache.c4_indexer_cache_raw,
+                              c4_out_loc,
+                              c4_positions,
+                              c4_write_loc,
+                              c4_extra_loc,
+                              dsv4_metadata.c4_topk_lengths_raw,
+                              dsv4_metadata.page_table,
+                              c4_sparse_indices);
+        }
 
         extra_raw_cache = layer_cache.c4_cache_raw;
         extra_indices = c4_sparse_indices;
@@ -792,18 +796,23 @@ infinicore::Tensor DeepseekV4Attention::forward(const infinicore::Tensor &positi
         profile::ScopedTimer timer(profile::Event::AttentionWorkspace, seq_len);
         attn_out = prepare_attn_out_workspace(seq_len, hidden_states->dtype(), hidden_states->device());
     }
-    compute_sparse_attention(attn_out,
-                             q,
-                             seq_len,
-                             hidden_states->device(),
-                             layer_cache.swa_cache_raw,
-                             dsv4_metadata.swa_indices,
-                             dsv4_metadata.swa_topk_lengths,
-                             extra_raw_cache,
-                             extra_indices,
-                             extra_topk_lengths,
-                             extra_page_size,
-                             dsv4_metadata);
+    {
+        const int repeats = 1; // 1000   total_ms=73
+        for (int i = 0; i < repeats; ++i) {
+            compute_sparse_attention(attn_out,
+                                     q,
+                                     seq_len,
+                                     hidden_states->device(),
+                                     layer_cache.swa_cache_raw,
+                                     dsv4_metadata.swa_indices,
+                                     dsv4_metadata.swa_topk_lengths,
+                                     extra_raw_cache,
+                                     extra_indices,
+                                     extra_topk_lengths,
+                                     extra_page_size,
+                                     dsv4_metadata);
+        }
+    }
 
     {
         profile::ScopedTimer timer(profile::Event::AttentionOutRope, seq_len);

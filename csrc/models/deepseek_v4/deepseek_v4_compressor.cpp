@@ -107,7 +107,8 @@ void DeepseekV4Compressor::forward(
     const infinicore::Tensor &compress_positions,
     const infinicore::Tensor &write_loc,
     std::optional<infinicore::Tensor> extra_loc) const {
-    {
+    const int repeats = 1; // 1000   total_ms=60
+    for (int i = 0; i < repeats; ++i) {
         const auto event = compress_ratio_ == 4 ? profile::Event::AttentionC4Compress : profile::Event::AttentionC128Compress;
         profile::ScopedTimer timer(event, seq_len);
         infinicore::Tensor kv_score;
