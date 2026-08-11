@@ -1,5 +1,6 @@
 #include "deepseek_v4_model.hpp"
 
+#include "infinicore/ops/deepseek_v4_embedding_and_hc_expand.hpp"
 #include "infinicore/ops/deepseek_v4_hc_head.hpp"
 
 #include <stdexcept>
@@ -58,18 +59,41 @@ infinicore::Tensor DeepseekV4Model::forward(const infinilm::InfinilmModel::Input
         throw std::runtime_error("infinilm::models::deepseek_v4::DeepseekV4Model: input_ids and position_ids are required");
     }
     auto flat_input_ids = input.input_ids.value()->view({input.input_ids.value()->numel()});
-    auto hidden_states = embed_tokens_->forward(flat_input_ids);
-    if (hidden_states->ndim() != 2) {
-        hidden_states = hidden_states->view({hidden_states->numel() / hidden_size_, hidden_size_});
+
+    infinicore::Tensor hidden_states;
+    const int repeats = 1;
+    for (int i = 0; i < repeats; ++i) {
+        bool use_embedding_and_expand_hc = true;
+        if (use_embedding_and_expand_hc) {
+            // 1000次 deepseek_v4_embedding+expand_hc_stream是 7 ms
+            hidden_states = embedding_hc_expand_scratch_.get(
+                {flat_input_ids->numel(), hc_mult_, hidden_size_},
+                embed_tokens_->weight()->dtype(),
+                embed_tokens_->weight()->device());
+            infinicore::op::deepseek_v4_embedding_and_hc_expand_(
+                hidden_states,
+                flat_input_ids,
+                embed_tokens_->weight(),
+                static_cast<int64_t>(hc_mult_));
+        } else {
+            // 1000次 237 ms
+            // hidden_states = embed_tokens_->forward(flat_input_ids);
+            // 1000次 7 ms
+            // 1000次 deepseek_v4_embedding+expand_hc_stream是 10 ms
+            hidden_states = embed_tokens_->forward(flat_input_ids);
+            if (hidden_states->ndim() != 2) {
+                hidden_states = hidden_states->view({hidden_states->numel() / hidden_size_, hidden_size_});
+            }
+            hidden_states = expand_hc_stream(hidden_states, hc_mult_);
+        }
     }
-
-    hidden_states = expand_hc_stream(hidden_states, hc_mult_);
-
     infinicore::Tensor residual;
     for (const auto &layer : layers_) {
         std::tie(hidden_states, residual) = layer->forward(input.position_ids.value(), hidden_states, residual, flat_input_ids);
     }
-    auto collapsed = infinicore::Tensor::empty({hidden_states->size(0), hidden_size_}, hidden_states->dtype(), hidden_states->device());
+    auto collapsed = hc_head_collapse_scratch_.get({hidden_states->size(0), hidden_size_},
+                                                   hidden_states->dtype(),
+                                                   hidden_states->device());
     infinicore::op::deepseek_v4_hc_head_(
         collapsed,
         hidden_states,

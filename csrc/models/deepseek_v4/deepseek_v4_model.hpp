@@ -3,6 +3,7 @@
 #include "../../models/infinilm_model.hpp"
 #include "deepseek_v4_decoder_layer.hpp"
 #include "deepseek_v4_rms_norm.hpp"
+#include "deepseek_v4_scratch.hpp"
 #include "infinicore/nn/embedding.hpp"
 #include "infinicore/nn/module.hpp"
 #include "infinicore/tensor.hpp"
@@ -36,6 +37,9 @@ private:
     size_t hc_mult_{4};
     double rms_norm_eps_{1e-6};
     double hc_eps_{1e-6};
+
+    mutable DeepseekV4FlatScratchBuffer embedding_hc_expand_scratch_;
+    mutable DeepseekV4FlatScratchBuffer hc_head_collapse_scratch_;
 };
 
 } // namespace infinilm::models::deepseek_v4
