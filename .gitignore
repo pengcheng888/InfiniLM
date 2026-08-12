@@ -13,6 +13,8 @@ python/infinilm/lib/*.so
 !serve_deepseek_v4.sh
 model_weight/
 
+profile_logs*/
+
 # Python
 __pycache__/
 *.egg-info/

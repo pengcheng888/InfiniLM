@@ -558,15 +558,20 @@ infinicore::Tensor DeepseekV4Attention::_compute_fused_q_b_and_kv_to_cache(const
 
     {
         profile::ScopedTimer sub_timer(profile::Event::AttentionKVNorm, seq_len);
-        kv = kv->is_contiguous() ? kv : kv->contiguous();
-        infinicore::op::deepseek_v4_fused_k_norm_rope_flashmla_(kv,
-                                                                kv_norm_->weight(),
-                                                                static_cast<float>(rms_norm_eps_),
-                                                                rope_freqs_cis_,
-                                                                pos_ids,
-                                                                cache_slots,
-                                                                swa_cache_raw,
-                                                                static_cast<int>(kDsv4SwaBlockSize));
+        const int repeats = 1;
+        for (int i = 0; i < repeats; ++i) { // repeats用于性能测试，不要删除。
+            // auto kv_is_contiguous = kv->stride(1) == 1 ? kv : kv->contiguous();
+            // 10000 次contiguous， 180.420到200.991
+            // 10000 次支持非连续后，48
+            infinicore::op::deepseek_v4_fused_k_norm_rope_flashmla_(kv,
+                                                                    kv_norm_->weight(),
+                                                                    static_cast<float>(rms_norm_eps_),
+                                                                    rope_freqs_cis_,
+                                                                    pos_ids,
+                                                                    cache_slots,
+                                                                    swa_cache_raw,
+                                                                    static_cast<int>(kDsv4SwaBlockSize));
+        }
     }
     return q;
 }
