@@ -190,7 +190,7 @@ infinicore::Tensor forward_fused_experts_int8_marlin(const RoutedExpertContext &
                     ctx.w2_weight_scale,
                     static_cast<int64_t>(ctx.num_experts),
                     ctx.routed_scaling_factor,
-                    true,
+                    false, // 不修改 hidden_states, 直接存到fused_output中
                     shared_output);
             }
             {
