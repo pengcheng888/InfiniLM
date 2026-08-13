@@ -44,28 +44,38 @@ void DeepseekV4DecoderLayerSharedScratch::preallocate_scratch(size_t hidden_size
                                                               infinicore::DataType dtype,
                                                               const infinicore::Device &device) {
     if (can_use_scratch_tensor(max_attn_in, {kMaxDecodeTokens, hidden_size}, dtype, device)
+        && can_use_scratch_tensor(max_attn_residual, {kMaxDecodeTokens, hc_mult, hidden_size}, dtype, device)
         && can_use_scratch_tensor(max_attn_post, {kMaxDecodeTokens, hc_mult}, infinicore::DataType::F32, device)
         && can_use_scratch_tensor(max_attn_comb, {kMaxDecodeTokens, hc_mult, hc_mult}, infinicore::DataType::F32, device)
         && can_use_scratch_tensor(max_ffn_in, {kMaxDecodeTokens, hidden_size}, dtype, device)
+        && can_use_scratch_tensor(max_ffn_residual, {kMaxDecodeTokens, hc_mult, hidden_size}, dtype, device)
         && can_use_scratch_tensor(max_ffn_post, {kMaxDecodeTokens, hc_mult}, infinicore::DataType::F32, device)
         && can_use_scratch_tensor(max_ffn_comb, {kMaxDecodeTokens, hc_mult, hc_mult}, infinicore::DataType::F32, device)) {
         return;
     }
 
     max_attn_in = infinicore::Tensor::empty({kMaxDecodeTokens, hidden_size}, dtype, device);
+    max_attn_residual = infinicore::Tensor::empty({kMaxDecodeTokens, hc_mult, hidden_size}, dtype, device);
     max_attn_post = infinicore::Tensor::empty({kMaxDecodeTokens, hc_mult}, infinicore::DataType::F32, device);
     max_attn_comb = infinicore::Tensor::empty({kMaxDecodeTokens, hc_mult, hc_mult}, infinicore::DataType::F32, device);
     max_ffn_in = infinicore::Tensor::empty({kMaxDecodeTokens, hidden_size}, dtype, device);
+    max_ffn_residual = infinicore::Tensor::empty({kMaxDecodeTokens, hc_mult, hidden_size}, dtype, device);
     max_ffn_post = infinicore::Tensor::empty({kMaxDecodeTokens, hc_mult}, infinicore::DataType::F32, device);
     max_ffn_comb = infinicore::Tensor::empty({kMaxDecodeTokens, hc_mult, hc_mult}, infinicore::DataType::F32, device);
-    assert(max_attn_in && max_attn_post && max_attn_comb && max_ffn_in
-           && max_ffn_post && max_ffn_comb);
+    assert(max_attn_in && max_attn_residual && max_attn_post && max_attn_comb
+           && max_ffn_in && max_ffn_residual && max_ffn_post && max_ffn_comb);
 }
 
 infinicore::Tensor DeepseekV4DecoderLayerSharedScratch::get_attn_in(const infinicore::Shape &shape,
                                                                     infinicore::DataType dtype,
                                                                     const infinicore::Device &device) const {
     return get_scratch_or_empty(max_attn_in, shape, dtype, device);
+}
+
+infinicore::Tensor DeepseekV4DecoderLayerSharedScratch::get_attn_residual(const infinicore::Shape &shape,
+                                                                          infinicore::DataType dtype,
+                                                                          const infinicore::Device &device) const {
+    return get_scratch_or_empty(max_attn_residual, shape, dtype, device);
 }
 
 infinicore::Tensor DeepseekV4DecoderLayerSharedScratch::get_attn_post(const infinicore::Shape &shape,
@@ -84,6 +94,12 @@ infinicore::Tensor DeepseekV4DecoderLayerSharedScratch::get_ffn_in(const infinic
                                                                    infinicore::DataType dtype,
                                                                    const infinicore::Device &device) const {
     return get_scratch_or_empty(max_ffn_in, shape, dtype, device);
+}
+
+infinicore::Tensor DeepseekV4DecoderLayerSharedScratch::get_ffn_residual(const infinicore::Shape &shape,
+                                                                         infinicore::DataType dtype,
+                                                                         const infinicore::Device &device) const {
+    return get_scratch_or_empty(max_ffn_residual, shape, dtype, device);
 }
 
 infinicore::Tensor DeepseekV4DecoderLayerSharedScratch::get_ffn_post(const infinicore::Shape &shape,

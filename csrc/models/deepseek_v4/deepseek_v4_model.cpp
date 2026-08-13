@@ -87,10 +87,33 @@ infinicore::Tensor DeepseekV4Model::forward(const infinilm::InfinilmModel::Input
             hidden_states = expand_hc_stream(hidden_states, hc_mult_);
         }
     }
-    infinicore::Tensor residual;
-    for (const auto &layer : layers_) {
-        std::tie(hidden_states, residual) = layer->forward(input.position_ids.value(), hidden_states, residual, flat_input_ids);
+    infinicore::Tensor prev_residual;
+    infinicore::Tensor prev_post;
+    infinicore::Tensor prev_comb;
+    {
+        const int repeats = 1;
+        // 1000 次 bs=1  fused=false  prefill =12481.360  decode 6040.812
+        // 1000 次 bs=1  fused=true   prefill 8016.859  decode 5430.688
+
+        // 1000 次 bs=32 fused=false  prefill =23688.123  decode 8762.537
+        // 1000 次 bs=32 fused=true   prefill =16779.734  decode 7549.662
+   
+        for (int i = 0; i < repeats; ++i) {
+            for (const auto &layer : layers_) {
+                auto [next_hidden_states, next_residual, next_post, next_comb] = layer->forward(input.position_ids.value(),
+                                                                                                hidden_states,
+                                                                                                flat_input_ids,
+                                                                                                prev_residual,
+                                                                                                prev_post,
+                                                                                                prev_comb);
+                hidden_states = next_hidden_states;
+                prev_residual = next_residual;
+                prev_post = next_post;
+                prev_comb = next_comb;
+            }
+        }
     }
+
     auto collapsed = hc_head_collapse_scratch_.get({hidden_states->size(0), hidden_size_},
                                                    hidden_states->dtype(),
                                                    hidden_states->device());

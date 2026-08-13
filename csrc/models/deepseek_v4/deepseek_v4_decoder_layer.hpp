@@ -19,19 +19,27 @@ public:
                            size_t layer_idx,
                            const infinicore::Device &device);
 
-    std::tuple<infinicore::Tensor, infinicore::Tensor> forward(const infinicore::Tensor &positions,
-                                                               infinicore::Tensor &hidden_states,
-                                                               infinicore::Tensor &residual,
-                                                               const infinicore::Tensor &input_ids);
+    infinicore::Tensor forward_naive(const infinicore::Tensor &positions,
+                                     infinicore::Tensor &hidden_states,
+                                     const infinicore::Tensor &input_ids);
 
-    infinicore::Tensor forward(const infinicore::Tensor &positions,
-                               infinicore::Tensor &hidden_states,
-                               const infinicore::Tensor &input_ids);
+    std::tuple<infinicore::Tensor, infinicore::Tensor, infinicore::Tensor, infinicore::Tensor>
+    forward(const infinicore::Tensor &positions,
+            infinicore::Tensor &hidden_states,
+            const infinicore::Tensor &input_ids,
+            const infinicore::Tensor &prev_residual,
+            const infinicore::Tensor &prev_post,
+            const infinicore::Tensor &prev_comb);
 
     void process_weights_after_loading() override;
     void reset_runtime_state() const override;
 
 private:
+    infinicore::Tensor complete_deferred_hc_post(const infinicore::Tensor &hidden_states,
+                                                 const infinicore::Tensor &residual,
+                                                 const infinicore::Tensor &post,
+                                                 const infinicore::Tensor &comb) const;
+
     INFINICORE_NN_MODULE(DeepseekV4Attention, attn);
     INFINICORE_NN_MODULE(DeepseekV4MoE, ffn);
     INFINICORE_NN_MODULE(DeepseekV4RMSNorm, attn_norm);
@@ -53,7 +61,9 @@ private:
     double hc_eps_{1e-6};
     int hc_sinkhorn_iters_{20};
     size_t compress_ratio_{0};
+    bool is_last_layer_{false};
     bool debug_dump_enabled_{false};
+    bool use_fused_mhc_post_pre_{true};
     static thread_local DeepseekV4DecoderLayerSharedScratch shared_scratch_;
 };
 
