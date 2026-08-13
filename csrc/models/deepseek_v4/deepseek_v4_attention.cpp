@@ -585,7 +585,15 @@ DeepseekV4Attention::_forward_prepare(const infinicore::Tensor &hidden_states,
         profile::ScopedTimer timer(profile::Event::AttentionQProjection, seq_len);
         auto x = hidden_states;
         profile::ScopedTimer sub_timer(profile::Event::AttentionQProjA, seq_len);
-        std::tie(q_lora, kv) = wqkv_a_->forward_split(x);
+        const int repeats = 1000;
+        for (int i = 0; i < repeats; ++i) {
+            // 1000 次是 lmslim_hipblaslt  26.16
+            // 1000 次是 lmslim_rocblas  26.246
+            // 1000 次是 lmslim  =26.257
+            // 1000 次是 native  =26.206
+            // 1000 次是 0  ==  26.181
+            std::tie(q_lora, kv) = wqkv_a_->forward_split(x);
+        }
     }
 
     {

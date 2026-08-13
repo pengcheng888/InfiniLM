@@ -239,9 +239,16 @@ infinicore::Tensor DeepseekV4MoE::forward(const infinicore::Tensor &hidden_state
     if (shared_experts_) {
         profile::ScopedTimer timer(profile::Event::MoeSharedExperts, token_count);
 
-        const int repeats = 1; // 1000   total_ms=160.761
+        const int repeats = 1;
         for (int i = 0; i < repeats; ++i) {
-            shared = shared_experts_->forward(hidden_states);
+            bool use_packed_shared_mlp = true;
+            if (use_packed_shared_mlp) {
+                // 1000   total_ms=135.761 ==> 简单优化后108.246ms => topk从6变为1后，再变为99 ms
+                shared = shared_experts_->forward_packed(hidden_states);
+            } else {
+                // 1000   total_ms=160.761
+                shared = shared_experts_->forward_linear(hidden_states);
+            }
         }
 
         debug_dump_tensor(shared, layer_idx_, "shared", debug_dump_enabled_);

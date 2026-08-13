@@ -48,10 +48,13 @@ DeepseekV4MoEGate::forward(const infinicore::Tensor &hidden_states,
         router_logits = router_logits_scratch_.get({hidden_states->size(0), num_experts_},
                                                    infinicore::DataType::F32,
                                                    hidden_states->device());
-
-        infinicore::op::deepseek_v4_linear_bf16_fp32_(router_logits, // [ntoken, 256]
-                                                      hidden_states,
-                                                      weight_);
+        const int repeats = 1;
+        for (int i = 0; i < repeats; ++i) {
+            // 1000次是34
+            infinicore::op::deepseek_v4_linear_bf16_fp32_(router_logits, // [ntoken, 256]
+                                                          hidden_states,
+                                                          weight_);
+        }
     }
     auto router_scores = router_scores_scratch_.get({hidden_states->size(0), num_experts_per_tok_},
                                                     infinicore::DataType::F32,
@@ -62,23 +65,31 @@ DeepseekV4MoEGate::forward(const infinicore::Tensor &hidden_states,
                                                       hidden_states->device());
     {
         profile::ScopedTimer timer(profile::Event::MoeTopk, token_count);
-        if (is_hash_) {
-            infinicore::op::deepseek_v4_hash_topk_(
-                router_scores,  // [ntoken, 6]
-                router_indices, // [ntoken, 6]
-                router_logits,
-                input_ids,
-                tid2eid_,
-                0,
-                1.0f,
-                scoring_func_);
-        } else {
-            infinicore::op::deepseek_v4_topk_(
-                router_scores,  // [ntoken, 6]
-                router_indices, // [ntoken, 6]
-                router_logits,
-                bias_,
-                norm_topk_prob_);
+
+        const int repeats = 1;
+        for (int i = 0; i < repeats; ++i) {
+            // 1000次 104 ms
+            // 使用deepseek_v4_hash_topk_sglang_kernel_后降低到了15ms??
+            if (is_hash_) {
+                // deepseek_v4_hash_topk_
+                // deepseek_v4_hash_topk_sglang_kernel_
+                infinicore::op::deepseek_v4_hash_topk_(
+                    router_scores,  // [ntoken, 6]
+                    router_indices, // [ntoken, 6]
+                    router_logits,
+                    input_ids,
+                    tid2eid_,
+                    0,
+                    1.0f,
+                    scoring_func_);
+            } else {
+                infinicore::op::deepseek_v4_topk_(
+                    router_scores,  // [ntoken, 6]
+                    router_indices, // [ntoken, 6]
+                    router_logits,
+                    bias_,
+                    norm_topk_prob_);
+            }
         }
     }
     return {router_scores, router_indices};

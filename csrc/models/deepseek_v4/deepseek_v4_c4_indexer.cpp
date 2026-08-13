@@ -159,7 +159,7 @@ void DeepseekV4C4Indexer::forward(
                 for (int i = 0; i < repeats; ++i) {
                     // 1000  total_ms=170.244
                     // 1000  total_ms=165 deepseek_v4_c4_paged_mqa_topk_transform_512 这个优化相当于没有
-                    // 1000  total_ms=22 deepseek_v4_topk_transform_512_sglang_kernel_ 有提升
+                    // 1000  total_ms=22 deepseek_v4_topk_transform_512_sglang_kernel_ 有明显提升。让端到端提升了4ms!!
                     // 这个函数中有copy操作，将result拷贝到logits变量中。
                     infinicore::op::deepseek_v4_c4_paged_mqa_logits_(q_fp8,
                                                                      fused_weights,
@@ -170,11 +170,16 @@ void DeepseekV4C4Indexer::forward(
                                                                      max_c4_seq_len,
                                                                      static_cast<int>(kDsv4C4PageSize),
                                                                      false);
+
+                    // 函数的输出会给c4_sparse_indices变量赋值
+                    // 如果屏蔽掉 topk_transform_512函数，c4_sparse_indices是无效值，会导致moe段错误。
                     infinicore::op::deepseek_v4_topk_transform_512_sglang_kernel_(logits,
                                                                                   c4_topk_lengths_raw,
                                                                                   page_table,
                                                                                   c4_sparse_indices,
                                                                                   static_cast<int>(kDsv4C4PageSize));
+
+                    // std::cout << "c4_sparse_indices" << c4_sparse_indices << std::endl;
                 }
             }
         } else {

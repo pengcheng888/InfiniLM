@@ -73,7 +73,7 @@ public:
 private:
     INFINICORE_NN_MODULE(DeepseekV4MoEGate, gate);
     INFINICORE_NN_MODULE(DeepseekV4PackedExperts, experts);
-    INFINICORE_NN_MODULE(DeepseekV4MLP, shared_experts);
+    INFINICORE_NN_MODULE(DeepseekV4PackedMLP, shared_experts);
 
     size_t layer_idx_{0};
     size_t tp_size_{1};

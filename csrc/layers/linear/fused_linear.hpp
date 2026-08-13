@@ -48,6 +48,11 @@ private:
     std::string second_name_;
     RegisterParamFn register_fn_;
     std::vector<infinilm::quantization::SplitInfo> split_infos_;
+    mutable infinicore::Tensor w8a8_output_workspace_;
+    mutable infinicore::Tensor w8a8_q_input_workspace_;
+    mutable infinicore::Tensor w8a8_input_scale_workspace_;
+    mutable infinicore::Tensor w8a8_accum_workspace_;
+    mutable infinicore::Tensor w8a8_smooth_scale_workspace_;
 };
 
 class QKVParallelLinear : public infinilm::nn::ColumnParallelLinear {

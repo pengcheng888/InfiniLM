@@ -1,11 +1,186 @@
 #include "fused_linear.hpp"
 
+#include "infinicore/context/context.hpp"
+#include "infinicore/ops/deepseek_v4_lightop_linear_w8a8_asm.hpp"
+#include "infinicore/ops/deepseek_v4_lightop_linear_w8a8_smooth.hpp"
+#include "infinicore/ops/deepseek_v4_lmslim_hipblaslt_channelwise_linear_w8a8.hpp"
+#include "infinicore/ops/deepseek_v4_lmslim_linear_w8a8.hpp"
+#include "infinicore/ops/deepseek_v4_lmslim_rocblas_linear_w8a8.hpp"
+#include "infinicore/ops/linear_w8a8i8.hpp"
+
+#include <atomic>
+#include <chrono>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <iostream>
 #include <memory>
+#include <mutex>
+#include <optional>
+#include <ostream>
 #include <spdlog/spdlog.h>
 #include <stdexcept>
+#include <string>
 #include <utility>
 
 namespace infinilm::layers::linear {
+namespace {
+
+bool env_flag(const char *name, bool default_value) {
+    const char *value = std::getenv(name);
+    if (value == nullptr || value[0] == '\0') {
+        return default_value;
+    }
+    return !(value[0] == '0' || value[0] == 'f' || value[0] == 'F' || value[0] == 'n' || value[0] == 'N');
+}
+
+enum class W8A8WorkspaceBackend {
+    Off,
+    Native,
+    Lmslim,
+    LmslimRocblas,
+    LmslimHipblaslt,
+    LightopSmooth,
+};
+
+std::ostream &operator<<(std::ostream &os, W8A8WorkspaceBackend backend) {
+    switch (backend) {
+    case W8A8WorkspaceBackend::Off:
+        return os << "off";
+    case W8A8WorkspaceBackend::Native:
+        return os << "native";
+    case W8A8WorkspaceBackend::Lmslim:
+        return os << "lmslim";
+    case W8A8WorkspaceBackend::LmslimRocblas:
+        return os << "lmslim_rocblas";
+    case W8A8WorkspaceBackend::LmslimHipblaslt:
+        return os << "lmslim_hipblaslt";
+    case W8A8WorkspaceBackend::LightopSmooth:
+        return os << "lightop_smooth";
+    }
+    return os << "unknown";
+}
+
+W8A8WorkspaceBackend w8a8_workspace_backend() {
+    static const W8A8WorkspaceBackend backend = [] {
+        const char *value = std::getenv("INFINILM_FUSED_REPLICATED_LINEAR_W8A8_BACKEND");
+        if (value == nullptr || value[0] == '\0') {
+            return env_flag("INFINILM_FUSED_REPLICATED_LINEAR_LMSLIM", true)
+                     ? W8A8WorkspaceBackend::Native
+                     : W8A8WorkspaceBackend::Off;
+        }
+        const std::string name(value);
+        if (name == "off" || name == "none" || name == "0" || name == "false" || name == "FALSE") {
+            return W8A8WorkspaceBackend::Off;
+        }
+        if (name == "native" || name == "linear_w8a8i8") {
+            return W8A8WorkspaceBackend::Native;
+        }
+        if (name == "lmslim") {
+            return W8A8WorkspaceBackend::Lmslim;
+        }
+        if (name == "lmslim_rocblas" || name == "rocblas") {
+            return W8A8WorkspaceBackend::LmslimRocblas;
+        }
+        if (name == "lmslim_hipblaslt" || name == "hipblaslt" || name == "hipblaslt_channelwise") {
+            return W8A8WorkspaceBackend::LmslimHipblaslt;
+        }
+        if (name == "lightop_smooth" || name == "lmslim_lightop") {
+            if (!env_flag("INFINILM_FUSED_REPLICATED_LINEAR_ALLOW_EXPERIMENTAL_LIGHTOP_SMOOTH", false)) {
+                throw std::runtime_error(
+                    "INFINILM_FUSED_REPLICATED_LINEAR_W8A8_BACKEND=lightop_smooth is currently an experimental "
+                    "full lightop smooth linear path. Single-op eager/graph tests pass, but InfiniLM TP8 "
+                    "end-to-end still crashes after the lightop SO GEMM path. Set "
+                    "INFINILM_FUSED_REPLICATED_LINEAR_ALLOW_EXPERIMENTAL_LIGHTOP_SMOOTH=1 only for isolated "
+                    "debugging, or use native/lmslim for runnable inference.");
+            }
+            return W8A8WorkspaceBackend::LightopSmooth;
+        }
+        if (name == "lightop_asm" || name == "lightop") {
+            throw std::runtime_error(
+                "INFINILM_FUSED_REPLICATED_LINEAR_W8A8_BACKEND=lightop_asm is disabled for InfiniLM "
+                "because the current lightop SO GEMM bridge segfaults in end-to-end forward. "
+                "Use native, lmslim, or lightop_smooth.");
+        }
+        throw std::runtime_error(
+            "Unsupported INFINILM_FUSED_REPLICATED_LINEAR_W8A8_BACKEND: " + name + ". Supported values: native, lmslim, lmslim_rocblas, lmslim_hipblaslt, lightop_smooth, off.");
+    }();
+    return backend;
+}
+
+bool w8a8_workspace_linear_enabled() {
+    static const bool enabled = w8a8_workspace_backend() != W8A8WorkspaceBackend::Off;
+    return enabled;
+}
+
+const char *w8a8_workspace_backend_name() {
+    switch (w8a8_workspace_backend()) {
+    case W8A8WorkspaceBackend::Off:
+        return "off";
+    case W8A8WorkspaceBackend::Native:
+        return "native";
+    case W8A8WorkspaceBackend::Lmslim:
+        return "lmslim";
+    case W8A8WorkspaceBackend::LmslimRocblas:
+        return "lmslim_rocblas";
+    case W8A8WorkspaceBackend::LmslimHipblaslt:
+        return "lmslim_hipblaslt";
+    case W8A8WorkspaceBackend::LightopSmooth:
+        return "lightop_smooth";
+    }
+    return "unknown";
+}
+
+bool w8a8_workspace_linear_profile_enabled() {
+    static const bool enabled = env_flag("INFINILM_FUSED_REPLICATED_LINEAR_PROFILE", false);
+    return enabled;
+}
+
+bool w8a8_workspace_linear_timing_enabled() {
+    static const bool enabled = env_flag("INFINILM_FUSED_REPLICATED_LINEAR_TIMING", false);
+    return enabled;
+}
+
+struct W8A8WorkspaceLinearStats {
+    std::atomic<unsigned long long> hits{0};
+    std::atomic<unsigned long long> misses{0};
+    std::atomic<unsigned long long> hit_tokens{0};
+    std::atomic<unsigned long long> timed_calls{0};
+    std::atomic<unsigned long long> total_us{0};
+};
+
+W8A8WorkspaceLinearStats &w8a8_workspace_linear_stats() {
+    static W8A8WorkspaceLinearStats stats;
+    return stats;
+}
+
+void dump_w8a8_workspace_linear_stats() {
+    const auto &stats = w8a8_workspace_linear_stats();
+    const auto hits = stats.hits.load(std::memory_order_relaxed);
+    const auto misses = stats.misses.load(std::memory_order_relaxed);
+    const auto tokens = stats.hit_tokens.load(std::memory_order_relaxed);
+    const auto timed_calls = stats.timed_calls.load(std::memory_order_relaxed);
+    const auto total_us = stats.total_us.load(std::memory_order_relaxed);
+    const double total_ms = static_cast<double>(total_us) / 1000.0;
+    const double avg_ms = timed_calls == 0 ? 0.0 : total_ms / static_cast<double>(timed_calls);
+    std::fprintf(stderr,
+                 "[INFINILM_FUSED_REPLICATED_LINEAR_PROFILE] w8a8_workspace backend=%s hits=%llu misses=%llu hit_tokens=%llu timed_calls=%llu total_ms=%.3f avg_ms=%.6f\n",
+                 w8a8_workspace_backend_name(),
+                 hits,
+                 misses,
+                 tokens,
+                 timed_calls,
+                 total_ms,
+                 avg_ms);
+}
+
+void ensure_w8a8_workspace_linear_stats_registered() {
+    static std::once_flag flag;
+    std::call_once(flag, [] { std::atexit(dump_w8a8_workspace_linear_stats); });
+}
+
+} // namespace
+
 // ---------------------------------------------------------
 // Fused Replicated Linear
 // ---------------------------------------------------------
@@ -105,6 +280,134 @@ void FusedReplicatedLinear::forward_(infinicore::Tensor output, const infinicore
 
 std::tuple<infinicore::Tensor, infinicore::Tensor>
 FusedReplicatedLinear::forward_split(const infinicore::Tensor &input) const {
+    const bool use_w8a8_workspace_linear = w8a8_workspace_linear_enabled();
+    const bool profile_w8a8_workspace_linear = w8a8_workspace_linear_profile_enabled();
+    if (profile_w8a8_workspace_linear) {
+        ensure_w8a8_workspace_linear_stats_registered();
+    }
+    const bool can_use_w8a8_workspace_linear = get_quantization()->get_quant_scheme() == infinilm::quantization::QuantScheme::COMPRESSED_TENSOR_W8A8I8 && input->ndim() == 2 && input->size(0) > 16 && input->size(1) == in_features() && input->is_contiguous() && in_features() == 4096 && out_features() == 1536 && input->dtype() == infinicore::DataType::BF16 && !has_bias() && std::fabs(alpha() - 1.0f) <= 1e-7f;
+    if (use_w8a8_workspace_linear && can_use_w8a8_workspace_linear) {
+        auto input_contiguous = input;
+        const size_t tokens = input_contiguous->size(0);
+        const infinicore::Shape output_shape = {tokens, out_features()};
+        const infinicore::Shape q_input_shape = {tokens, in_features()};
+        const infinicore::Shape input_scale_shape = {tokens, 1};
+        const infinicore::Shape smooth_scale_shape = {in_features()};
+
+        if (!w8a8_output_workspace_ || w8a8_output_workspace_->shape() != output_shape || w8a8_output_workspace_->dtype() != input_contiguous->dtype() || w8a8_output_workspace_->device() != input_contiguous->device()) {
+            w8a8_output_workspace_ = infinicore::Tensor::empty(
+                output_shape, input_contiguous->dtype(), input_contiguous->device());
+        }
+        if (!w8a8_q_input_workspace_ || w8a8_q_input_workspace_->shape() != q_input_shape || w8a8_q_input_workspace_->dtype() != infinicore::DataType::I8 || w8a8_q_input_workspace_->device() != input_contiguous->device()) {
+            w8a8_q_input_workspace_ = infinicore::Tensor::empty(
+                q_input_shape, infinicore::DataType::I8, input_contiguous->device());
+        }
+        if (!w8a8_input_scale_workspace_ || w8a8_input_scale_workspace_->shape() != input_scale_shape || w8a8_input_scale_workspace_->dtype() != infinicore::DataType::F32 || w8a8_input_scale_workspace_->device() != input_contiguous->device()) {
+            w8a8_input_scale_workspace_ = infinicore::Tensor::empty(
+                input_scale_shape, infinicore::DataType::F32, input_contiguous->device());
+        }
+        if (w8a8_workspace_backend() == W8A8WorkspaceBackend::LmslimRocblas && (!w8a8_accum_workspace_ || w8a8_accum_workspace_->shape() != output_shape || w8a8_accum_workspace_->dtype() != infinicore::DataType::I32 || w8a8_accum_workspace_->device() != input_contiguous->device())) {
+            w8a8_accum_workspace_ = infinicore::Tensor::empty(
+                output_shape, infinicore::DataType::I32, input_contiguous->device());
+        }
+        if ((w8a8_workspace_backend() == W8A8WorkspaceBackend::Lmslim || w8a8_workspace_backend() == W8A8WorkspaceBackend::LmslimRocblas || w8a8_workspace_backend() == W8A8WorkspaceBackend::LmslimHipblaslt || w8a8_workspace_backend() == W8A8WorkspaceBackend::LightopSmooth) && (!w8a8_smooth_scale_workspace_ || w8a8_smooth_scale_workspace_->shape() != smooth_scale_shape || w8a8_smooth_scale_workspace_->dtype() != infinicore::DataType::F32 || w8a8_smooth_scale_workspace_->device() != input_contiguous->device())) {
+            w8a8_smooth_scale_workspace_ = infinicore::Tensor::ones(
+                smooth_scale_shape, infinicore::DataType::F32, input_contiguous->device());
+        }
+
+        if (profile_w8a8_workspace_linear) {
+            auto &stats = w8a8_workspace_linear_stats();
+            stats.hits.fetch_add(1, std::memory_order_relaxed);
+            stats.hit_tokens.fetch_add(tokens, std::memory_order_relaxed);
+        }
+        auto run_w8a8_workspace_linear = [&]() {
+            auto back = w8a8_workspace_backend();
+            std::cout << "-----> back: " << back << std::endl;
+            switch (back) {
+            case W8A8WorkspaceBackend::Native:
+                infinicore::op::linear_w8a8i8_out_workspace_(
+                    w8a8_output_workspace_,
+                    input_contiguous,
+                    weight(),
+                    weight_scale(),
+                    std::nullopt,
+                    w8a8_q_input_workspace_,
+                    w8a8_input_scale_workspace_);
+                return;
+            case W8A8WorkspaceBackend::Lmslim:
+                infinicore::op::deepseek_v4_lmslim_linear_w8a8_(
+                    w8a8_output_workspace_,
+                    input_contiguous,
+                    weight()->permute({1, 0}),
+                    weight_scale(),
+                    std::nullopt,
+                    w8a8_q_input_workspace_,
+                    w8a8_input_scale_workspace_,
+                    w8a8_smooth_scale_workspace_);
+                return;
+            case W8A8WorkspaceBackend::LmslimRocblas:
+                infinicore::op::deepseek_v4_lmslim_rocblas_linear_w8a8_(
+                    w8a8_output_workspace_,
+                    input_contiguous,
+                    weight()->permute({1, 0}),
+                    weight_scale(),
+                    std::nullopt,
+                    w8a8_q_input_workspace_,
+                    w8a8_input_scale_workspace_,
+                    w8a8_accum_workspace_,
+                    w8a8_smooth_scale_workspace_);
+                return;
+            case W8A8WorkspaceBackend::LmslimHipblaslt:
+                infinicore::op::deepseek_v4_lmslim_hipblaslt_channelwise_linear_w8a8_(
+                    w8a8_output_workspace_,
+                    input_contiguous,
+                    weight(),
+                    weight_scale(),
+                    std::nullopt,
+                    w8a8_q_input_workspace_,
+                    w8a8_input_scale_workspace_,
+                    w8a8_smooth_scale_workspace_);
+                return;
+            case W8A8WorkspaceBackend::LightopSmooth:
+                infinicore::op::deepseek_v4_lightop_linear_w8a8_smooth_(
+                    w8a8_output_workspace_,
+                    input_contiguous,
+                    weight(),
+                    weight_scale(),
+                    std::nullopt,
+                    w8a8_q_input_workspace_,
+                    w8a8_input_scale_workspace_,
+                    w8a8_smooth_scale_workspace_);
+                return;
+            case W8A8WorkspaceBackend::Off:
+                break;
+            }
+            throw std::runtime_error("W8A8 workspace linear backend is disabled.");
+        };
+
+        if (w8a8_workspace_linear_timing_enabled()) {
+            infinicore::context::syncStream();
+            const auto start = std::chrono::steady_clock::now();
+            run_w8a8_workspace_linear();
+            infinicore::context::syncStream();
+            const auto end = std::chrono::steady_clock::now();
+            const auto us = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+            auto &stats = w8a8_workspace_linear_stats();
+            stats.timed_calls.fetch_add(1, std::memory_order_relaxed);
+            stats.total_us.fetch_add(static_cast<unsigned long long>(us), std::memory_order_relaxed);
+        } else {
+            run_w8a8_workspace_linear();
+        }
+
+        auto flat = w8a8_output_workspace_->view({tokens * out_features()});
+        auto first = flat->narrow({{0, 0, tokens * first_size_}})->view({tokens, first_size_});
+        auto second = flat->narrow({{0, tokens * first_size_, tokens * second_size_}})->view({tokens, second_size_});
+        return {first, second};
+    }
+    if (profile_w8a8_workspace_linear) {
+        w8a8_workspace_linear_stats().misses.fetch_add(1, std::memory_order_relaxed);
+    }
+
     auto output = forward(input);
     auto first = output->narrow({{1, 0, first_size_}});
     auto second = output->narrow({{1, first_size_, second_size_}});

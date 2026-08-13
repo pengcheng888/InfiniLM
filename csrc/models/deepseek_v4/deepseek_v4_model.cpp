@@ -1,5 +1,6 @@
 #include "deepseek_v4_model.hpp"
 
+#include "infinicore/ops/deepseek_v4_expand_hc.hpp"
 #include "infinicore/ops/deepseek_v4_hc_head.hpp"
 
 #include <stdexcept>
@@ -42,15 +43,11 @@ infinicore::Tensor expand_hc_stream(const infinicore::Tensor &hidden_states,
     }
     const size_t ntoken = shape[0];
     const size_t hidden_size = shape[1];
-    const auto strides = hidden_states->strides();
-    if (strides.size() != 2) {
-        throw std::runtime_error("DeepseekV4MHC: expected hidden_states strides [tokens, hidden]");
-    }
-
-    return hidden_states->as_strided(
-                            {ntoken, hc_mult, hidden_size},
-                            {strides[0], 0, strides[1]})
-        ->contiguous();
+    auto expanded = infinicore::Tensor::empty({ntoken, hc_mult, hidden_size},
+                                              hidden_states->dtype(),
+                                              hidden_states->device());
+    infinicore::op::deepseek_v4_expand_hc_(expanded, hidden_states, static_cast<int64_t>(hc_mult));
+    return expanded;
 }
 
 infinicore::Tensor DeepseekV4Model::forward(const infinilm::InfinilmModel::Input &input) const {
@@ -58,7 +55,13 @@ infinicore::Tensor DeepseekV4Model::forward(const infinilm::InfinilmModel::Input
         throw std::runtime_error("infinilm::models::deepseek_v4::DeepseekV4Model: input_ids and position_ids are required");
     }
     auto flat_input_ids = input.input_ids.value()->view({input.input_ids.value()->numel()});
-    auto hidden_states = embed_tokens_->forward(flat_input_ids);
+    infinicore::Tensor hidden_states;
+    const int repeats = 1;
+    for (int i = 0; i < repeats; ++i) {
+        // 1000次 250 ms
+        hidden_states = embed_tokens_->forward(flat_input_ids);
+    }
+
     if (hidden_states->ndim() != 2) {
         hidden_states = hidden_states->view({hidden_states->numel() / hidden_size_, hidden_size_});
     }
