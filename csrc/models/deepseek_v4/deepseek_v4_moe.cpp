@@ -220,7 +220,12 @@ DeepseekV4MoE::DeepseekV4MoE(std::shared_ptr<infinilm::config::ModelConfig> mode
     INFINICORE_NN_MODULE_INIT(gate, model_config, layer_idx, device);
     INFINICORE_NN_MODULE_INIT(experts, model_config, device);
     if (model_config->get_or<size_t>("n_shared_experts", 0) > 0) {
-        INFINICORE_NN_MODULE_INIT(shared_experts, model_config, device);
+        const bool use_packed_shared_experts = true;
+        if (use_packed_shared_experts) {
+            shared_experts_ = this->add_module("shared_experts", std::make_shared<DeepseekV4PackedMLP>(model_config, device));
+        } else {
+            shared_experts_ = this->add_module("shared_experts", std::make_shared<DeepseekV4MLP>(model_config, device));
+        }
     }
 }
 
