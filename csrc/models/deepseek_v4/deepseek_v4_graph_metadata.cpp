@@ -2,8 +2,8 @@
 
 #include "../../global_state/global_state.hpp"
 
-#include <cstdlib>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -20,13 +20,7 @@ bool enable_prealloc_flashmla_metadata() {
     if (value == nullptr) {
         return true;
     }
-    return !(std::strcmp(value, "0") == 0 ||
-             std::strcmp(value, "false") == 0 ||
-             std::strcmp(value, "FALSE") == 0 ||
-             std::strcmp(value, "off") == 0 ||
-             std::strcmp(value, "OFF") == 0 ||
-             std::strcmp(value, "no") == 0 ||
-             std::strcmp(value, "NO") == 0);
+    return !(std::strcmp(value, "0") == 0 || std::strcmp(value, "false") == 0 || std::strcmp(value, "FALSE") == 0 || std::strcmp(value, "off") == 0 || std::strcmp(value, "OFF") == 0 || std::strcmp(value, "no") == 0 || std::strcmp(value, "NO") == 0);
 }
 
 infinicore::Tensor make_i32_tensor(const std::vector<size_t> &shape,
@@ -46,18 +40,12 @@ void prepare_flashmla_metadata(infinilm::global_state::FlashMLASchedMeta &metada
         kDsv4FlashMlaSchedMetaWidth};
     const std::vector<size_t> num_splits_shape{tokens + 1};
 
-    if (!metadata.tile_scheduler_metadata ||
-        metadata.tile_scheduler_metadata->shape() != tile_scheduler_metadata_shape ||
-        metadata.tile_scheduler_metadata->dtype() != infinicore::DataType::I32 ||
-        metadata.tile_scheduler_metadata->device() != device) {
+    if (!metadata.tile_scheduler_metadata || metadata.tile_scheduler_metadata->shape() != tile_scheduler_metadata_shape || metadata.tile_scheduler_metadata->dtype() != infinicore::DataType::I32 || metadata.tile_scheduler_metadata->device() != device) {
         metadata.tile_scheduler_metadata = infinicore::Tensor::empty(tile_scheduler_metadata_shape,
                                                                      infinicore::DataType::I32,
                                                                      device);
     }
-    if (!metadata.num_splits ||
-        metadata.num_splits->shape() != num_splits_shape ||
-        metadata.num_splits->dtype() != infinicore::DataType::I32 ||
-        metadata.num_splits->device() != device) {
+    if (!metadata.num_splits || metadata.num_splits->shape() != num_splits_shape || metadata.num_splits->dtype() != infinicore::DataType::I32 || metadata.num_splits->device() != device) {
         metadata.num_splits = infinicore::Tensor::empty(num_splits_shape,
                                                         infinicore::DataType::I32,
                                                         device);

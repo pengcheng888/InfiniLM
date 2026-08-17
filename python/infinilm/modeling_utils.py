@@ -778,6 +778,12 @@ def _remap_deepseek_v4(state_dict, config=None):
 
         if new_key.endswith(".scale"):
             new_key = new_key.removesuffix(".scale") + ".weight_scale"
+        if (
+            new_key.endswith(".attn.compressor.ape")
+            or new_key.endswith(".attn.indexer.compressor.ape")
+        ) and tensor.ndim == 2 and tensor.shape[0] == 4 and tensor.shape[1] % 2 == 0:
+            head_dim = tensor.shape[1] // 2
+            tensor = torch.cat([tensor[:, head_dim:], tensor[:, :head_dim]], dim=0).contiguous()
         remapped[new_key] = tensor
     return remapped
 

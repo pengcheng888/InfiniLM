@@ -97,7 +97,7 @@ infinicore::Tensor DeepseekV4Model::forward(const infinilm::InfinilmModel::Input
 
         // 1000 次 bs=32 fused=false  prefill =23688.123  decode 8762.537
         // 1000 次 bs=32 fused=true   prefill =16779.734  decode 7549.662
-   
+
         for (int i = 0; i < repeats; ++i) {
             for (const auto &layer : layers_) {
                 auto [next_hidden_states, next_residual, next_post, next_comb] = layer->forward(input.position_ids.value(),

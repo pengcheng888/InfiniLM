@@ -2,6 +2,7 @@
 
 #include "deepseek_v4_profile.hpp"
 #include "infinicore/ops/deepseek_v4_compress_norm_rope_store.hpp"
+#include "infinicore/ops/deepseek_v4_compress_sglang_stateful.hpp"
 #include "infinicore/ops/deepseek_v4_flashmla_cache.hpp"
 #include "infinicore/ops/deepseek_v4_flashmla_compute.hpp"
 #include "infinicore/ops/deepseek_v4_indexer_compress_norm_rope_store.hpp"
@@ -13,6 +14,21 @@ namespace {
 
 constexpr size_t kDsv4C4PageSize = 64;
 constexpr size_t kDsv4C128PageSize = 2;
+
+void check_sglang_ape_shape(const infinicore::Tensor &ape, size_t compress_ratio, size_t head_dim) {
+    if (compress_ratio == 4) {
+        if (ape->ndim() != 2 || ape->size(0) != 8 || ape->size(1) != head_dim) {
+            throw std::runtime_error("DeepseekV4Compressor::compress_forward C4 sglang compress expects ape [8, head_dim]");
+        }
+        return;
+    }
+    if (compress_ratio == 128) {
+        if (ape->ndim() != 2 || ape->size(0) < 128 || ape->size(1) != head_dim) {
+            throw std::runtime_error("DeepseekV4Compressor::compress_forward C128 sglang compress expects ape [128, head_dim]");
+        }
+        return;
+    }
+}
 
 } // namespace
 
@@ -32,7 +48,7 @@ DeepseekV4Compressor::DeepseekV4Compressor(
     if (compress_ratio_ == 4) {
         proj_size_ = 2 * head_dim_;
         page_size_ = kDsv4C4PageSize;
-        INFINICORE_NN_PARAMETER_INIT(ape, ({kDsv4C4PageSize / 16, proj_size_}, infinicore::DataType::F32, device));
+        INFINICORE_NN_PARAMETER_INIT(ape, ({8, head_dim_}, infinicore::DataType::F32, device));
     } else if (compress_ratio_ == 128) {
         proj_size_ = head_dim_;
         page_size_ = kDsv4C128PageSize;
@@ -74,22 +90,43 @@ infinicore::Tensor DeepseekV4Compressor::compress_forward(
     std::optional<infinicore::Tensor> extra_loc,
     const infinicore::Tensor &pos_ids) const {
     infinicore::Tensor kv_compressed;
+
+    bool use_compress_sglang = true;
     if (compress_ratio_ == 4) {
         if (!extra_loc) {
             throw std::runtime_error("DeepseekV4Compressor::compress_forward requires extra_loc for C4 compression");
         }
-        kv_compressed = infinicore::op::deepseek_v4_c4_compress_stateful(kv_score,
-                                                                         ape_,
-                                                                         compressor_state,
-                                                                         write_loc,
-                                                                         extra_loc.value(),
-                                                                         pos_ids);
+        if (use_compress_sglang) {
+            check_sglang_ape_shape(ape_, compress_ratio_, head_dim_);
+            kv_compressed = infinicore::op::deepseek_v4_c4_compress_sglang_stateful(kv_score,
+                                                                                    ape_,
+                                                                                    compressor_state,
+                                                                                    write_loc,
+                                                                                    extra_loc.value(),
+                                                                                    pos_ids);
+        } else {
+            kv_compressed = infinicore::op::deepseek_v4_c4_compress_stateful(kv_score,
+                                                                             ape_,
+                                                                             compressor_state,
+                                                                             write_loc,
+                                                                             extra_loc.value(),
+                                                                             pos_ids);
+        }
     } else if (compress_ratio_ == 128) {
-        kv_compressed = infinicore::op::deepseek_v4_c128_compress_stateful(kv_score,
-                                                                           ape_,
-                                                                           compressor_state,
-                                                                           write_loc,
-                                                                           pos_ids);
+        if (use_compress_sglang) {
+            check_sglang_ape_shape(ape_, compress_ratio_, head_dim_);
+            kv_compressed = infinicore::op::deepseek_v4_c128_compress_sglang_stateful(kv_score,
+                                                                                      ape_,
+                                                                                      compressor_state,
+                                                                                      write_loc,
+                                                                                      pos_ids);
+        } else {
+            kv_compressed = infinicore::op::deepseek_v4_c128_compress_stateful(kv_score,
+                                                                               ape_,
+                                                                               compressor_state,
+                                                                               write_loc,
+                                                                               pos_ids);
+        }
     } else {
         throw std::runtime_error("DeepseekV4Compressor::compress_forward found unsupported compress_ratio");
     }

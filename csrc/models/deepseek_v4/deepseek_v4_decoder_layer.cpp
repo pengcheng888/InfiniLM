@@ -176,7 +176,7 @@ infinicore::Tensor DeepseekV4DecoderLayer::forward_naive(const infinicore::Tenso
         ffn_out = ffn_->forward(ffn_normed, input_ids);
     }
 
-  // ffn_out = ffn_normed;
+    // ffn_out = ffn_normed;
 
     hidden_states = infinicore::Tensor::empty(residual->shape(),
                                               residual->dtype(),
