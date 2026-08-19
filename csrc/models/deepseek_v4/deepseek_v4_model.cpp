@@ -61,56 +61,50 @@ infinicore::Tensor DeepseekV4Model::forward(const infinilm::InfinilmModel::Input
     auto flat_input_ids = input.input_ids.value()->view({input.input_ids.value()->numel()});
 
     infinicore::Tensor hidden_states;
-    const int repeats = 1;
-    for (int i = 0; i < repeats; ++i) {
-        bool use_embedding_and_expand_hc = true;
-        if (use_embedding_and_expand_hc) {
-            // 1000次 deepseek_v4_embedding+expand_hc_stream是 7 ms
-            hidden_states = embedding_hc_expand_scratch_.get(
-                {flat_input_ids->numel(), hc_mult_, hidden_size_},
-                embed_tokens_->weight()->dtype(),
-                embed_tokens_->weight()->device());
-            infinicore::op::deepseek_v4_embedding_and_hc_expand_(
-                hidden_states,
-                flat_input_ids,
-                embed_tokens_->weight(),
-                static_cast<int64_t>(hc_mult_));
-        } else {
-            // 1000次 237 ms
-            // hidden_states = embed_tokens_->forward(flat_input_ids);
-            // 1000次 7 ms
-            // 1000次 deepseek_v4_embedding+expand_hc_stream是 10 ms
-            hidden_states = embed_tokens_->forward(flat_input_ids);
-            if (hidden_states->ndim() != 2) {
-                hidden_states = hidden_states->view({hidden_states->numel() / hidden_size_, hidden_size_});
-            }
-            hidden_states = expand_hc_stream(hidden_states, hc_mult_);
+    bool use_embedding_and_expand_hc = true;
+    if (use_embedding_and_expand_hc) {
+        // 1000次 deepseek_v4_embedding+expand_hc_stream是 7 ms
+        hidden_states = embedding_hc_expand_scratch_.get(
+            {flat_input_ids->numel(), hc_mult_, hidden_size_},
+            embed_tokens_->weight()->dtype(),
+            embed_tokens_->weight()->device());
+        infinicore::op::deepseek_v4_embedding_and_hc_expand_(
+            hidden_states,
+            flat_input_ids,
+            embed_tokens_->weight(),
+            static_cast<int64_t>(hc_mult_));
+    } else {
+        // 1000次 237 ms
+        // hidden_states = embed_tokens_->forward(flat_input_ids);
+        // 1000次 7 ms
+        // 1000次 deepseek_v4_embedding+expand_hc_stream是 10 ms
+        hidden_states = embed_tokens_->forward(flat_input_ids);
+        if (hidden_states->ndim() != 2) {
+            hidden_states = hidden_states->view({hidden_states->numel() / hidden_size_, hidden_size_});
         }
+        hidden_states = expand_hc_stream(hidden_states, hc_mult_);
     }
     infinicore::Tensor prev_residual;
     infinicore::Tensor prev_post;
     infinicore::Tensor prev_comb;
     {
-        const int repeats = 1;
         // 1000 次 bs=1  fused=false  prefill =12481.360  decode 6040.812
         // 1000 次 bs=1  fused=true   prefill 8016.859  decode 5430.688
 
         // 1000 次 bs=32 fused=false  prefill =23688.123  decode 8762.537
         // 1000 次 bs=32 fused=true   prefill =16779.734  decode 7549.662
 
-        for (int i = 0; i < repeats; ++i) {
-            for (const auto &layer : layers_) {
-                auto [next_hidden_states, next_residual, next_post, next_comb] = layer->forward(input.position_ids.value(),
-                                                                                                hidden_states,
-                                                                                                flat_input_ids,
-                                                                                                prev_residual,
-                                                                                                prev_post,
-                                                                                                prev_comb);
-                hidden_states = next_hidden_states;
-                prev_residual = next_residual;
-                prev_post = next_post;
-                prev_comb = next_comb;
-            }
+        for (const auto &layer : layers_) {
+            auto [next_hidden_states, next_residual, next_post, next_comb] = layer->forward(input.position_ids.value(),
+                                                                                            hidden_states,
+                                                                                            flat_input_ids,
+                                                                                            prev_residual,
+                                                                                            prev_post,
+                                                                                            prev_comb);
+            hidden_states = next_hidden_states;
+            prev_residual = next_residual;
+            prev_post = next_post;
+            prev_comb = next_comb;
         }
     }
 

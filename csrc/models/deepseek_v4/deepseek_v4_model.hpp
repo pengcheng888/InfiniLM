@@ -2,10 +2,10 @@
 
 #include "../../models/infinilm_model.hpp"
 #include "deepseek_v4_decoder_layer.hpp"
-#include "deepseek_v4_rms_norm.hpp"
 #include "deepseek_v4_scratch.hpp"
 #include "infinicore/nn/embedding.hpp"
 #include "infinicore/nn/module.hpp"
+#include "infinicore/nn/rmsnorm.hpp"
 #include "infinicore/tensor.hpp"
 
 #include <memory>
@@ -27,7 +27,7 @@ public:
 private:
     INFINICORE_NN_MODULE(infinicore::nn::Embedding, embed_tokens);
     INFINICORE_NN_MODULE_VEC(DeepseekV4DecoderLayer, layers);
-    INFINICORE_NN_MODULE(DeepseekV4RMSNorm, norm);
+    INFINICORE_NN_MODULE(infinicore::nn::RMSNorm, norm);
 
     INFINICORE_NN_PARAMETER(hc_head_fn);
     INFINICORE_NN_PARAMETER(hc_head_base);

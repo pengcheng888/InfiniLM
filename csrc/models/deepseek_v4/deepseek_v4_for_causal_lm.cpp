@@ -63,28 +63,15 @@ infinilm::InfinilmModel::Output DeepseekV4ForCausalLM::forward(const infinilm::I
     const size_t token_count = input.input_ids.has_value() ? input.input_ids.value()->numel() : 0;
     profile::ScopedTimer forward_timer(profile::Event::CausalForward, token_count);
 
-    infinicore::Tensor hidden_states;
-    {
-        profile::ScopedTimer timer(profile::Event::CausalModel, token_count);
-        hidden_states = model_->forward(input);
+    profile::ScopedTimer timer(profile::Event::CausalModel, token_count);
+    infinicore::Tensor hidden_states = model_->forward(input);
+
+    infinicore::Tensor logits = _compute_lm_head_logits(hidden_states);
+
+    if (logits->ndim() == 2) {
+        logits = logits->view({1, logits->size(0), logits->size(1)});
     }
 
-    infinicore::Tensor logits;
-    {
-        profile::ScopedTimer timer(profile::Event::CausalLmHead, token_count);
-
-        const int repeats = 1; // for test 5000   // false是3868.316 true是1150(新增reduce后是1111.667)
-        for (int i = 0; i < repeats; ++i) {
-            logits = _compute_lm_head_logits(hidden_states);
-        }
-    }
-
-    {
-        profile::ScopedTimer timer(profile::Event::CausalLogitsView, token_count);
-        if (logits->ndim() == 2) {
-            logits = logits->view({1, logits->size(0), logits->size(1)});
-        }
-    }
     return {logits, hidden_states};
 }
 

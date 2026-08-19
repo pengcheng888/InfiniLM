@@ -279,6 +279,7 @@ void DeepseekV4Attention::compute_sparse_attention(
     std::optional<infinicore::Tensor> extra_topk_lengths,
     int extra_page_size,
     infinilm::global_state::DSV4AttnMetadata &dsv4_metadata) const {
+
     infinicore::op::DeepseekV4FlashMLASparseAttentionSchedule flashmla_schedule;
     auto q_for_flash = q; // [tokens, num_attention_heads , head_dim]
 
@@ -427,18 +428,14 @@ infinicore::Tensor DeepseekV4Attention::_compute_q_b_and_kv(const infinicore::Te
                                                             infinicore::Tensor &kv,
                                                             const infinicore::Tensor &pos_ids,
                                                             size_t seq_len) const {
-    infinicore::Tensor q;
-    {
-        auto q_mut = q_lora;
-        profile::ScopedTimer sub_timer(profile::Event::AttentionQProjB, seq_len);
 
-        // [tokens, q_lora_rank] => [tokens, num_attention_heads * head_dim]
-        q = wq_b_->forward(q_mut)->view({seq_len, num_local_attention_heads_, head_dim_});
-    }
-    {
-        profile::ScopedTimer sub_timer(profile::Event::AttentionQRmsNormSelf, seq_len);
-        q = infinicore::op::deepseek_v4_rmsnorm_self(q, static_cast<float>(rms_norm_eps_));
+    auto q_mut = q_lora;
+    profile::ScopedTimer sub_timer(profile::Event::AttentionQProjB, seq_len);
 
+    // [tokens, q_lora_rank] => [tokens, num_attention_heads * head_dim]
+    infinicore::Tensor q = wq_b_->forward(q_mut)->view({seq_len, num_local_attention_heads_, head_dim_});
+    q = infinicore::op::deepseek_v4_rmsnorm_self(q, static_cast<float>(rms_norm_eps_));
+    {
         /*
         下面是sglang
         q, _ = self.wq_b(q)
@@ -453,25 +450,21 @@ infinicore::Tensor DeepseekV4Attention::_compute_q_b_and_kv(const infinicore::Te
     }
 
     {
-        profile::ScopedTimer timer(profile::Event::AttentionKVProjection, seq_len);
-        {
-            profile::ScopedTimer sub_timer(profile::Event::AttentionKVNorm, seq_len);
-            kv = kv_norm_->forward(kv);
+        kv = kv_norm_->forward(kv);
 
-            /*
-            fused_k_norm_rope_flashmla(
-                kv=kv,
-                kv_weight=kv_weight,
-                eps=eps,
-                freqs_cis=freqs_cis,
-                positions=positions,
-                out_loc=swa_loc,
-                kvcache=self.swa_kv_pool.kv_buffer[self._swa_local_layer_id(layer_id)],
-                page_size=self.swa_kv_pool.page_size,
-            )
-            对于kv,sglang是将 kv_norm_和rope以及store kv融合在一起了。
-            */
-        }
+        /*
+        fused_k_norm_rope_flashmla(
+            kv=kv,
+            kv_weight=kv_weight,
+            eps=eps,
+            freqs_cis=freqs_cis,
+            positions=positions,
+            out_loc=swa_loc,
+            kvcache=self.swa_kv_pool.kv_buffer[self._swa_local_layer_id(layer_id)],
+            page_size=self.swa_kv_pool.page_size,
+        )
+        对于kv,sglang是将 kv_norm_和rope以及store kv融合在一起了。
+        */
     }
 
     {
@@ -539,40 +532,25 @@ infinicore::Tensor DeepseekV4Attention::_compute_fused_q_b_and_kv_to_cache(const
         throw std::runtime_error("DeepseekV4Attention::_compute_fused_q_b_and_kv_to_cache requires head_dim=512, qk_rope_head_dim=64, dtype=BF16");
     }
 
-    infinicore::Tensor q;
-    {
-        auto q_mut = q_lora;
-        profile::ScopedTimer sub_timer(profile::Event::AttentionQProjB, seq_len);
-        q = wq_b_->forward(q_mut)->view({seq_len, num_local_attention_heads_, head_dim_});
-    }
+    auto q_lora_mut = q_lora;
+    infinicore::Tensor q = wq_b_->forward(q_lora_mut)->view({seq_len, num_local_attention_heads_, head_dim_});
 
-    {
-        profile::ScopedTimer sub_timer(profile::Event::AttentionQRmsNormSelf, seq_len);
-        auto q_out = q;
-        infinicore::op::deepseek_v4_fused_q_norm_rope_(q_out,
-                                                       q,
-                                                       static_cast<float>(rms_norm_eps_),
-                                                       rope_freqs_cis_,
-                                                       pos_ids);
-    }
+    auto q_out = q;
+    infinicore::op::deepseek_v4_fused_q_norm_rope_(q_out,
+                                                   q,
+                                                   static_cast<float>(rms_norm_eps_),
+                                                   rope_freqs_cis_,
+                                                   pos_ids);
 
-    {
-        profile::ScopedTimer sub_timer(profile::Event::AttentionKVNorm, seq_len);
-        const int repeats = 1;
-        for (int i = 0; i < repeats; ++i) { // repeats用于性能测试，不要删除。
-            // auto kv_is_contiguous = kv->stride(1) == 1 ? kv : kv->contiguous();
-            // 10000 次contiguous， 180.420到200.991
-            // 10000 次支持非连续后，48
-            infinicore::op::deepseek_v4_fused_k_norm_rope_flashmla_(kv,
-                                                                    kv_norm_->weight(),
-                                                                    static_cast<float>(rms_norm_eps_),
-                                                                    rope_freqs_cis_,
-                                                                    pos_ids,
-                                                                    cache_slots,
-                                                                    swa_cache_raw,
-                                                                    static_cast<int>(kDsv4SwaBlockSize));
-        }
-    }
+    infinicore::op::deepseek_v4_fused_k_norm_rope_flashmla_(kv,
+                                                            kv_norm_->weight(),
+                                                            static_cast<float>(rms_norm_eps_),
+                                                            rope_freqs_cis_,
+                                                            pos_ids,
+                                                            cache_slots,
+                                                            swa_cache_raw,
+                                                            static_cast<int>(kDsv4SwaBlockSize));
+
     return q;
 }
 
@@ -583,80 +561,69 @@ DeepseekV4Attention::_forward_prepare(const infinicore::Tensor &hidden_states,
                                       infinilm::global_state::DSV4AttnMetadata &dsv4_metadata,
                                       infinilm::global_state::DeepSeekV4LayerKVCache &layer_cache) const {
     auto &attn_metadata = infinilm::global_state::get_forward_context().attn_metadata;
+    auto cache_slots = dsv4_metadata.raw_out_loc ? dsv4_metadata.raw_out_loc : attn_metadata.slot_mapping.value();
 
     infinicore::Tensor q_lora;
     infinicore::Tensor kv;
-    {
-        profile::ScopedTimer timer(profile::Event::AttentionQProjection, seq_len);
-        auto x = hidden_states;
-        profile::ScopedTimer sub_timer(profile::Event::AttentionQProjA, seq_len);
-        std::tie(q_lora, kv) = wqkv_a_->forward_split(x);
-    }
-
-    {
-        profile::ScopedTimer sub_timer(profile::Event::AttentionQNorm, seq_len);
-        q_lora = q_norm_->forward(q_lora);
-    }
-
-    auto cache_slots = dsv4_metadata.raw_out_loc ? dsv4_metadata.raw_out_loc : attn_metadata.slot_mapping.value();
+    auto x = hidden_states;
+    std::tie(q_lora, kv) = wqkv_a_->forward_split(x);
+    q_lora = q_norm_->forward(q_lora);
 
     infinicore::Tensor q;
-    bool swa_cache_stored = false;
-    q_b_kv_mode_ = QbKvMode::fused_q_b_and_kv_to_cache;
     {
-        const int repeats = 1; // for test 5000
-        for (int i = 0; i < repeats; ++i) {
-            switch (q_b_kv_mode_) {
-            case QbKvMode::q_b_and_kv:
-                q = _compute_q_b_and_kv(q_lora, kv, pos_ids, seq_len);
-                break;
-            case QbKvMode::fused_q_b_and_kv:
-                q = _compute_fused_q_b_and_kv(q_lora, kv, pos_ids, seq_len);
-                break;
-            case QbKvMode::fused_q_b_and_kv_to_cache:
-                q = _compute_fused_q_b_and_kv_to_cache(q_lora, kv, pos_ids, seq_len, cache_slots, layer_cache.swa_cache_raw);
-                swa_cache_stored = true;
-                break;
-            }
+        bool swa_cache_stored = false;
+        q_b_kv_mode_ = QbKvMode::fused_q_b_and_kv_to_cache;
 
-            if (!swa_cache_stored) {
-                profile::ScopedTimer timer(profile::Event::AttentionSWAStore, seq_len);
-                // 该注释不要被删除：swa_cache_raw 存储的是普通 KV 的 FlashMLA raw/FP8 page layout。
-                // "SWA" 表示这份 cache 服务于 Sliding Window Attention；滑窗语义由后续读取时的
-                // swa_indices 和 swa_topk_lengths 选择最近窗口体现，不改变这里写入的 KV 内容。
+        switch (q_b_kv_mode_) {
+        case QbKvMode::q_b_and_kv:
+            q = _compute_q_b_and_kv(q_lora, kv, pos_ids, seq_len);
+            break;
+        case QbKvMode::fused_q_b_and_kv:
+            q = _compute_fused_q_b_and_kv(q_lora, kv, pos_ids, seq_len);
+            break;
+        case QbKvMode::fused_q_b_and_kv_to_cache:
+            q = _compute_fused_q_b_and_kv_to_cache(q_lora, kv, pos_ids, seq_len, cache_slots,
+                                                   layer_cache.swa_cache_raw);
+            swa_cache_stored = true;
+            break;
+        }
 
-                /*
-                def fused_store_cache(
-                    input: torch.Tensor,
-                    cache: torch.Tensor,
-                    indices: torch.Tensor,
-                    *,
-                    page_size: int,
-                    type: Literal["flashmla", "indexer"],
-                ) -> None:
+        if (!swa_cache_stored) {
+            profile::ScopedTimer timer(profile::Event::AttentionSWAStore, seq_len);
+            // 该注释不要被删除：swa_cache_raw 存储的是普通 KV 的 FlashMLA raw/FP8 page layout。
+            // "SWA" 表示这份 cache 服务于 Sliding Window Attention；滑窗语义由后续读取时的
+            // swa_indices 和 swa_topk_lengths 选择最近窗口体现，不改变这里写入的 KV 内容。
 
-                上面是sglang的源码，应该对应着deepseek_v4_store_flashmla_raw_cache_算子。
-                其中有.cu的实现，也有triton的实现。
-                未对比性能。
+            /*
+            def fused_store_cache(
+                input: torch.Tensor,
+                cache: torch.Tensor,
+                indices: torch.Tensor,
+                *,
+                page_size: int,
+                type: Literal["flashmla", "indexer"],
+            ) -> None:
 
-                HIP/ROCm:
-                fused_store_cache
-                    -> triton_fused_store_cache
-                    -> triton_fused_store_flashmla
+            上面是sglang的源码，应该对应着deepseek_v4_store_flashmla_raw_cache_算子。
+            其中有.cu的实现，也有triton的实现。
+            未对比性能。
 
-                CUDA:
-                fused_store_cache
-                    -> JIT load deepseek_v4/store.cuh
-                    -> FusedStoreCacheFlashMLAKernel::run
-                */
-                infinicore::op::deepseek_v4_store_flashmla_raw_cache_(kv,
-                                                                      layer_cache.swa_cache_raw,
-                                                                      cache_slots,
-                                                                      static_cast<int>(kDsv4SwaBlockSize));
-            }
+            HIP/ROCm:
+            fused_store_cache
+                -> triton_fused_store_cache
+                -> triton_fused_store_flashmla
+
+            CUDA:
+            fused_store_cache
+                -> JIT load deepseek_v4/store.cuh
+                -> FusedStoreCacheFlashMLAKernel::run
+            */
+            infinicore::op::deepseek_v4_store_flashmla_raw_cache_(kv,
+                                                                  layer_cache.swa_cache_raw,
+                                                                  cache_slots,
+                                                                  static_cast<int>(kDsv4SwaBlockSize));
         }
     }
-
     std::optional<infinicore::Tensor> extra_raw_cache = std::nullopt;
     std::optional<infinicore::Tensor> extra_indices = std::nullopt;
     std::optional<infinicore::Tensor> extra_topk_lengths = std::nullopt;
@@ -676,32 +643,26 @@ DeepseekV4Attention::_forward_prepare(const infinicore::Tensor &hidden_states,
                              c4_positions,
                              c4_write_loc,
                              c4_extra_loc);
-        infinicore::Tensor c4_sparse_indices;
-        {
-            profile::ScopedTimer timer(profile::Event::AttentionC4SparseAlloc, seq_len);
-            c4_sparse_indices = infinicore::Tensor::empty({seq_len, kDsv4C4Topk},
-                                                          infinicore::DataType::I32,
-                                                          hidden_states->device());
-        }
 
-        const int repeats = 1; // 1000   total_ms= 260.857
-        for (int i = 0; i < repeats; ++i) {
-            indexer_->forward(hidden_states,
-                              q_lora,
-                              pos_ids,
-                              seq_len,
-                              rope_freqs_cis_,
-                              qk_rope_head_dim_,
-                              layer_cache.indexer_compressor_state,
-                              layer_cache.c4_indexer_cache_raw,
-                              c4_out_loc,
-                              c4_positions,
-                              c4_write_loc,
-                              c4_extra_loc,
-                              dsv4_metadata.c4_topk_lengths_raw,
-                              dsv4_metadata.page_table,
-                              c4_sparse_indices);
-        }
+        infinicore::Tensor c4_sparse_indices = infinicore::Tensor::empty({seq_len, kDsv4C4Topk},
+                                                                         infinicore::DataType::I32,
+                                                                         hidden_states->device());
+
+        indexer_->forward(hidden_states,
+                          q_lora,
+                          pos_ids,
+                          seq_len,
+                          rope_freqs_cis_,
+                          qk_rope_head_dim_,
+                          layer_cache.indexer_compressor_state,
+                          layer_cache.c4_indexer_cache_raw,
+                          c4_out_loc,
+                          c4_positions,
+                          c4_write_loc,
+                          c4_extra_loc,
+                          dsv4_metadata.c4_topk_lengths_raw,
+                          dsv4_metadata.page_table,
+                          c4_sparse_indices);
 
         extra_raw_cache = layer_cache.c4_cache_raw;
         extra_indices = c4_sparse_indices;
@@ -746,20 +707,14 @@ infinicore::Tensor DeepseekV4Attention::_apply_grouped_output_projection(infinic
     // num_local_groups_ == 1，grouped linear 退化为普通 linear，所以这里
     // 用 wo_a_->forward([T, D]) 与 grouped 计算等价；若以后支持
     // num_local_groups_ > 1，需要改成真正的 grouped/batched GEMM。
-    infinicore::Tensor wo_a_out;
-    {
-        profile::ScopedTimer timer(profile::Event::AttentionWoA, seq_len);
-        //  [seq_len, num_local_attention_heads_ * head_dim_ / o_groups_]
-        // =>  [seq_len, o_groups_ * o_lora_rank_ ]
-        wo_a_out = wo_a_->forward(wo_a_in);
-    }
-    {
 
-        // [seq_len, o_groups_ * o_lora_rank_ ]
-        //  => [seq_len, hidden_size_ ]
-        profile::ScopedTimer timer(profile::Event::AttentionWoB, seq_len);
-        return wo_b_->forward(wo_a_out);
-    }
+    //  [seq_len, num_local_attention_heads_ * head_dim_ / o_groups_]
+    // =>  [seq_len, o_groups_ * o_lora_rank_ ]
+    infinicore::Tensor wo_a_out = wo_a_->forward(wo_a_in);
+
+    // [seq_len, o_groups_ * o_lora_rank_ ]
+    //  => [seq_len, hidden_size_ ]
+    return wo_b_->forward(wo_a_out);
 }
 
 infinicore::Tensor DeepseekV4Attention::forward(const infinicore::Tensor &positions,
@@ -769,22 +724,18 @@ infinicore::Tensor DeepseekV4Attention::forward(const infinicore::Tensor &positi
         throw std::runtime_error("DeepseekV4Attention::forward expects hidden_states [tokens, hidden]");
     }
     const size_t seq_len = shape[0];
-    profile::ScopedTimer forward_timer(profile::Event::AttentionForward, seq_len);
-
     const auto pos_shape = positions->shape(); // [tokens]
     if (pos_shape.size() != 1 || pos_shape[0] != seq_len) {
         throw std::runtime_error("DeepseekV4Attention::forward expects positions [tokens]");
     }
-    auto pos_ids = positions;
 
     auto &forward_context = infinilm::global_state::get_forward_context();
-    {
-        profile::ScopedTimer timer(profile::Event::AttentionMetadata, seq_len);
-        validate_forward_metadata_and_cache(forward_context);
-    }
+    validate_forward_metadata_and_cache(forward_context);
+
     auto &dsv4_metadata = forward_context.dsv4_attn_metadata;
     auto &layer_cache = forward_context.deepseek_v4_kv_cache_vec[layer_idx_];
 
+    auto pos_ids = positions;
     auto prepared = this->_forward_prepare(hidden_states, pos_ids, seq_len, dsv4_metadata, layer_cache);
     auto q = prepared.q;
     auto extra_raw_cache = prepared.extra_raw_cache;
@@ -796,43 +747,27 @@ infinicore::Tensor DeepseekV4Attention::forward(const infinicore::Tensor &positi
     // swa_topk_lengths 是每个 token 实际使用的 SWA page 数。
     // flashmla_schedule_cache 在一次 forward 内缓存 FlashMLA 调度 metadata，
     // 供同类 attention 的不同 decoder layer 复用。
-    infinicore::Tensor attn_out;
-    {
-        profile::ScopedTimer timer(profile::Event::AttentionWorkspace, seq_len);
-        attn_out = prepare_attn_out_workspace(seq_len, hidden_states->dtype(), hidden_states->device());
-    }
-    {
-        const int repeats = 1; // 1000   total_ms=73
-        for (int i = 0; i < repeats; ++i) {
-            compute_sparse_attention(attn_out,
-                                     q,
-                                     seq_len,
-                                     hidden_states->device(),
-                                     layer_cache.swa_cache_raw,
-                                     dsv4_metadata.swa_indices,
-                                     dsv4_metadata.swa_topk_lengths,
-                                     extra_raw_cache,
-                                     extra_indices,
-                                     extra_topk_lengths,
-                                     extra_page_size,
-                                     dsv4_metadata);
-        }
-    }
+    infinicore::Tensor attn_out = prepare_attn_out_workspace(seq_len,
+                                                             hidden_states->dtype(),
+                                                             hidden_states->device());
+    compute_sparse_attention(attn_out,
+                             q,
+                             seq_len,
+                             hidden_states->device(),
+                             layer_cache.swa_cache_raw,
+                             dsv4_metadata.swa_indices,
+                             dsv4_metadata.swa_topk_lengths,
+                             extra_raw_cache,
+                             extra_indices,
+                             extra_topk_lengths,
+                             extra_page_size,
+                             dsv4_metadata);
 
-    {
-        profile::ScopedTimer timer(profile::Event::AttentionOutRope, seq_len);
-        // attn_out是 [seq_len, num_local_attention_heads_, head_dim_]
-        auto out_rope = attn_out->narrow({{2, head_dim_ - qk_rope_head_dim_, qk_rope_head_dim_}});
-        apply_rope_(pos_ids, out_rope, std::nullopt, true);
-    }
+    // attn_out是 [seq_len, num_local_attention_heads_, head_dim_]
+    auto out_rope = attn_out->narrow({{2, head_dim_ - qk_rope_head_dim_, qk_rope_head_dim_}});
+    apply_rope_(pos_ids, out_rope, std::nullopt, true);
 
     auto wo_a_in = attn_out->view({seq_len, num_local_attention_heads_ * head_dim_ / num_local_groups_});
-
-    bool skip_grouped_output_projection = false; // 耗时 2ms 多一点。
-    if (skip_grouped_output_projection) {
-        return hidden_states;
-    }
-
     return _apply_grouped_output_projection(wo_a_in, seq_len);
 }
 

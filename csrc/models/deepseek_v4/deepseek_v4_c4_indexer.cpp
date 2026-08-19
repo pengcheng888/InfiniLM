@@ -101,103 +101,65 @@ void DeepseekV4C4Indexer::forward(
                          c4_extra_loc);
 
     infinicore::Tensor indexer_q;
-    infinicore::Tensor indexer_weights;
+    infinicore::Tensor indexer_weights = compute_weights(hidden_states);
+
+    profile::ScopedTimer timer(profile::Event::AttentionC4IndexerQuery, seq_len);
+    auto q_lora_mut = q_lora;
+    indexer_q = wq_b_->forward(q_lora_mut)->view({seq_len, index_n_heads_, index_head_dim_});
+
     {
-        indexer_weights = compute_weights(hidden_states);
-    }
+        profile::ScopedTimer timer(profile::Event::AttentionC4IndexerSparse, seq_len);
+        const auto max_c4_seq_len = static_cast<int>(page_table->size(1) * kDsv4C4PageSize);
 
-    const int repeats = 1; // 1000
-    for (int i = 0; i < repeats; ++i) {
-        /*
-        use_new_version = true; ms=216.634 ， （当use_sglang = true时，进一步降低到了211 ms)
+        auto q_fp8 = infinicore::Tensor::empty(indexer_q->shape(), infinicore::DataType::F8, indexer_q->device());
+        infinicore::Tensor fused_weights;
 
-        use_new_version = false; ms=230.634
-        */
-        bool use_new_version = true;
-        if (use_new_version) {
-            {
-                profile::ScopedTimer timer(profile::Event::AttentionC4IndexerQuery, seq_len);
-                auto q_lora_mut = q_lora;
-                indexer_q = wq_b_->forward(q_lora_mut)->view({seq_len, index_n_heads_, index_head_dim_});
-            }
-            {
-                profile::ScopedTimer timer(profile::Event::AttentionC4IndexerSparse, seq_len);
-                const auto max_c4_seq_len = static_cast<int>(page_table->size(1) * kDsv4C4PageSize);
-
-                auto q_fp8 = infinicore::Tensor::empty(indexer_q->shape(), infinicore::DataType::F8, indexer_q->device());
-                infinicore::Tensor fused_weights;
-
-                bool use_sglang = true;
-                if (use_sglang) {
-                    auto fused_weights_sglang = infinicore::Tensor::empty({seq_len, index_n_heads_, static_cast<size_t>(1)},
-                                                                          infinicore::DataType::F32,
-                                                                          indexer_weights->device());
-                    infinicore::op::deepseek_v4_fused_q_indexer_rope_hadamard_quant_sglang_(indexer_q,
-                                                                                            q_fp8,
-                                                                                            indexer_weights,
-                                                                                            fused_weights_sglang,
-                                                                                            weight_scale_,
-                                                                                            rope_freqs_cis,
-                                                                                            pos_ids);
-                    fused_weights = fused_weights_sglang->view(indexer_weights->shape());
-                } else {
-                    auto q_scale = infinicore::Tensor::empty({seq_len, index_n_heads_, static_cast<size_t>(1)}, infinicore::DataType::F32, indexer_q->device());
-                    fused_weights = infinicore::Tensor::empty(indexer_weights->shape(), infinicore::DataType::F32, indexer_weights->device());
-                    infinicore::op::deepseek_v4_fused_q_indexer_rope_hadamard_quant_(indexer_q,
-                                                                                     indexer_weights,
-                                                                                     q_fp8,
-                                                                                     q_scale,
-                                                                                     fused_weights,
-                                                                                     weight_scale_,
-                                                                                     rope_freqs_cis,
-                                                                                     pos_ids);
-                }
-
-                auto logits = infinicore::Tensor::empty({seq_len, static_cast<size_t>(max_c4_seq_len)}, infinicore::DataType::F32, indexer_q->device());
-
-                const int repeats = 1;
-                for (int i = 0; i < repeats; ++i) {
-                    // 1000  total_ms=170.244
-                    // 1000  total_ms=165 deepseek_v4_c4_paged_mqa_topk_transform_512 这个优化相当于没有
-                    // 1000  total_ms=22 deepseek_v4_topk_transform_512_sglang_kernel_ 有提升
-                    // 这个函数中有copy操作，将result拷贝到logits变量中。
-                    infinicore::op::deepseek_v4_c4_paged_mqa_logits_(q_fp8,
-                                                                     fused_weights,
-                                                                     c4_indexer_cache_raw,
-                                                                     c4_topk_lengths_raw,
-                                                                     page_table,
-                                                                     logits,
-                                                                     max_c4_seq_len,
-                                                                     static_cast<int>(kDsv4C4PageSize),
-                                                                     false);
-                    infinicore::op::deepseek_v4_topk_transform_512_sglang_kernel_(logits,
-                                                                                  c4_topk_lengths_raw,
-                                                                                  page_table,
-                                                                                  c4_sparse_indices,
-                                                                                  static_cast<int>(kDsv4C4PageSize));
-                }
-            }
+        bool use_sglang = true;
+        if (use_sglang) {
+            auto fused_weights_sglang = infinicore::Tensor::empty({seq_len, index_n_heads_, static_cast<size_t>(1)},
+                                                                  infinicore::DataType::F32,
+                                                                  indexer_weights->device());
+            infinicore::op::deepseek_v4_fused_q_indexer_rope_hadamard_quant_sglang_(indexer_q,
+                                                                                    q_fp8,
+                                                                                    indexer_weights,
+                                                                                    fused_weights_sglang,
+                                                                                    weight_scale_,
+                                                                                    rope_freqs_cis,
+                                                                                    pos_ids);
+            fused_weights = fused_weights_sglang->view(indexer_weights->shape());
         } else {
-            {
-                profile::ScopedTimer timer(profile::Event::AttentionC4IndexerQuery, seq_len);
-                indexer_q = compute_q(q_lora, pos_ids, seq_len, rope_freqs_cis, qk_rope_head_dim); // for test 5000  //131.618ms
-            }
-            {
-                //  for test 1000 forward_ms=164.857
-                profile::ScopedTimer timer(profile::Event::AttentionC4IndexerSparse, seq_len);
-                const auto max_c4_seq_len = static_cast<int>(page_table->size(1) * kDsv4C4PageSize);
-                infinicore::op::deepseek_v4_c4_sparse_attn_indexer_no_logits_(indexer_q,
-                                                                              indexer_weights,
-                                                                              c4_indexer_cache_raw,
-                                                                              c4_topk_lengths_raw,
-                                                                              page_table,
-                                                                              c4_sparse_indices,
-                                                                              max_c4_seq_len,
-                                                                              static_cast<int>(kDsv4C4PageSize),
-                                                                              weight_scale_,
-                                                                              false);
-            }
+            auto q_scale = infinicore::Tensor::empty({seq_len, index_n_heads_, static_cast<size_t>(1)}, infinicore::DataType::F32, indexer_q->device());
+            fused_weights = infinicore::Tensor::empty(indexer_weights->shape(), infinicore::DataType::F32, indexer_weights->device());
+            infinicore::op::deepseek_v4_fused_q_indexer_rope_hadamard_quant_(indexer_q,
+                                                                             indexer_weights,
+                                                                             q_fp8,
+                                                                             q_scale,
+                                                                             fused_weights,
+                                                                             weight_scale_,
+                                                                             rope_freqs_cis,
+                                                                             pos_ids);
         }
+
+        auto logits = infinicore::Tensor::empty({seq_len, static_cast<size_t>(max_c4_seq_len)}, infinicore::DataType::F32, indexer_q->device());
+
+        // 1000  total_ms=170.244
+        // 1000  total_ms=165 deepseek_v4_c4_paged_mqa_topk_transform_512 这个优化相当于没有
+        // 1000  total_ms=22 deepseek_v4_topk_transform_512_sglang_kernel_ 有提升
+        // 这个函数中有copy操作，将result拷贝到logits变量中。
+        infinicore::op::deepseek_v4_c4_paged_mqa_logits_(q_fp8,
+                                                         fused_weights,
+                                                         c4_indexer_cache_raw,
+                                                         c4_topk_lengths_raw,
+                                                         page_table,
+                                                         logits,
+                                                         max_c4_seq_len,
+                                                         static_cast<int>(kDsv4C4PageSize),
+                                                         false);
+        infinicore::op::deepseek_v4_topk_transform_512_sglang_kernel_(logits,
+                                                                      c4_topk_lengths_raw,
+                                                                      page_table,
+                                                                      c4_sparse_indices,
+                                                                      static_cast<int>(kDsv4C4PageSize));
     }
 }
 

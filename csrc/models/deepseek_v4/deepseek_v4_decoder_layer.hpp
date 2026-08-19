@@ -3,9 +3,9 @@
 #include "../../config/model_config.hpp"
 #include "deepseek_v4_attention.hpp"
 #include "deepseek_v4_moe.hpp"
-#include "deepseek_v4_rms_norm.hpp"
 #include "deepseek_v4_scratch.hpp"
 #include "infinicore/nn/module.hpp"
+#include "infinicore/nn/rmsnorm.hpp"
 #include "infinicore/tensor.hpp"
 
 #include <memory>
@@ -42,8 +42,8 @@ private:
 
     INFINICORE_NN_MODULE(DeepseekV4Attention, attn);
     INFINICORE_NN_MODULE(DeepseekV4MoE, ffn);
-    INFINICORE_NN_MODULE(DeepseekV4RMSNorm, attn_norm);
-    INFINICORE_NN_MODULE(DeepseekV4RMSNorm, ffn_norm);
+    INFINICORE_NN_MODULE(infinicore::nn::RMSNorm, attn_norm);
+    INFINICORE_NN_MODULE(infinicore::nn::RMSNorm, ffn_norm);
 
     INFINICORE_NN_PARAMETER(hc_attn_fn);
     INFINICORE_NN_PARAMETER(hc_ffn_fn);

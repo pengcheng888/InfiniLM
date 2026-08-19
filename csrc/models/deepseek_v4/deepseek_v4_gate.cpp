@@ -63,22 +63,17 @@ DeepseekV4MoEGate::forward(const infinicore::Tensor &hidden_states,
     {
         profile::ScopedTimer timer(profile::Event::MoeTopk, token_count);
         if (is_hash_) {
-            // deepseek_v4_hash_topk_
-            // deepseek_v4_hash_topk_sglang_kernel_
-            const int repeats = 1;
-            for (int i = 0; i < repeats; ++i) {
-                // 1000次 104 ms
-                // 使用deepseek_v4_hash_topk_sglang_kernel_后降低到了14ms??
-                infinicore::op::deepseek_v4_hash_topk_sglang_kernel_(
-                    router_scores,  // [ntoken, 6]
-                    router_indices, // [ntoken, 6]
-                    router_logits,
-                    input_ids,
-                    tid2eid_,
-                    0,
-                    1.0f,
-                    scoring_func_);
-            }
+            // 1000次 104 ms
+            // 使用deepseek_v4_hash_topk_sglang_kernel_后降低到了14ms??
+            infinicore::op::deepseek_v4_hash_topk_sglang_kernel_(
+                router_scores,  // [ntoken, 6]
+                router_indices, // [ntoken, 6]
+                router_logits,
+                input_ids,
+                tid2eid_,
+                0,
+                1.0f,
+                scoring_func_);
         } else {
             infinicore::op::deepseek_v4_topk_(
                 router_scores,  // [ntoken, 6]

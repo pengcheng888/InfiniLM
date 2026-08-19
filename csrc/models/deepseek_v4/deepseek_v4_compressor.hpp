@@ -2,8 +2,8 @@
 
 #include "../../config/model_config.hpp"
 #include "../../layers/linear/fused_linear.hpp"
-#include "deepseek_v4_rms_norm.hpp"
 #include "infinicore/nn/module.hpp"
+#include "infinicore/nn/rmsnorm.hpp"
 #include "infinicore/tensor.hpp"
 
 #include <memory>
@@ -48,7 +48,7 @@ private:
 
     INFINICORE_NN_PARAMETER(ape);
     std::shared_ptr<infinilm::layers::linear::FusedReplicatedLinear> wkv_gate_;
-    INFINICORE_NN_MODULE(DeepseekV4RMSNorm, norm);
+    INFINICORE_NN_MODULE(infinicore::nn::RMSNorm, norm);
     size_t head_dim_{0};
     size_t compress_ratio_{0};
     size_t page_size_{0};

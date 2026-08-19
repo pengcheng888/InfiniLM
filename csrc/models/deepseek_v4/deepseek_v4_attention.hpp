@@ -5,9 +5,9 @@
 #include "../../layers/linear/linear.hpp"
 #include "deepseek_v4_c4_indexer.hpp"
 #include "deepseek_v4_compressor.hpp"
-#include "deepseek_v4_rms_norm.hpp"
 #include "deepseek_v4_scratch.hpp"
 #include "infinicore/nn/module.hpp"
+#include "infinicore/nn/rmsnorm.hpp"
 #include "infinicore/tensor.hpp"
 
 #include <memory>
@@ -140,8 +140,8 @@ private:
 
     std::shared_ptr<infinilm::layers::linear::FusedReplicatedLinear> wqkv_a_;
     std::shared_ptr<infinilm::layers::linear::ColumnParallelLinear> wq_b_;
-    INFINICORE_NN_MODULE(DeepseekV4RMSNorm, q_norm);
-    INFINICORE_NN_MODULE(DeepseekV4RMSNorm, kv_norm);
+    INFINICORE_NN_MODULE(infinicore::nn::RMSNorm, q_norm);
+    INFINICORE_NN_MODULE(infinicore::nn::RMSNorm, kv_norm);
     std::shared_ptr<infinilm::layers::linear::ColumnParallelLinear> wo_a_;
     std::shared_ptr<infinilm::layers::linear::RowParallelLinear> wo_b_;
     std::shared_ptr<DeepseekV4Compressor> compressor_;

@@ -8,7 +8,7 @@
 #include "infinicore/ops/deepseek_v4_lightop_moe_marlin.hpp"
 #include "infinicore/ops/deepseek_v4_moe_align_block_size.hpp"
 #include "infinicore/ops/deepseek_v4_moe_marlin_w8a8.hpp"
-#include "infinicore/ops/deepseek_v4_moe_sum.hpp"
+// #include "infinicore/ops/deepseek_v4_moe_sum.hpp"
 #include "infinicore/ops/deepseek_v4_moe_w8a8.hpp"
 #include "infinicore/ops/deepseek_v4_silu_and_mul.hpp"
 #include "infinicore/ops/mul_scalar.hpp"
@@ -265,7 +265,7 @@ infinicore::Tensor forward_aiter_split(const RoutedExpertContext &ctx,
         prep.config.delta);
 
     auto output = infinicore::Tensor::empty(hidden_states->shape(), hidden_states->dtype(), hidden_states->device());
-    infinicore::op::deepseek_v4_moe_sum_(output, down);
+    // infinicore::op::deepseek_v4_moe_sum_(output, down);
     if (ctx.routed_scaling_factor != 1.0) {
         output = infinicore::op::mul_scalar(output, ctx.routed_scaling_factor);
     }
