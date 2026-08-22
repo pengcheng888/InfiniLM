@@ -52,6 +52,7 @@ void prepare_flashmla_metadata(infinilm::global_state::FlashMLASchedMeta &metada
     }
     metadata.have_initialized = false;
     metadata.graph_refresh_recorded = false;
+    metadata.config.reset();
 }
 
 void prepare_flashmla_metadata_if_enabled(infinilm::global_state::DSV4AttnMetadata &metadata,

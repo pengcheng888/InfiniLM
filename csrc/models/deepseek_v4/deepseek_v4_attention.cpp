@@ -3,6 +3,7 @@
 #include "../../global_state/global_state.hpp"
 #include "deepseek_v4_profile.hpp"
 #include "deepseek_v4_rope.hpp"
+#include "flash_mla/flash_mla.hpp"
 #include "infinicore/context/context.hpp"
 #include "infinicore/ops/deepseek_v4_flashmla_cache.hpp"
 #include "infinicore/ops/deepseek_v4_flashmla_compute.hpp"
@@ -183,6 +184,7 @@ constexpr size_t kDsv4SwaBlockSize = 256;
 constexpr size_t kDsv4C4PageSize = 64;
 constexpr size_t kDsv4C4Topk = 512;
 constexpr size_t kDsv4C128PageSize = 2;
+constexpr size_t kDsv4FlashMlaBytesPerToken = 584;
 
 void copy_flashmla_schedule_tensor(infinicore::Tensor &dst,
                                    const infinicore::Tensor &src) {
@@ -204,6 +206,35 @@ void copy_flashmla_schedule_tensor(infinicore::Tensor &dst,
     infinicore::context::memcpyD2D(dst->data(), src->data(), bytes, false);
 }
 
+infinicore::Tensor make_flashmla_fp8_cache_view(const infinicore::Tensor &raw_cache,
+                                                size_t page_size) {
+    if (!raw_cache) {
+        throw std::runtime_error("DeepseekV4Attention: empty FlashMLA raw cache");
+    }
+    if (raw_cache->dtype() != infinicore::DataType::U8) {
+        throw std::runtime_error("DeepseekV4Attention: FlashMLA raw cache must be U8");
+    }
+    if (raw_cache->ndim() != 2) {
+        throw std::runtime_error("DeepseekV4Attention: FlashMLA raw cache must be a 2D byte tensor");
+    }
+    if (page_size == 0) {
+        throw std::runtime_error("DeepseekV4Attention: invalid FlashMLA raw cache page size");
+    }
+    const size_t effective_page_bytes = page_size * kDsv4FlashMlaBytesPerToken;
+    if (raw_cache->size(1) < effective_page_bytes) {
+        throw std::runtime_error("DeepseekV4Attention: FlashMLA raw cache page bytes too small");
+    }
+    auto *raw_ptr = const_cast<std::byte *>(raw_cache->data());
+    return infinicore::Tensor::strided_from_blob(raw_ptr,
+                                                 {raw_cache->size(0), page_size, 1, kDsv4FlashMlaBytesPerToken},
+                                                 {static_cast<infinicore::Stride>(raw_cache->size(1)),
+                                                  static_cast<infinicore::Stride>(kDsv4FlashMlaBytesPerToken),
+                                                  static_cast<infinicore::Stride>(kDsv4FlashMlaBytesPerToken),
+                                                  1},
+                                                 infinicore::DataType::F8,
+                                                 raw_cache->device());
+}
+
 } // namespace
 
 // 复用同一线程内 attention 的 attn_out 输出 buffer；shape/dtype/device 不匹配时重新分配。
@@ -217,11 +248,11 @@ infinicore::Tensor DeepseekV4Attention::prepare_attn_out_workspace(size_t seq_le
 void DeepseekV4Attention::cache_flashmla_schedule_metadata(
     infinilm::global_state::FlashMLASchedMeta &flashmla_metadata,
     const infinicore::op::DeepseekV4FlashMLASparseAttentionSchedule &flashmla_schedule) const {
-    if (!flashmla_metadata.tile_scheduler_metadata && flashmla_schedule.tile_scheduler_metadata) {
+    if (flashmla_schedule.tile_scheduler_metadata) {
         copy_flashmla_schedule_tensor(flashmla_metadata.tile_scheduler_metadata,
                                       flashmla_schedule.tile_scheduler_metadata);
     }
-    if (!flashmla_metadata.num_splits && flashmla_schedule.num_splits) {
+    if (flashmla_schedule.num_splits) {
         copy_flashmla_schedule_tensor(flashmla_metadata.num_splits,
                                       flashmla_schedule.num_splits);
     }
@@ -255,7 +286,6 @@ void DeepseekV4Attention::refresh_flashmla_schedule_metadata(
     } else {
         extra_topk_lengths = std::nullopt;
     }
-
     infinicore::op::deepseek_v4_flashmla_sparse_attention_metadata_(flashmla_metadata.tile_scheduler_metadata,
                                                                     flashmla_metadata.num_splits,
                                                                     topk_lengths,
@@ -289,7 +319,9 @@ void DeepseekV4Attention::compute_sparse_attention(
     {
         profile::ScopedTimer timer(profile::Event::AttentionFlashMLASchedule, seq_len);
         flashmla_metadata = &dsv4_metadata.get_flashmla_metadata(compress_ratio_);
-        if (infinicore::context::isGraphRecording() && !flashmla_metadata->graph_refresh_recorded) {
+        if (!flashmla_metadata->graph_refresh_recorded
+            && flashmla_metadata->tile_scheduler_metadata
+            && flashmla_metadata->num_splits) {
             refresh_flashmla_schedule_metadata(*flashmla_metadata,
                                                swa_indices,
                                                swa_topk_lengths,
@@ -328,7 +360,6 @@ void DeepseekV4Attention::compute_sparse_attention(
                 infinicore::DataType::F32,
                 device);
         }
-        profile::ScopedTimer sub_timer(profile::Event::AttentionFlashMLAOutWorkspaceCall, seq_len);
         infinicore::op::deepseek_v4_flashmla_sparse_attention_out_workspace_(q_for_flash,
                                                                              swa_cache_raw,
                                                                              swa_indices,
@@ -347,6 +378,7 @@ void DeepseekV4Attention::compute_sparse_attention(
                                                                              extra_indices,
                                                                              extra_topk_lengths,
                                                                              extra_page_size);
+
     } else if (!has_flashmla_schedule) {
         profile::ScopedTimer timer(profile::Event::AttentionFlashMLA, seq_len);
         {
@@ -372,6 +404,58 @@ void DeepseekV4Attention::compute_sparse_attention(
             cache_flashmla_schedule_metadata(*flashmla_metadata, flashmla_schedule);
         }
     }
+}
+
+infinicore::Tensor DeepseekV4Attention::compute_sparse_attention_v2(
+    const infinicore::Tensor &q, // [tokens, num_attention_heads , head_dim]
+    size_t seq_len,
+    const infinicore::Device &device,
+    const infinicore::Tensor &swa_cache_raw,
+    const infinicore::Tensor &swa_indices,
+    const infinicore::Tensor &swa_topk_lengths,
+    std::optional<infinicore::Tensor> extra_raw_cache,
+    std::optional<infinicore::Tensor> extra_indices,
+    std::optional<infinicore::Tensor> extra_topk_lengths,
+    int extra_page_size,
+    infinilm::global_state::DSV4AttnMetadata &dsv4_metadata) const {
+
+    (void)device;
+
+    auto q_for_flash = q; // [tokens, num_attention_heads , head_dim]
+
+    auto &flashmla_metadata = dsv4_metadata.get_flashmla_metadata(compress_ratio_);
+    auto q4d = q_for_flash->view({seq_len, 1, num_local_attention_heads_, head_dim_});
+
+    auto cache4d = make_flashmla_fp8_cache_view(swa_cache_raw, kDsv4SwaBlockSize);
+    auto indices3d = swa_indices->view({seq_len, 1, swa_indices->size(swa_indices->ndim() - 1)});
+    std::optional<infinicore::Tensor> extra_cache4d = std::nullopt;
+    if (extra_raw_cache.has_value() && extra_raw_cache.value()) {
+        extra_cache4d = make_flashmla_fp8_cache_view(extra_raw_cache.value(), static_cast<size_t>(extra_page_size));
+    }
+    std::optional<infinicore::Tensor> extra_indices3d = std::nullopt;
+    if (extra_indices.has_value() && extra_indices.value()) {
+        extra_indices3d = extra_indices.value()->view({seq_len, 1, extra_indices.value()->size(extra_indices.value()->ndim() - 1)});
+    }
+    auto [out4d, lse] = flash_mla::flash_mla_with_kvcache(q4d,
+                                                          cache4d,
+                                                          std::nullopt, // block_table
+                                                          std::nullopt, // cache_seqlens
+                                                          static_cast<int64_t>(head_dim_),
+                                                          flashmla_metadata,
+                                                          std::nullopt, // num_splits
+                                                          static_cast<double>(flashmla_softmax_scale_),
+                                                          false, // causal
+                                                          true,  // is_fp8_kvcache
+                                                          indices3d,
+                                                          attn_sink_for_flash_,
+                                                          extra_cache4d,
+                                                          extra_indices3d,
+                                                          swa_topk_lengths,
+                                                          extra_topk_lengths);
+
+    (void)lse;
+    infinicore::Tensor out3d = out4d->view({seq_len, num_local_attention_heads_, head_dim_});
+    return out3d;
 }
 
 void DeepseekV4Attention::apply_rope_(const infinicore::Tensor &positions,
@@ -451,7 +535,6 @@ infinicore::Tensor DeepseekV4Attention::_compute_q_b_and_kv(const infinicore::Te
 
     {
         kv = kv_norm_->forward(kv);
-
         /*
         fused_k_norm_rope_flashmla(
             kv=kv,
@@ -747,22 +830,38 @@ infinicore::Tensor DeepseekV4Attention::forward(const infinicore::Tensor &positi
     // swa_topk_lengths 是每个 token 实际使用的 SWA page 数。
     // flashmla_schedule_cache 在一次 forward 内缓存 FlashMLA 调度 metadata，
     // 供同类 attention 的不同 decoder layer 复用。
-    infinicore::Tensor attn_out = prepare_attn_out_workspace(seq_len,
-                                                             hidden_states->dtype(),
-                                                             hidden_states->device());
-    compute_sparse_attention(attn_out,
-                             q,
-                             seq_len,
-                             hidden_states->device(),
-                             layer_cache.swa_cache_raw,
-                             dsv4_metadata.swa_indices,
-                             dsv4_metadata.swa_topk_lengths,
-                             extra_raw_cache,
-                             extra_indices,
-                             extra_topk_lengths,
-                             extra_page_size,
-                             dsv4_metadata);
+    infinicore::Tensor attn_out;
+    {
+        // attn_out = prepare_attn_out_workspace(seq_len,
+        //                                       hidden_states->dtype(),
+        //                                       hidden_states->device());
+        // compute_sparse_attention(attn_out,
+        //                          q,
+        //                          seq_len,
+        //                          hidden_states->device(),
+        //                          layer_cache.swa_cache_raw,
+        //                          dsv4_metadata.swa_indices,
+        //                          dsv4_metadata.swa_topk_lengths,
+        //                          extra_raw_cache,
+        //                          extra_indices,
+        //                          extra_topk_lengths,
+        //                          extra_page_size,
+        //                          dsv4_metadata);
+    }
+    {
 
+        attn_out = compute_sparse_attention_v2(q,
+                                               seq_len,
+                                               hidden_states->device(),
+                                               layer_cache.swa_cache_raw,
+                                               dsv4_metadata.swa_indices,
+                                               dsv4_metadata.swa_topk_lengths,
+                                               extra_raw_cache,
+                                               extra_indices,
+                                               extra_topk_lengths,
+                                               extra_page_size,
+                                               dsv4_metadata);
+    }
     // attn_out是 [seq_len, num_local_attention_heads_, head_dim_]
     auto out_rope = attn_out->narrow({{2, head_dim_ - qk_rope_head_dim_, qk_rope_head_dim_}});
     apply_rope_(pos_ids, out_rope, std::nullopt, true);

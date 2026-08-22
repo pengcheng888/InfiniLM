@@ -133,6 +133,19 @@ private:
         std::optional<infinicore::Tensor> extra_topk_lengths,
         int extra_page_size,
         infinilm::global_state::DSV4AttnMetadata &dsv4_metadata) const;
+
+    infinicore::Tensor compute_sparse_attention_v2(
+        const infinicore::Tensor &q,
+        size_t seq_len,
+        const infinicore::Device &device,
+        const infinicore::Tensor &swa_cache_raw,
+        const infinicore::Tensor &swa_indices,
+        const infinicore::Tensor &swa_topk_lengths,
+        std::optional<infinicore::Tensor> extra_raw_cache,
+        std::optional<infinicore::Tensor> extra_indices,
+        std::optional<infinicore::Tensor> extra_topk_lengths,
+        int extra_page_size,
+        infinilm::global_state::DSV4AttnMetadata &dsv4_metadata) const;
     infinicore::Tensor _apply_grouped_output_projection(infinicore::Tensor wo_a_in,
                                                         size_t seq_len) const;
     void validate_forward_metadata_and_cache(

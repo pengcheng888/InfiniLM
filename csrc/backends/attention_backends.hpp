@@ -9,11 +9,13 @@ namespace infinilm::backends {
 /**
  * @brief Enumeration of all supported attention backends.
  */
+// vllm-0.26.0\vllm\v1\attention\backends\registry.py
 enum class AttentionBackend {
     STATIC_ATTN,
     PAGED_ATTN,
     FLASH_ATTN,
     FLASHINFER,
+    FLASHMLA,
     Default = STATIC_ATTN
 };
 

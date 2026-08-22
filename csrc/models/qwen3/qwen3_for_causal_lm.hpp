@@ -1,24 +1,22 @@
 #pragma once
 
-#include "../../layers/linear/linear.hpp"
-#include "../infinilm_model.hpp"
-#include "qwen3_model.hpp"
-#include <memory>
+#include "qwen3_attention.hpp"
 
 namespace infinilm::models::qwen3 {
 
-class Qwen3ForCausalLM : public InfinilmModel {
-public:
-    Qwen3ForCausalLM(std::shared_ptr<infinilm::config::ModelConfig> model_config,
-                     const infinicore::Device &device);
+using Qwen3MLP = infinilm::layers::MLP;
 
-    Output forward(const Input &input) const override;
-    infinicore::Tensor logits_from_hidden(const infinicore::Tensor &hidden_states) const;
+using Qwen3Attention = infinilm::models::qwen3::Qwen3Attention;
 
-protected:
-    INFINICORE_NN_MODULE(Qwen3Model, model);
-    INFINICORE_NN_MODULE(infinilm::layers::linear::ReplicatedLinear, lm_head);
-};
+using Qwen3DecoderLayer = infinilm::layers::causal_lm_templates::TextDecoderLayer<Qwen3Attention, Qwen3MLP>;
+
+using Qwen3Model = infinilm::layers::causal_lm_templates::TextModel<Qwen3DecoderLayer>;
+
+using Qwen3ForCausalLM = infinilm::layers::causal_lm_templates::TextCausalLM<Qwen3Model>;
+
+} // namespace infinilm::models::qwen3
+
+namespace infinilm::models::qwen3 {
 
 std::shared_ptr<infinilm::config::ModelConfig> create_qwen3_model_config(std::shared_ptr<infinilm::config::ModelConfig> model_config);
 

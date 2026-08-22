@@ -1,20 +1,13 @@
 #pragma once
 
+#include "flash_mla_sched_meta.hpp"
+
 #include "../models/infinilm_model.hpp"
 
 #include <cstddef>
 #include <stdexcept>
 
 namespace infinilm::global_state {
-
-struct FlashMLASchedMeta {
-    bool have_initialized{false};
-    bool graph_refresh_recorded{false};
-    infinicore::Tensor tile_scheduler_metadata;
-    infinicore::Tensor num_splits;
-
-    FlashMLASchedMeta() = default;
-};
 
 // 参考sglang\srt\layers\attention\deepseek_v4_backend.py中的DSV4AttnMetadata类
 struct DSV4AttnMetadata {
