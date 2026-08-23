@@ -788,8 +788,27 @@ def _remap_deepseek_v4(state_dict, config=None):
     return remapped
 
 
+def _remap_glm4_moe_lite(state_dict, config=None):
+    """Drop GLM auxiliary/unused layers that are outside this InfiniLM model."""
+    hf_config = config or {}
+    num_hidden_layers = int(hf_config.get("num_hidden_layers", 0) or 0)
+    remapped = {}
+    for key, tensor in state_dict.items():
+        if key.startswith("model.layers."):
+            parts = key.split(".")
+            if len(parts) > 2 and parts[2].isdigit():
+                layer_idx = int(parts[2])
+                if num_hidden_layers and layer_idx >= num_hidden_layers:
+                    continue
+        if key.startswith("mtp.") or ".mtp." in key:
+            continue
+        remapped[key] = tensor
+    return remapped
+
+
 _WEIGHT_REMAPPER = {
     "glm4": _remap_glm4,
+    "glm4_moe_lite": _remap_glm4_moe_lite,
     "chatglm": _remap_chatglm,
     "baichuan": _remap_baichuan,
     "gpt2": _remap_gpt2,

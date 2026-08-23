@@ -128,17 +128,17 @@ std::pair<infinicore::Tensor, infinicore::Tensor> flash_mla_with_kvcache(
         std::optional<infinicore::Tensor> decode_tile_scheduler_metadata = std::nullopt;
         std::optional<infinicore::Tensor> decode_num_splits = std::nullopt;
         auto [out, lse, new_tile_scheduler_metadata, new_num_splits] = infinicore::op::flash_mla::sparse_decode_fwd(q,
-                                                                                                                     k_cache,
-                                                                                                                     indices_in_kvcache.value(),
-                                                                                                                     topk_length,
-                                                                                                                     attn_sink,
-                                                                                                                     decode_tile_scheduler_metadata,
-                                                                                                                     decode_num_splits,
-                                                                                                                     extra_k_cache,
-                                                                                                                     extra_indices_in_kvcache,
-                                                                                                                     extra_topk_length,
-                                                                                                                     head_dim_v,
-                                                                                                                     scale);
+                                                                                                                    k_cache,
+                                                                                                                    indices_in_kvcache.value(),
+                                                                                                                    topk_length,
+                                                                                                                    attn_sink,
+                                                                                                                    decode_tile_scheduler_metadata,
+                                                                                                                    decode_num_splits,
+                                                                                                                    extra_k_cache,
+                                                                                                                    extra_indices_in_kvcache,
+                                                                                                                    extra_topk_length,
+                                                                                                                    head_dim_v,
+                                                                                                                    scale);
         // 注意：不再复用scheduler_metadata，请不要修改。
         // sched_meta.tile_scheduler_metadata = new_tile_scheduler_metadata;
         // sched_meta.num_splits = new_num_splits;
@@ -159,15 +159,15 @@ std::pair<infinicore::Tensor, infinicore::Tensor> flash_mla_with_kvcache(
 
         ASSERT((block_table.has_value() && block_table.value() && cache_seqlens.has_value() && cache_seqlens.value()) && "block_table and cache_seqlens must be provided when dense attention is used.");
 
-        auto [out, lse, new_tile_scheduler_metadata, new_num_splits] = infinicore::op::flash_mla::dense_decode_fwd_(q,
-                                                                                                                     k_cache,
-                                                                                                                     head_dim_v,
-                                                                                                                     cache_seqlens.value(),
-                                                                                                                     block_table.value(),
-                                                                                                                     scale,
-                                                                                                                     causal,
-                                                                                                                     sched_meta.tile_scheduler_metadata,
-                                                                                                                     sched_meta.num_splits);
+        auto [out, lse, new_tile_scheduler_metadata, new_num_splits] = infinicore::op::flash_mla::dense_decode_fwd(q,
+                                                                                                                   k_cache,
+                                                                                                                   head_dim_v,
+                                                                                                                   cache_seqlens.value(),
+                                                                                                                   block_table.value(),
+                                                                                                                   scale,
+                                                                                                                   causal,
+                                                                                                                   sched_meta.tile_scheduler_metadata,
+                                                                                                                   sched_meta.num_splits);
         sched_meta.tile_scheduler_metadata = new_tile_scheduler_metadata;
         sched_meta.num_splits = new_num_splits;
         return {out, lse};

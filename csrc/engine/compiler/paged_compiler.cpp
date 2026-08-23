@@ -46,7 +46,7 @@ PagedCompiler::PagedCompiler(const std::shared_ptr<InfinilmModel> &model, RankBa
     : GraphCompiler(model, barrier) {
     const bool is_deepseek_v4 = model_ && model_->model_type() == "deepseek_v4";
     if (is_deepseek_v4) {
-        for (size_t b = 4; b > 0; --b) {
+        for (size_t b = 8; b > 0; --b) {
             decode_batch_sizes_.push_back(b);
         }
         return;
