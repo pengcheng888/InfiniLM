@@ -1,13 +1,56 @@
 import logging
+import json
 import os
 import time
+import uuid
 
 from infinilm.base_config import BaseConfig
 from infinilm.llm.llm import LLM
+from infinilm.llm.request import InferenceRequest
+from infinilm.llm.sampling_params import SamplingParams
 from infinilm.moe_config import configure_moe_ep_backend
 from infinilm.processors.videonsa_processor import decode_video_frames
 
 DEFAULT_VIDEO_NUM_FRAMES = 8
+
+
+def _parse_input_ids(raw: str | None):
+    if raw is None:
+        return None
+    raw = raw.strip()
+    if not raw:
+        return None
+    if raw.startswith("["):
+        return [int(item) for item in json.loads(raw)]
+    return [int(item.strip()) for item in raw.split(",") if item.strip()]
+
+
+def _generate_from_input_ids(
+    model, prompt_token_ids_list, max_new_tokens, temperature, top_p, top_k, ignore_eos
+):
+    sampling_params = SamplingParams(
+        temperature=temperature,
+        top_p=top_p,
+        top_k=top_k,
+        max_tokens=max_new_tokens,
+        ignore_eos=ignore_eos,
+    )
+    requests = []
+    for prompt_token_ids in prompt_token_ids_list:
+        req = InferenceRequest(
+            request_id=f"cmpl-{uuid.uuid4().hex}",
+            prompt=model.engine.detokenize(prompt_token_ids),
+            prompt_token_ids=prompt_token_ids,
+            sampling_params=sampling_params,
+            eos_token_ids=[] if ignore_eos else model.engine.eos_token_ids,
+        )
+        requests.append(req)
+        model.engine.add_request(req)
+
+    while not all(req.is_finished() for req in requests):
+        model.engine.step()
+
+    return [req.to_request_output() for req in requests]
 
 
 def test(
@@ -41,6 +84,9 @@ def test(
     use_legacy_moe=False,
     enable_prefix_caching=True,
     pre_transpose=False,
+    input_ids=None,
+    warmup=False,
+    ignore_eos=False,
 ):
     model_path = os.path.expanduser(model_path)
     # ---------------------------------------------------------------------------- #
@@ -77,6 +123,7 @@ def test(
         use_legacy_moe=use_legacy_moe,
         enable_prefix_caching=enable_prefix_caching,
         pre_transpose=pre_transpose,
+        warmup=warmup,
     )
 
     conversations = [
@@ -106,14 +153,44 @@ def test(
         )
     finally:
         model.close()
+    if input_ids is not None:
+        prompt_token_ids_list = [input_ids for _ in range(len(prompts))]
+        outputs = _generate_from_input_ids(
+            model,
+            prompt_token_ids_list,
+            max_new_tokens,
+            temperature,
+            top_p,
+            top_k,
+            ignore_eos,
+        )
+    else:
+        sampling_params = SamplingParams(
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
+            max_tokens=max_new_tokens,
+            ignore_eos=ignore_eos,
+        )
+        outputs = model.chat(
+            messages=conversations,
+            sampling_params=sampling_params,
+            use_tqdm=False,
+        )
     t2 = time.time()
 
     for i, output in enumerate(outputs):
         print(f"Resquest {i}:")
         print("===Query===")
         print(output.prompt)
+        if getattr(output, "prompt_token_ids", None) is not None:
+            print("===Prompt Token IDs===")
+            print(output.prompt_token_ids)
         print("===Response===")
         print(output.outputs[0].text)
+        if output.outputs and getattr(output.outputs[0], "token_ids", None) is not None:
+            print("===Generated Token IDs===")
+            print(output.outputs[0].token_ids)
         print("")
 
     print(
@@ -134,6 +211,13 @@ if __name__ == "__main__":
         raise SystemExit(0)
 
     device_str = cfg.get_device_str(cfg.device)
+
+    input_ids = None
+    for i, arg in enumerate(cfg.extra):
+        if arg == "--input-ids" and i + 1 < len(cfg.extra):
+            input_ids = _parse_input_ids(cfg.extra[i + 1])
+        elif arg.startswith("--input-ids="):
+            input_ids = _parse_input_ids(arg.split("=", 1)[1])
 
     prompts = [cfg.prompt for _ in range(cfg.batch_size)]
 
@@ -185,4 +269,7 @@ if __name__ == "__main__":
         use_legacy_moe=cfg.use_legacy_moe,
         enable_prefix_caching=cfg.enable_prefix_caching,
         pre_transpose=cfg.pre_transpose,
+        input_ids=input_ids,
+        warmup=cfg.warmup,
+        ignore_eos=cfg.ignore_eos,
     )

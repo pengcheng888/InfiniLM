@@ -65,6 +65,10 @@ def _is_internal_moe_packed_weight(key: str) -> bool:
         or key.endswith(".mlp.experts.w2_weight")
         or key.endswith(".mlp.experts.w1")
         or key.endswith(".mlp.experts.w2")
+        or key.endswith(".ffn.experts.w13_weight")
+        or key.endswith(".ffn.experts.w13_weight_scale")
+        or key.endswith(".ffn.experts.w2_weight")
+        or key.endswith(".ffn.experts.w2_weight_scale")
     )
 
 
@@ -104,7 +108,26 @@ def load_state_dict(
     checkpoint_file: Union[str, os.PathLike],
     device="cpu",
     dtype=torch.bfloat16,
-    preserve_fp32_suffixes: Tuple[str, ...] = (".e_score_correction_bias",),
+    preserve_fp32_suffixes: Tuple[str, ...] = (
+        ".e_score_correction_bias",
+        ".ffn.gate.bias",
+        ".ape",
+        ".scale",
+        ".weight_scale",
+        ".attn_sink",
+        ".hc_attn_fn",
+        ".hc_ffn_fn",
+        ".hc_attn_base",
+        ".hc_ffn_base",
+        ".hc_attn_scale",
+        ".hc_ffn_scale",
+        ".hc_head_fn",
+        ".hc_head_base",
+        ".hc_head_scale",
+        "hc_head_fn",
+        "hc_head_base",
+        "hc_head_scale",
+    ),
 ) -> Dict[str, torch.Tensor]:
     """
     Reads a `safetensor` checkpoint file. We load the checkpoint on "cpu" by default.
@@ -201,7 +224,26 @@ def load_model_state_dict_by_file(
     t1 = time.time()
 
     model_type = model.hf_config.get("model_type", "")
-    preserve_fp32_suffixes = (".e_score_correction_bias",)
+    preserve_fp32_suffixes = (
+        ".e_score_correction_bias",
+        ".ffn.gate.bias",
+        ".ape",
+        ".scale",
+        ".weight_scale",
+        ".attn_sink",
+        ".hc_attn_fn",
+        ".hc_ffn_fn",
+        ".hc_attn_base",
+        ".hc_ffn_base",
+        ".hc_attn_scale",
+        ".hc_ffn_scale",
+        ".hc_head_fn",
+        ".hc_head_base",
+        ".hc_head_scale",
+        "hc_head_fn",
+        "hc_head_base",
+        "hc_head_scale",
+    )
     if model_type == "kimi_k3":
         preserve_fp32_suffixes += (".A_log", ".dt_bias")
 
@@ -1071,16 +1113,79 @@ def _remap_kimi_k3(state_dict, config):
     return state_dict
 
 
+def _remap_qwen3(state_dict, config=None):
+    """Drop non-parameter rotary cache tensors from dense Qwen3 checkpoints."""
+    return drop_keys(
+        state_dict,
+        ["rotary_emb.inv_freq", "rotary_emb.cos_cached", "rotary_emb.sin_cached"],
+    )
+
+
+def _remap_deepseek_v4(state_dict, config=None):
+    """Adapt Hygon DeepSeek V4 checkpoint names to the InfiniLM module tree."""
+    remapped = {}
+    for key, tensor in state_dict.items():
+        # Full DSv4 checkpoints include an optional MTP draft head; normal generation skips it.
+        if key.startswith("mtp."):
+            continue
+        if key == "embed.weight":
+            new_key = "model.embed_tokens.weight"
+        elif key == "head.weight":
+            new_key = "lm_head.weight"
+        elif key == "norm.weight":
+            new_key = "model.norm.weight"
+        elif key.startswith("hc_head_"):
+            new_key = "model." + key
+        elif key.startswith("layers."):
+            new_key = "model." + key
+        else:
+            new_key = key
+
+        if new_key.endswith(".scale"):
+            new_key = new_key.removesuffix(".scale") + ".weight_scale"
+        if new_key.endswith(".weight_scale") and tensor.is_floating_point():
+            tensor = tensor.to(dtype=torch.float32)
+        if (
+            new_key.endswith(".attn.compressor.ape")
+            or new_key.endswith(".attn.indexer.compressor.ape")
+        ) and tensor.ndim == 2 and tensor.shape[0] == 4 and tensor.shape[1] % 2 == 0:
+            head_dim = tensor.shape[1] // 2
+            tensor = torch.cat([tensor[:, head_dim:], tensor[:, :head_dim]], dim=0).contiguous()
+        remapped[new_key] = tensor
+    return remapped
+
+
+def _remap_glm4_moe_lite(state_dict, config=None):
+    """Drop GLM auxiliary/unused layers that are outside this InfiniLM model."""
+    hf_config = config or {}
+    num_hidden_layers = int(hf_config.get("num_hidden_layers", 0) or 0)
+    remapped = {}
+    for key, tensor in state_dict.items():
+        if key.startswith("model.layers."):
+            parts = key.split(".")
+            if len(parts) > 2 and parts[2].isdigit():
+                layer_idx = int(parts[2])
+                if num_hidden_layers and layer_idx >= num_hidden_layers:
+                    continue
+        if key.startswith("mtp.") or ".mtp." in key:
+            continue
+        remapped[key] = tensor
+    return remapped
+
+
 _WEIGHT_REMAPPER = {
     "glm4": _remap_glm4,
+    "glm4_moe_lite": _remap_glm4_moe_lite,
     "chatglm": _remap_chatglm,
     "baichuan": _remap_baichuan,
     "gpt2": _remap_gpt2,
     "mamba": _remap_mamba,
     "videonsa": _remap_videonsa,
+    "qwen3": _remap_qwen3,
     "qwen3_5": _remap_qwen3_5,
     "ernie4_5_moe_vl": _remap_ernie4_5_moe_vl,
     "qwen3_5_moe": _remap_qwen3_5_moe,
     "qwen3_next": _remap_qwen3_next,
     "kimi_k3": _remap_kimi_k3,
+    "deepseek_v4": _remap_deepseek_v4,
 }

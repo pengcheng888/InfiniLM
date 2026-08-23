@@ -10,6 +10,39 @@
 #include <vector>
 
 namespace infinilm {
+struct DeepSeekV4Input {
+    /// DeepSeek-V4 SWA FlashMLA indices, shape `[seq, 128]`.
+    infinicore::Tensor swa_indices;
+    /// DeepSeek-V4 SWA top-k lengths, shape `[seq]`.
+    infinicore::Tensor swa_topk_lengths;
+    /// DeepSeek-V4 raw output cache locations, shape `[seq]`.
+    infinicore::Tensor raw_out_loc;
+    /// DeepSeek-V4 repeated page table, shape `[seq, max_pages]`.
+    infinicore::Tensor page_table;
+    /// DeepSeek-V4 C4 compressed output locations, shape `[seq]`.
+    infinicore::Tensor c4_out_loc;
+    /// DeepSeek-V4 C4 compression RoPE positions, shape `[seq]`.
+    infinicore::Tensor c4_positions;
+    /// DeepSeek-V4 C4 raw compressed lengths, shape `[seq]`.
+    infinicore::Tensor c4_topk_lengths_raw;
+    /// DeepSeek-V4 C4 sparse top-k lengths, shape `[seq]`.
+    infinicore::Tensor c4_sparse_topk_lengths;
+    /// DeepSeek-V4 C128 compressed output locations, shape `[seq]`.
+    infinicore::Tensor c128_out_loc;
+    /// DeepSeek-V4 C128 compression RoPE positions, shape `[seq]`.
+    infinicore::Tensor c128_positions;
+    /// DeepSeek-V4 C128 compressed-cache page indices for FlashMLA extra attention, shape `[seq, c128_width]`.
+    infinicore::Tensor c128_page_indices;
+    /// DeepSeek-V4 C128 top-k lengths clamped to at least 1, shape `[seq]`.
+    infinicore::Tensor c128_topk_lengths_clamp1;
+    /// DeepSeek-V4 C4 compressor write locations, shape `[seq]`.
+    infinicore::Tensor c4_compress_write_loc;
+    /// DeepSeek-V4 C4 compressor overlap locations, shape `[seq, 1]`.
+    infinicore::Tensor c4_compress_extra_loc;
+    /// DeepSeek-V4 C128 compressor write locations, shape `[seq]`.
+    infinicore::Tensor c128_compress_write_loc;
+};
+
 class InfinilmModel : public infinicore::nn::Module {
 public:
     struct Config {
@@ -34,6 +67,8 @@ public:
         std::optional<infinicore::Tensor> block_tables;
         /// Slot ids for each token `[seq]`. Used for paged cache.
         std::optional<infinicore::Tensor> slot_mapping;
+        /// DeepSeek-V4 request-side attention metadata.
+        DeepSeekV4Input deepseek_v4;
         /// Mamba state cache indices read at the start of each request forward, of shape `[num_requests]`.
         std::optional<infinicore::Tensor> mamba_init_state_indices;
         /// Mamba state cache indices written with the final state of each request forward, of shape `[num_requests]`.
@@ -74,6 +109,10 @@ public:
     }
     const std::shared_ptr<infinilm::config::ModelConfig> &get_model_config() const {
         return model_config_;
+    }
+
+    std::string model_type() const {
+        return model_config_ ? model_config_->get<std::string>("model_type") : "";
     }
 
     void process_weights_after_loading();

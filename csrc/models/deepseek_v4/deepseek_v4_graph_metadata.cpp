@@ -1,0 +1,131 @@
+#include "deepseek_v4_graph_metadata.hpp"
+
+#include "../../global_state/global_state.hpp"
+
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <vector>
+
+namespace infinilm::models::deepseek_v4 {
+namespace {
+
+constexpr size_t kDsv4SwaTopk = 128;
+constexpr size_t kDsv4C128MetadataWidth = 8256;
+constexpr size_t kDsv4FlashMlaNumSmParts = 160;
+constexpr size_t kDsv4FlashMlaSchedMetaWidth = 8;
+
+bool enable_prealloc_flashmla_metadata() {
+    const char *value = std::getenv("INFINILM_DSV4_FLASHMLA_PREALLOC_METADATA");
+    if (value == nullptr) {
+        return true;
+    }
+    return !(std::strcmp(value, "0") == 0 || std::strcmp(value, "false") == 0 || std::strcmp(value, "FALSE") == 0 || std::strcmp(value, "off") == 0 || std::strcmp(value, "OFF") == 0 || std::strcmp(value, "no") == 0 || std::strcmp(value, "NO") == 0);
+}
+
+infinicore::Tensor make_i32_tensor(const std::vector<size_t> &shape,
+                                   int32_t fill,
+                                   infinicore::Device device) {
+    auto tensor = infinicore::Tensor::empty(shape, infinicore::DataType::I32, device);
+    std::vector<int32_t> values(tensor->numel(), fill);
+    infinicore::context::memcpyH2D(tensor->data(), values.data(), values.size() * sizeof(int32_t), false);
+    return tensor;
+}
+
+void prepare_flashmla_metadata(infinilm::global_state::FlashMLASchedMeta &metadata,
+                               size_t tokens,
+                               infinicore::Device device) {
+    const std::vector<size_t> tile_scheduler_metadata_shape{
+        kDsv4FlashMlaNumSmParts,
+        kDsv4FlashMlaSchedMetaWidth};
+    const std::vector<size_t> num_splits_shape{tokens + 1};
+
+    if (!metadata.tile_scheduler_metadata || metadata.tile_scheduler_metadata->shape() != tile_scheduler_metadata_shape || metadata.tile_scheduler_metadata->dtype() != infinicore::DataType::I32 || metadata.tile_scheduler_metadata->device() != device) {
+        metadata.tile_scheduler_metadata = infinicore::Tensor::empty(tile_scheduler_metadata_shape,
+                                                                     infinicore::DataType::I32,
+                                                                     device);
+    }
+    if (!metadata.num_splits || metadata.num_splits->shape() != num_splits_shape || metadata.num_splits->dtype() != infinicore::DataType::I32 || metadata.num_splits->device() != device) {
+        metadata.num_splits = infinicore::Tensor::empty(num_splits_shape,
+                                                        infinicore::DataType::I32,
+                                                        device);
+    }
+    metadata.have_initialized = false;
+    metadata.graph_refresh_recorded = false;
+    metadata.config.reset();
+}
+
+void prepare_flashmla_metadata_if_enabled(infinilm::global_state::DSV4AttnMetadata &metadata,
+                                          infinicore::Device device) {
+    if (!enable_prealloc_flashmla_metadata()) {
+        return;
+    }
+    const size_t tokens = metadata.swa_topk_lengths ? metadata.swa_topk_lengths->numel() : 0;
+    prepare_flashmla_metadata(metadata.c1_flashmla_metadata, tokens, device);
+    prepare_flashmla_metadata(metadata.c4_flashmla_metadata, tokens, device);
+    prepare_flashmla_metadata(metadata.c128_flashmla_metadata, tokens, device);
+}
+
+void copy_flashmla_metadata(infinilm::global_state::DSV4AttnMetadata &dst,
+                            const infinilm::global_state::DSV4AttnMetadata &src) {
+    dst.c1_flashmla_metadata = src.c1_flashmla_metadata;
+    dst.c4_flashmla_metadata = src.c4_flashmla_metadata;
+    dst.c128_flashmla_metadata = src.c128_flashmla_metadata;
+    dst.c1_flashmla_metadata.graph_refresh_recorded = false;
+    dst.c4_flashmla_metadata.graph_refresh_recorded = false;
+    dst.c128_flashmla_metadata.graph_refresh_recorded = false;
+}
+
+} // namespace
+
+void init_graph_decode_metadata(infinilm::InfinilmModel::Input &input,
+                                size_t batch_size,
+                                size_t block_per_req,
+                                infinicore::Device device) {
+    auto &deepseek_v4 = input.deepseek_v4;
+    deepseek_v4.swa_indices = make_i32_tensor({batch_size, kDsv4SwaTopk}, -1, device);
+    deepseek_v4.swa_topk_lengths = make_i32_tensor({batch_size}, 1, device);
+
+    deepseek_v4.raw_out_loc = make_i32_tensor({batch_size}, 0, device);
+    deepseek_v4.page_table = make_i32_tensor({batch_size, block_per_req}, -1, device);
+    std::vector<int32_t> page_table(batch_size * block_per_req, -1);
+    for (size_t row = 0; row < batch_size; ++row) {
+        page_table[row * block_per_req] = 0;
+    }
+    infinicore::context::memcpyH2D(deepseek_v4.page_table->data(), page_table.data(), page_table.size() * sizeof(int32_t), false);
+
+    deepseek_v4.c4_out_loc = make_i32_tensor({batch_size}, -1, device);
+    deepseek_v4.c4_positions = make_i32_tensor({batch_size}, 0, device);
+    deepseek_v4.c4_topk_lengths_raw = make_i32_tensor({batch_size}, 0, device);
+    deepseek_v4.c4_sparse_topk_lengths = make_i32_tensor({batch_size}, 1, device);
+
+    deepseek_v4.c128_out_loc = make_i32_tensor({batch_size}, -1, device);
+    deepseek_v4.c128_positions = make_i32_tensor({batch_size}, 0, device);
+    deepseek_v4.c128_page_indices = make_i32_tensor({batch_size, kDsv4C128MetadataWidth}, -1, device);
+    deepseek_v4.c128_topk_lengths_clamp1 = make_i32_tensor({batch_size}, 1, device);
+
+    deepseek_v4.c4_compress_write_loc = make_i32_tensor({batch_size}, 0, device);
+    deepseek_v4.c4_compress_extra_loc = make_i32_tensor({batch_size, 1}, 0, device);
+    deepseek_v4.c128_compress_write_loc = make_i32_tensor({batch_size}, 0, device);
+}
+
+void bind_graph_forward_context_from_input(const infinilm::InfinilmModel::Input &input) {
+    auto &forward_context = infinilm::global_state::get_forward_context();
+    forward_context.attn_metadata = infinilm::global_state::AttentionMetadata(input);
+    forward_context.dsv4_attn_metadata = infinilm::global_state::DSV4AttnMetadata(input);
+    prepare_flashmla_metadata_if_enabled(forward_context.dsv4_attn_metadata,
+                                         input.input_ids.value()->device());
+}
+
+void bind_graph_forward_context_from_input(
+    const infinilm::InfinilmModel::Input &input,
+    const infinilm::global_state::DSV4AttnMetadata &dsv4_metadata) {
+    auto &forward_context = infinilm::global_state::get_forward_context();
+    forward_context.attn_metadata = infinilm::global_state::AttentionMetadata(input);
+    forward_context.dsv4_attn_metadata = infinilm::global_state::DSV4AttnMetadata(input);
+    copy_flashmla_metadata(forward_context.dsv4_attn_metadata, dsv4_metadata);
+    prepare_flashmla_metadata_if_enabled(forward_context.dsv4_attn_metadata,
+                                         input.input_ids.value()->device());
+}
+
+} // namespace infinilm::models::deepseek_v4

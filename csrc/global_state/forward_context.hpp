@@ -1,8 +1,85 @@
 #pragma once
 
+#include "flash_mla_sched_meta.hpp"
+
 #include "../models/infinilm_model.hpp"
 
+#include <cstddef>
+#include <stdexcept>
+
 namespace infinilm::global_state {
+
+// 参考sglang\srt\layers\attention\deepseek_v4_backend.py中的DSV4AttnMetadata类
+struct DSV4AttnMetadata {
+public:
+    infinicore::Tensor swa_indices;
+    infinicore::Tensor swa_topk_lengths;
+
+    infinicore::Tensor raw_out_loc;
+    infinicore::Tensor page_table;
+
+    infinicore::Tensor c4_out_loc;
+    infinicore::Tensor c4_positions;
+    infinicore::Tensor c4_topk_lengths_raw;
+    infinicore::Tensor c4_sparse_topk_lengths;
+
+    infinicore::Tensor c128_out_loc;
+    infinicore::Tensor c128_positions;
+    infinicore::Tensor c128_page_indices;
+    infinicore::Tensor c128_topk_lengths_clamp1;
+
+    infinicore::Tensor c4_compress_write_loc;
+    infinicore::Tensor c4_compress_extra_loc;
+    infinicore::Tensor c128_compress_write_loc;
+
+public:
+    // FlashMLA schedule 运行期生成：默认由 eager 首次同类 attention 填充；
+    // 开启预分配后 graph metadata 绑定阶段创建 tensor，capture 时刷新内容。
+    FlashMLASchedMeta c1_flashmla_metadata;
+    FlashMLASchedMeta c4_flashmla_metadata;
+    FlashMLASchedMeta c128_flashmla_metadata;
+
+    DSV4AttnMetadata() = default;
+
+    explicit DSV4AttnMetadata(const infinilm::InfinilmModel::Input &input)
+        : swa_indices(input.deepseek_v4.swa_indices),
+          swa_topk_lengths(input.deepseek_v4.swa_topk_lengths),
+          raw_out_loc(input.deepseek_v4.raw_out_loc),
+          page_table(input.deepseek_v4.page_table),
+          c4_out_loc(input.deepseek_v4.c4_out_loc),
+          c4_positions(input.deepseek_v4.c4_positions),
+          c4_topk_lengths_raw(input.deepseek_v4.c4_topk_lengths_raw),
+          c4_sparse_topk_lengths(input.deepseek_v4.c4_sparse_topk_lengths),
+          c128_out_loc(input.deepseek_v4.c128_out_loc),
+          c128_positions(input.deepseek_v4.c128_positions),
+          c128_page_indices(input.deepseek_v4.c128_page_indices),
+          c128_topk_lengths_clamp1(input.deepseek_v4.c128_topk_lengths_clamp1),
+          c4_compress_write_loc(input.deepseek_v4.c4_compress_write_loc),
+          c4_compress_extra_loc(input.deepseek_v4.c4_compress_extra_loc),
+          c128_compress_write_loc(input.deepseek_v4.c128_compress_write_loc) {}
+
+    FlashMLASchedMeta &get_flashmla_metadata(size_t compress_ratio) {
+        if (compress_ratio == 0) {
+            return c1_flashmla_metadata;
+        } else if (compress_ratio == 4) {
+            return c4_flashmla_metadata;
+        } else if (compress_ratio == 128) {
+            return c128_flashmla_metadata;
+        }
+        throw std::runtime_error("DSV4AttnMetadata: invalid FlashMLA compress ratio");
+    }
+
+    const FlashMLASchedMeta &get_flashmla_metadata(size_t compress_ratio) const {
+        if (compress_ratio == 0) {
+            return c1_flashmla_metadata;
+        } else if (compress_ratio == 4) {
+            return c4_flashmla_metadata;
+        } else if (compress_ratio == 128) {
+            return c128_flashmla_metadata;
+        }
+        throw std::runtime_error("DSV4AttnMetadata: invalid FlashMLA compress ratio");
+    }
+};
 
 struct AttentionMetadata {
     /// Past Lengths of cached sequence for each request, of shape `[num_requests]`.
@@ -40,12 +117,22 @@ struct AttentionMetadata {
                                                         max_query_length(max_query_length),
                                                         max_sequence_length(max_sequence_length) {}
 
-    AttentionMetadata(const infinilm::InfinilmModel::Input &input) : AttentionMetadata(input.past_sequence_lengths,
-                                                                                       input.total_sequence_lengths,
-                                                                                       input.input_offsets,
-                                                                                       input.cu_seqlens,
-                                                                                       input.block_tables,
-                                                                                       input.slot_mapping) {}
+    explicit AttentionMetadata(const infinilm::InfinilmModel::Input &input) : AttentionMetadata(input.past_sequence_lengths,
+                                                                                                input.total_sequence_lengths,
+                                                                                                input.input_offsets,
+                                                                                                input.cu_seqlens,
+                                                                                                input.block_tables,
+                                                                                                input.slot_mapping) {}
+};
+
+struct DeepSeekV4LayerKVCache {
+    infinicore::Tensor swa_cache_raw;
+    infinicore::Tensor c4_cache_raw;
+    infinicore::Tensor c4_indexer_cache_raw;
+    infinicore::Tensor c128_cache_raw;
+    infinicore::Tensor kv_scale;
+    infinicore::Tensor compressor_state;
+    infinicore::Tensor indexer_compressor_state;
 };
 
 struct MultiModalMetadata {
@@ -65,9 +152,11 @@ struct MambaMetadata {
 
 struct ForwardContext {
     AttentionMetadata attn_metadata;
+    DSV4AttnMetadata dsv4_attn_metadata;
     MambaMetadata mamba_metadata;
     MultiModalMetadata mm_metadata;
     std::vector<infinicore::Tensor> kv_cache_vec;
+    std::vector<DeepSeekV4LayerKVCache> deepseek_v4_kv_cache_vec;
     std::vector<infinicore::Tensor> conv_state_vec;
     std::vector<infinicore::Tensor> ssm_state_vec;
 };

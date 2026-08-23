@@ -504,7 +504,6 @@ void RankWorker::thread_loop() {
                             }
 
                             output_ids = output_ids->to(infinicore::Device::cpu());
-
                             infinicore::context::syncStream();
 
                             auto out{Output{output_ids, logits, hidden_states}};

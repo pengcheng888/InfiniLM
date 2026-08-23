@@ -24,6 +24,7 @@ public:
            const infinicore::Device &device = infinicore::Device());
 
     infinicore::Tensor forward(infinicore::Tensor &input) const;
+    void forward_(infinicore::Tensor output, infinicore::Tensor &input) const;
     std::string extra_repr() const;
 };
 
@@ -45,6 +46,7 @@ public:
                          int tp_num_heads = -1);
 
     infinicore::Tensor forward(infinicore::Tensor &input) const;
+    void forward_(infinicore::Tensor output, infinicore::Tensor &input) const;
     std::string extra_repr() const;
 
 protected:
@@ -70,6 +72,7 @@ public:
                       infinicclComm_t communicator = nullptr);
 
     infinicore::Tensor forward(infinicore::Tensor &input) const;
+    void forward_(infinicore::Tensor output, infinicore::Tensor &input) const;
     std::string extra_repr() const;
 
 protected:

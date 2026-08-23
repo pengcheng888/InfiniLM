@@ -22,6 +22,7 @@ public:
 
     // Forward pass: output = input @ weight.T + bias
     infinicore::Tensor forward(infinicore::Tensor &input) const;
+    void forward_(infinicore::Tensor output, infinicore::Tensor &input) const;
 
     // Forward pass with residual connection
     infinicore::Tensor forward(infinicore::Tensor &input, infinicore::Tensor &residual) const;
@@ -60,6 +61,7 @@ protected:
     infinicore::Tensor compute_linear(infinicore::Tensor &input) const;
     infinicore::Tensor compute_linear_allreduce(
         infinicore::Tensor &input, infinicclComm_t communicator) const;
+    void compute_linear_(infinicore::Tensor output, infinicore::Tensor &input) const;
 
     size_t in_features_;
     size_t out_features_;

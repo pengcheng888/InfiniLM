@@ -1,4 +1,6 @@
 import logging
+import os
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Generator
@@ -47,6 +49,7 @@ class ModelRunner:
         self.config = config
         self._closed = False
         self.kv_transfer_config = config.kv_transfer_config
+        self._decode_step_index = 0
         logger.info(f"kv_transfer_config: {self.kv_transfer_config}")
 
         self._init_device()
@@ -210,6 +213,8 @@ class ModelRunner:
         )
 
     def _model_forward(self, scheduler_output):
+        step_start = time.perf_counter()
+
         # Build model inputs
         model_input = self.processor.build_model_inputs(
             scheduler_output,
@@ -217,29 +222,113 @@ class ModelRunner:
             self.config.top_p,
             self.config.top_k,
         )
+        build_ms = (time.perf_counter() - step_start) * 1000.0
+
+        is_prefill = scheduler_output.is_prefill
+        token_count = self._get_scheduled_token_count(scheduler_output)
+        request_count = scheduler_output.num_requests
+        if is_prefill:
+            self._decode_step_index = 0
+            phase = "prefill"
+            step_label = ""
+        else:
+            self._decode_step_index += 1
+            phase = "decode"
+            step_label = f" step={self._decode_step_index}"
 
         if self.speculative_runner is not None:
-            return self._model_forward_with_speculative(scheduler_output, model_input)
+            infinicore.sync_stream()
+            forward_start = time.perf_counter()
+            sampled_tokens_list = self._model_forward_with_speculative(
+                scheduler_output, model_input
+            )
+            infinicore.sync_stream()
+            forward_ms = (time.perf_counter() - forward_start) * 1000.0
+            total_ms = (time.perf_counter() - step_start) * 1000.0
+            print(
+                f"[INFINILM_MODEL_RUNNER_TIME] {phase}{step_label} "
+                f"requests={request_count} tokens={token_count} "
+                f"build_ms={build_ms:.3f} forward_ms={forward_ms:.3f} "
+                f"total_ms={total_ms:.3f}",
+                flush=True,
+            )
+            return sampled_tokens_list
 
         # Wake every stage before stage 0 enters forward. Each worker receives
         # the same metadata and then blocks in its model on the activation from
         # the preceding stage. Stage 0 waits for all acknowledgements afterward.
-        if self.pipeline_control is not None:
-            self.pipeline_control.dispatch_forward(model_input)
-        try:
-            sampled_tokens = self.model_engine.forward(**model_input)
-        except BaseException:
-            if self.pipeline_control is not None:
-                # A downstream stage may already be blocked waiting for an
-                # activation that this stage failed to produce. Waiting for its
-                # acknowledgement here would deadlock the coordinator.
-                self.pipeline_control.abort()
-            raise
-        if self.pipeline_control is not None:
-            self.pipeline_control.wait_forward()
+        # if self.pipeline_control is not None:
+        #     self.pipeline_control.dispatch_forward(model_input)
+        # try:
+        #     sampled_tokens = self.model_engine.forward(**model_input)
+        # except BaseException:
+        #     if self.pipeline_control is not None:
+        #         # A downstream stage may already be blocked waiting for an
+        #         # activation that this stage failed to produce. Waiting for its
+        #         # acknowledgement here would deadlock the coordinator.
+        #         self.pipeline_control.abort()
+        #     raise
+        # if self.pipeline_control is not None:
+        #     self.pipeline_control.wait_forward()
+        
+        # Run inference
+        detail_profile = os.getenv(
+            "INFINILM_MODEL_RUNNER_DETAIL_PROFILE", "0"
+        ).lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+
+        sync_before_start = time.perf_counter()
+        infinicore.sync_stream()
+        sync_before_ms = (time.perf_counter() - sync_before_start) * 1000.0
+
+        forward_start = time.perf_counter()
+        sampled_tokens = self.model_engine.forward(**model_input)
+        engine_forward_ms = (time.perf_counter() - forward_start) * 1000.0
+
+        sync_after_start = time.perf_counter()
+        infinicore.sync_stream()
+        sync_after_ms = (time.perf_counter() - sync_after_start) * 1000.0
+
+        numpy_start = time.perf_counter()
         sampled_tokens_list = sampled_tokens.to_numpy().tolist()
+        numpy_ms = (time.perf_counter() - numpy_start) * 1000.0
+
+        forward_ms = sync_before_ms + engine_forward_ms + sync_after_ms
+        total_ms = (time.perf_counter() - step_start) * 1000.0
+
+        print(
+            f"[INFINILM_MODEL_RUNNER_TIME] {phase}{step_label} "
+            f"requests={request_count} tokens={token_count} "
+            f"build_ms={build_ms:.3f} forward_ms={forward_ms:.3f} "
+            f"total_ms={total_ms:.3f}",
+            flush=True,
+        )
+        if detail_profile:
+            print(
+                f"[INFINILM_MODEL_RUNNER_DETAIL] {phase}{step_label} "
+                f"requests={request_count} tokens={token_count} "
+                f"build_ms={build_ms:.3f} sync_before_ms={sync_before_ms:.3f} "
+                f"engine_forward_ms={engine_forward_ms:.3f} sync_after_ms={sync_after_ms:.3f} "
+                f"to_numpy_ms={numpy_ms:.3f} total_ms={total_ms:.3f}",
+                flush=True,
+            )
 
         return sampled_tokens_list
+
+    def _get_scheduled_token_count(self, scheduler_output) -> int:
+        token_count = 0
+        for req in scheduler_output.scheduled_requests:
+            if scheduler_output.is_prefill:
+                token_count += max(
+                    0, req.get_prompt_length() - req.num_local_cached_tokens
+                )
+            else:
+                token_count += 1
+        return token_count
 
     def _model_forward_with_speculative(self, scheduler_output, model_input):
         return self.speculative_runner.forward(scheduler_output, model_input)

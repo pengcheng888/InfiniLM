@@ -69,6 +69,13 @@ public:
         infinicclComm_t communicator,
         float alpha = 1.0f) const;
 
+    virtual void forward_(
+        const ParamsMap &params,
+        infinicore::Tensor output,
+        const infinicore::Tensor &input,
+        bool has_bias,
+        float alpha = 1.0f) const;
+
     // Dimension for fused-split (gate/up, q/k/v) of a column-parallel weight.
     // For NoneQuantization weight [out, in], split is on dim0.
     // For AWQ qweight [in, out/pack], split is on dim1.

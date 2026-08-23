@@ -17,6 +17,7 @@ class Block:
         self.block_id = block_id
         self.ref_count = 0
         self.hash: BlockHash = EMPTY_BLOCK_HASH
+        self.swa_block_id: int | None = None
 
     def __repr__(self) -> str:
         return f"Block(id={self.block_id}, ref={self.ref_count}, hash={self.hash})"
@@ -28,6 +29,7 @@ class Block:
     def free(self) -> None:
         self.ref_count = 0
         self.hash = EMPTY_BLOCK_HASH
+        self.swa_block_id = None
 
 
 class MambaCacheManager:
@@ -71,15 +73,30 @@ class MambaCacheManager:
 class BlockManager:
     """Manage physical paged-cache blocks and published prefix hashes."""
 
-    def __init__(self, num_blocks: int, block_size: int):
+    def __init__(
+        self,
+        num_blocks: int,
+        block_size: int,
+        enable_swa_mapping: bool = False,
+        swa_num_blocks: int | None = None,
+    ):
         if num_blocks <= 0 or block_size <= 0:
             raise ValueError("num_blocks and block_size must be positive")
         self.num_blocks = num_blocks
         self.block_size = block_size
+        self.enable_swa_mapping = enable_swa_mapping
+        self.swa_num_blocks = (
+            max(1, num_blocks // 10) if swa_num_blocks is None else swa_num_blocks
+        )
+        if self.enable_swa_mapping and self.swa_num_blocks <= 0:
+            raise ValueError(
+                "swa_num_blocks must be positive when SWA mapping is enabled"
+            )
 
         self.blocks: List[Block] = [Block(i) for i in range(num_blocks)]
         self.hash_to_block_ids: Dict[BlockHash, Set[int]] = {}
         self.free_block_ids: deque[int] = deque(range(num_blocks))
+        self.swa_free_block_ids: deque[int] = deque(range(self.swa_num_blocks))
         self.used_block_ids: Set[int] = set()
 
     def __repr__(self) -> str:
@@ -88,11 +105,25 @@ class BlockManager:
             f"free={len(self.free_block_ids)}, used={len(self.used_block_ids)})"
         )
 
+    def _assign_swa_block(self, block: Block) -> None:
+        if not self.enable_swa_mapping or block.swa_block_id is not None:
+            return
+        if not self.swa_free_block_ids:
+            raise RuntimeError("No available DeepSeek-V4 SWA cache blocks")
+        block.swa_block_id = self.swa_free_block_ids.popleft()
+
+    def _release_swa_block(self, block: Block) -> None:
+        if not self.enable_swa_mapping or block.swa_block_id is None:
+            return
+        self.swa_free_block_ids.append(block.swa_block_id)
+        block.swa_block_id = None
+
     def _allocate_block(self) -> Block:
         block_id = self.free_block_ids.popleft()
         block = self.blocks[block_id]
         assert block.ref_count == 0, f"Block {block_id} ref_count not zero"
         block.reset()
+        self._assign_swa_block(block)
         self.used_block_ids.add(block_id)
         return block
 
@@ -115,15 +146,25 @@ class BlockManager:
             f"Block {block_id} ref_count not zero, cannot deallocate"
         )
         self._remove_block_hash(block)
+        self._release_swa_block(block)
         block.free()
         self.used_block_ids.remove(block_id)
         self.free_block_ids.append(block_id)
 
     def can_allocate(self, num_required_blocks: int) -> bool:
-        return len(self.free_block_ids) >= num_required_blocks
+        if len(self.free_block_ids) < num_required_blocks:
+            return False
+        if (
+            self.enable_swa_mapping
+            and len(self.swa_free_block_ids) < num_required_blocks
+        ):
+            return False
+        return True
 
     def get_num_free_blocks(self) -> int:
-        return len(self.free_block_ids)
+        if not self.enable_swa_mapping:
+            return len(self.free_block_ids)
+        return min(len(self.free_block_ids), len(self.swa_free_block_ids))
 
     def get_total_usable_blocks(self) -> int:
         freeable_used_blocks = sum(
@@ -131,7 +172,19 @@ class BlockManager:
             for block_id in self.used_block_ids
             if self.blocks[block_id].ref_count == 0
         )
-        return len(self.free_block_ids) + freeable_used_blocks
+        full_usable = len(self.free_block_ids) + freeable_used_blocks
+        if not self.enable_swa_mapping:
+            return full_usable
+        swa_usable = len(self.swa_free_block_ids) + freeable_used_blocks
+        return min(full_usable, swa_usable)
+
+    def get_full_to_swa_block_mapping(self) -> list[int] | None:
+        if not self.enable_swa_mapping:
+            return None
+        return [
+            block.swa_block_id if block.swa_block_id is not None else -1
+            for block in self.blocks
+        ]
 
     def get_computed_blocks(
         self,
@@ -242,8 +295,6 @@ class BlockManager:
         keep_blocks = (keep_num_tokens + self.block_size - 1) // self.block_size
         discarded_block_ids = block_table[keep_blocks:]
 
-        # Validate the complete mutation set first so a malformed speculative
-        # table cannot be only partially released.
         for block_id in discarded_block_ids:
             if not 0 <= block_id < self.num_blocks:
                 raise RuntimeError(f"invalid provisional block id {block_id}")
@@ -319,7 +370,7 @@ class BlockManager:
     ) -> tuple[List[int], int]:
         """Allocate the slot used to compute the latest logical token."""
         if (num_tokens - 1) % self.block_size == 0:
-            if not self.free_block_ids and not self.try_free_blocks(1):
+            if not self.can_allocate(1) and not self.try_free_blocks(1):
                 raise RuntimeError("No available cache blocks")
             block_table.append(self._allocate_block().block_id)
 
@@ -328,11 +379,18 @@ class BlockManager:
         return block_table, last_block_id * self.block_size + offset
 
     def free_blocks(self, block_table: Sequence[int]) -> None:
-        """Release request references while retaining computed blocks for reuse."""
+        """Release request references while retaining computed blocks for reuse.
+
+        DeepSeek-V4 uses an additional SWA page pool. When SWA mapping is enabled,
+        release unreferenced pages immediately so the compressed-cache pool cannot
+        be exhausted by stale mappings.
+        """
         for block_id in reversed(block_table):
             block = self.blocks[block_id]
             assert block.ref_count > 0, "block ref_count must be greater than 0"
             block.ref_count -= 1
+            if self.enable_swa_mapping and block.ref_count == 0:
+                self._deallocate_block(block_id)
 
     def try_free_blocks(self, num_required: int) -> bool:
         """Evict unreferenced blocks until the requested capacity is available."""

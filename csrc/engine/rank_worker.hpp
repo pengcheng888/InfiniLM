@@ -52,6 +52,8 @@ public:
         std::optional<infinicore::Tensor> block_tables;
         /// Slot ids for each token `[seq]`. Used for paged cache.
         std::optional<infinicore::Tensor> slot_mapping;
+        /// DeepSeek-V4 request-side attention metadata.
+        infinilm::DeepSeekV4Input deepseek_v4;
         /// Mamba state cache indices read at the start of each request forward.
         std::optional<infinicore::Tensor> mamba_init_state_indices;
         /// Mamba state cache indices written with the final state of each request forward.
