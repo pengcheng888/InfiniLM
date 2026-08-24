@@ -1,27 +1,28 @@
 #pragma once
 
-#include "../../layers/lm_head/parallel_lm_head.hpp"
-#include "../../models/infinilm_model.hpp"
-#include "glm4_moe_lite_model.hpp"
+#include "../../layers/causal_lm_templates/text_causal_lm.hpp"
+#include "../../layers/causal_lm_templates/text_model.hpp"
+#include "../../layers/mlp/mlp.hpp"
+#include "glm4_moe_lite_decoder_layer.hpp"
 
 #include <memory>
+#include <utility>
 
 namespace infinilm::models::glm4_moe_lite {
 
-class Glm4MoeLiteForCausalLM : public infinilm::InfinilmModel {
+using Glm4MoeLiteMLP = infinilm::layers::mlp::MLP;
+using Glm4MoeLiteModel = infinilm::layers::causal_lm_templates::TextModel<Glm4MoeLiteDecoderLayer>;
+
+class Glm4MoeLiteForCausalLM
+    : public infinilm::layers::causal_lm_templates::TextCausalLM<Glm4MoeLiteModel> {
 public:
+    using Base = infinilm::layers::causal_lm_templates::TextCausalLM<Glm4MoeLiteModel>;
+
     Glm4MoeLiteForCausalLM(std::shared_ptr<infinilm::config::ModelConfig> model_config,
-                           const infinicore::Device &device);
+                           const infinicore::Device &device)
+        : Base(std::move(model_config), device) {}
 
-    infinilm::InfinilmModel::Output forward(const infinilm::InfinilmModel::Input &input) const override;
     void reset_cache(const cache::CacheConfig *cache_config) override;
-    infinicore::Tensor logits_from_hidden(const infinicore::Tensor &hidden_states) const;
-
-private:
-    infinicore::Tensor compute_lm_head_logits(const infinicore::Tensor &hidden_states) const;
-
-    INFINICORE_NN_MODULE(Glm4MoeLiteModel, model);
-    std::shared_ptr<infinilm::layers::lm_head::ParallelLMHead> lm_head_;
 };
 
 std::shared_ptr<infinilm::config::ModelConfig> create_glm4_moe_lite_model_config(

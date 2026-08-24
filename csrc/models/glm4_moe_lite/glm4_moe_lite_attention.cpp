@@ -1,8 +1,8 @@
 #include "glm4_moe_lite_attention.hpp"
 
 #include "../../global_state/global_state.hpp"
+#include "../../layers/mla_attention/flash_mla/flash_mla.hpp"
 #include "../deepseek_v4/deepseek_v4_rope.hpp"
-#include "../deepseek_v4/flash_mla/flash_mla.hpp"
 
 #include "infinicore/ops.hpp"
 #include "infinicore/ops/baddbmm.hpp"
@@ -130,9 +130,14 @@ infinicore::Tensor Glm4MoeLiteAttention::forward(const infinicore::Tensor &posit
         throw std::runtime_error("Glm4MoeLiteAttention::forward requires paged attention metadata");
     }
 
-    const size_t tokens = hidden_states->size(0);
+    const auto hidden_shape = hidden_states->shape();
+    if (hidden_shape.empty() || hidden_shape.back() != hidden_size_) {
+        throw std::runtime_error("Glm4MoeLiteAttention::forward expects hidden size in the last dimension");
+    }
+    const bool restore_3d_shape = hidden_shape.size() == 3;
+    const size_t tokens = hidden_states->numel() / hidden_size_;
     const size_t latent_dim = kv_lora_rank_ + qk_rope_head_dim_;
-    auto x = hidden_states;
+    auto x = hidden_states->view({tokens, hidden_size_});
 
     infinicore::Tensor q_lora;
     infinicore::Tensor kv_latent;
@@ -178,7 +183,7 @@ infinicore::Tensor Glm4MoeLiteAttention::forward(const infinicore::Tensor &posit
     flashmla_metadata_.num_splits = infinicore::Tensor();
 
     const bool causal = tokens > attn_metadata.total_sequence_lengths.value()->numel();
-    auto [attn_latent_4d, lse] = infinilm::models::deepseek_v4::flash_mla::flash_mla_with_kvcache(
+    auto [attn_latent_4d, lse] = infinilm::layers::mla_attention::flash_mla_with_kvcache(
         q_flash,
         kv_cache_4d,
         attn_metadata.block_tables,
@@ -208,7 +213,8 @@ infinicore::Tensor Glm4MoeLiteAttention::forward(const infinicore::Tensor &posit
     auto out_flat = out_by_head->permute({1, 0, 2})
                         ->contiguous()
                         ->view({tokens, num_local_attention_heads_ * v_head_dim_});
-    return o_proj_->forward(out_flat);
+    auto output = o_proj_->forward(out_flat);
+    return restore_3d_shape ? output->view(hidden_shape) : output;
 }
 
 void Glm4MoeLiteAttention::process_weights_after_loading() {

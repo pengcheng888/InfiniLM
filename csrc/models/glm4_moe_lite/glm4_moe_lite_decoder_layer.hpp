@@ -1,13 +1,14 @@
 #pragma once
 
 #include "../../config/model_config.hpp"
+#include "../../layers/mlp/mlp.hpp"
 #include "glm4_moe_lite_attention.hpp"
-#include "glm4_moe_lite_mlp.hpp"
 #include "glm4_moe_lite_moe.hpp"
 #include "infinicore/nn/module.hpp"
 #include "infinicore/nn/rmsnorm.hpp"
 
 #include <memory>
+#include <tuple>
 
 namespace infinilm::models::glm4_moe_lite {
 
@@ -17,8 +18,10 @@ public:
                             size_t layer_idx,
                             const infinicore::Device &device);
 
-    infinicore::Tensor forward(const infinicore::Tensor &positions,
-                               infinicore::Tensor hidden_states) const;
+    std::tuple<infinicore::Tensor, infinicore::Tensor> forward(
+        const infinicore::Tensor &positions,
+        infinicore::Tensor &hidden_states,
+        infinicore::Tensor &residual) const;
 
     void process_weights_after_loading() override;
     void reset_runtime_state() const override;

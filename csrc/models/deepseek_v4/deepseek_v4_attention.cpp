@@ -1,9 +1,9 @@
 #include "deepseek_v4_attention.hpp"
 
 #include "../../global_state/global_state.hpp"
+#include "../../layers/mla_attention/flash_mla/flash_mla.hpp"
 #include "deepseek_v4_profile.hpp"
 #include "deepseek_v4_rope.hpp"
-#include "flash_mla/flash_mla.hpp"
 #include "infinicore/context/context.hpp"
 #include "infinicore/ops/deepseek_v4_flashmla_cache.hpp"
 #include "infinicore/ops/deepseek_v4_flashmla_compute.hpp"
@@ -436,22 +436,22 @@ infinicore::Tensor DeepseekV4Attention::compute_sparse_attention_v2(
     if (extra_indices.has_value() && extra_indices.value()) {
         extra_indices3d = extra_indices.value()->view({seq_len, 1, extra_indices.value()->size(extra_indices.value()->ndim() - 1)});
     }
-    auto [out4d, lse] = flash_mla::flash_mla_with_kvcache(q4d,
-                                                          cache4d,
-                                                          std::nullopt, // block_table
-                                                          std::nullopt, // cache_seqlens
-                                                          static_cast<int64_t>(head_dim_),
-                                                          flashmla_metadata,
-                                                          std::nullopt, // num_splits
-                                                          static_cast<double>(flashmla_softmax_scale_),
-                                                          false, // causal
-                                                          true,  // is_fp8_kvcache
-                                                          indices3d,
-                                                          attn_sink_for_flash_,
-                                                          extra_cache4d,
-                                                          extra_indices3d,
-                                                          swa_topk_lengths,
-                                                          extra_topk_lengths);
+    auto [out4d, lse] = infinilm::layers::mla_attention::flash_mla_with_kvcache(q4d,
+                                                                                cache4d,
+                                                                                std::nullopt, // block_table
+                                                                                std::nullopt, // cache_seqlens
+                                                                                static_cast<int64_t>(head_dim_),
+                                                                                flashmla_metadata,
+                                                                                std::nullopt, // num_splits
+                                                                                static_cast<double>(flashmla_softmax_scale_),
+                                                                                false, // causal
+                                                                                true,  // is_fp8_kvcache
+                                                                                indices3d,
+                                                                                attn_sink_for_flash_,
+                                                                                extra_cache4d,
+                                                                                extra_indices3d,
+                                                                                swa_topk_lengths,
+                                                                                extra_topk_lengths);
 
     (void)lse;
     infinicore::Tensor out3d = out4d->view({seq_len, num_local_attention_heads_, head_dim_});

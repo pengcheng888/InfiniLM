@@ -7,7 +7,7 @@
 
 #include <cmath>
 
-namespace infinilm::models::deepseek_v4::flash_mla {
+namespace infinilm::layers::mla_attention {
 
 #define FLASH_MLA_SCHED_META_HELPER_MSG                        \
     " Your input arguments are inconsistent with sched_meta. " \
@@ -158,6 +158,7 @@ std::pair<infinicore::Tensor, infinicore::Tensor> flash_mla_with_kvcache(
         }
 
         ASSERT((block_table.has_value() && block_table.value() && cache_seqlens.has_value() && cache_seqlens.value()) && "block_table and cache_seqlens must be provided when dense attention is used.");
+        ASSERT(k_cache->size(1) == 64 && "flash_mla_with_kvcache dense attention requires page_block_size == 64");
 
         auto [out, lse, new_tile_scheduler_metadata, new_num_splits] = infinicore::op::flash_mla::dense_decode_fwd(q,
                                                                                                                    k_cache,
@@ -176,4 +177,4 @@ std::pair<infinicore::Tensor, infinicore::Tensor> flash_mla_with_kvcache(
 
 #undef FLASH_MLA_SCHED_META_HELPER_MSG
 
-} // namespace infinilm::models::deepseek_v4::flash_mla
+} // namespace infinilm::layers::mla_attention

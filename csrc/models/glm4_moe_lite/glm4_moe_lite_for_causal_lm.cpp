@@ -3,6 +3,7 @@
 #include "../../backends/attention_backends.hpp"
 #include "../../cache/kv_cache.hpp"
 #include "../../global_state/global_state.hpp"
+#include "../../utils.hpp"
 #include "../models_registry.hpp"
 
 #include "infinicore/context/context.hpp"
@@ -11,49 +12,6 @@
 #include <string>
 
 namespace infinilm::models::glm4_moe_lite {
-
-Glm4MoeLiteForCausalLM::Glm4MoeLiteForCausalLM(std::shared_ptr<infinilm::config::ModelConfig> model_config,
-                                               const infinicore::Device &device) {
-    model_config_ = model_config;
-    const size_t hidden_size = model_config->get<size_t>("hidden_size");
-    const size_t vocab_size = model_config->get<size_t>("vocab_size");
-    const auto dtype = model_config->get_dtype();
-
-    INFINICORE_NN_MODULE_INIT(model, model_config, device);
-    const auto &rank_info = infinilm::global_state::get_tensor_model_parallel_rank_info();
-    lm_head_ = this->register_module<infinilm::layers::lm_head::ParallelLMHead>(
-        "lm_head",
-        hidden_size,
-        vocab_size,
-        false,
-        dtype,
-        device,
-        static_cast<infinicore::Size>(rank_info.tp_rank),
-        static_cast<infinicore::Size>(rank_info.tp_size),
-        rank_info.comm);
-}
-
-infinilm::InfinilmModel::Output Glm4MoeLiteForCausalLM::forward(const infinilm::InfinilmModel::Input &input) const {
-    auto hidden_states = model_->forward(input);
-    auto logits = compute_lm_head_logits(hidden_states);
-    if (logits->ndim() == 2) {
-        logits = logits->view({1, logits->size(0), logits->size(1)});
-    }
-    return {logits, hidden_states};
-}
-
-infinicore::Tensor Glm4MoeLiteForCausalLM::compute_lm_head_logits(const infinicore::Tensor &hidden_states) const {
-    auto mutable_hidden = hidden_states;
-    return lm_head_->forward(mutable_hidden);
-}
-
-infinicore::Tensor Glm4MoeLiteForCausalLM::logits_from_hidden(const infinicore::Tensor &hidden_states) const {
-    auto logits = compute_lm_head_logits(hidden_states);
-    if (logits->ndim() == 2) {
-        logits = logits->view({1, logits->size(0), logits->size(1)});
-    }
-    return logits;
-}
 
 void Glm4MoeLiteForCausalLM::reset_cache(const cache::CacheConfig *cache_config) {
     auto &forward_context = infinilm::global_state::get_forward_context();
@@ -73,6 +31,7 @@ void Glm4MoeLiteForCausalLM::reset_cache(const cache::CacheConfig *cache_config)
     if (paged_config == nullptr) {
         throw std::runtime_error("Glm4MoeLiteForCausalLM requires PagedKVCacheConfig");
     }
+    ASSERT(paged_config->block_size() == 64 && "Glm4MoeLiteForCausalLM requires block_size == 64 because FlashMLA dense_decode_fwd only supports page_block_size 64");
     cache_config_ = cache_config->unique_copy();
 
     const size_t num_hidden_layers = model_config_->get<size_t>("num_hidden_layers");

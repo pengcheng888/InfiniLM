@@ -25,17 +25,25 @@ Glm4MoeLiteDecoderLayer::Glm4MoeLiteDecoderLayer(std::shared_ptr<infinilm::confi
     INFINICORE_NN_MODULE_INIT(post_attention_layernorm, hidden_size, rms_norm_eps, dtype, device);
 }
 
-infinicore::Tensor Glm4MoeLiteDecoderLayer::forward(const infinicore::Tensor &positions,
-                                                    infinicore::Tensor hidden_states) const {
-    auto residual = hidden_states;
-    auto attn_in = input_layernorm_->forward(hidden_states);
-    auto attn_out = self_attn_->forward(positions, attn_in);
-    hidden_states = infinicore::op::add(residual, attn_out);
-
-    residual = hidden_states;
-    auto mlp_in = post_attention_layernorm_->forward(hidden_states);
-    auto mlp_out = mlp_ ? mlp_->forward(mlp_in) : moe_->forward(mlp_in);
-    return infinicore::op::add(residual, mlp_out);
+std::tuple<infinicore::Tensor, infinicore::Tensor> Glm4MoeLiteDecoderLayer::forward(
+    const infinicore::Tensor &positions,
+    infinicore::Tensor &hidden_states,
+    infinicore::Tensor &residual) const {
+    input_layernorm_->forward_inplace(hidden_states, residual);
+    hidden_states = self_attn_->forward(positions, hidden_states);
+    post_attention_layernorm_->forward_inplace(hidden_states, residual);
+    if (mlp_) {
+        const auto hidden_shape = hidden_states->shape();
+        if (hidden_shape.size() == 3) {
+            hidden_states = mlp_->forward(hidden_states);
+        } else {
+            auto mlp_input = hidden_states->view({1, hidden_shape[0], hidden_shape[1]});
+            hidden_states = mlp_->forward(mlp_input)->view(hidden_shape);
+        }
+    } else {
+        hidden_states = moe_->forward(hidden_states);
+    }
+    return std::make_tuple(hidden_states, residual);
 }
 
 void Glm4MoeLiteDecoderLayer::process_weights_after_loading() {

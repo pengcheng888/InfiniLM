@@ -7,7 +7,7 @@
 #include <optional>
 #include <utility>
 
-namespace infinilm::models::deepseek_v4::flash_mla {
+namespace infinilm::layers::mla_attention {
 
 std::pair<infinicore::Tensor, infinicore::Tensor> flash_mla_with_kvcache(
     const infinicore::Tensor &q,
@@ -27,4 +27,4 @@ std::pair<infinicore::Tensor, infinicore::Tensor> flash_mla_with_kvcache(
     std::optional<infinicore::Tensor> topk_length,
     std::optional<infinicore::Tensor> extra_topk_length);
 
-} // namespace infinilm::models::deepseek_v4::flash_mla
+} // namespace infinilm::layers::mla_attention
