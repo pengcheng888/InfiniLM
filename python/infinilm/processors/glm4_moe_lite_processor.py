@@ -22,7 +22,9 @@ class Glm4MoeLiteProcessor(BasicLLMProcessor):
         seq_offsets = [0]
         block_tables = []
         slot_mapping = []
+        cached_lens = []
         position_ids = []
+        cu_seqlens = [0]
 
         max_block_table_len = max(
             len(req.block_table) for req in scheduler_output.scheduled_requests
@@ -55,6 +57,8 @@ class Glm4MoeLiteProcessor(BasicLLMProcessor):
             seq_lens.append(seq_len)
             seq_offsets.append(current_offset)
             slot_mapping.extend(req.slot_mapping)
+            cached_lens.append(num_cached)
+            cu_seqlens.append(cu_seqlens[-1] + seq_len)
 
             padded_block_table = req.block_table + [-1] * (
                 max_block_table_len - len(req.block_table)
@@ -66,8 +70,12 @@ class Glm4MoeLiteProcessor(BasicLLMProcessor):
             "position_ids": infinicore.from_list(
                 position_ids, dtype=self._position_ids_dtype()
             ),
+            "past_kv_lengths": infinicore.from_list(
+                cached_lens, dtype=infinicore.int32
+            ),
             "total_kv_lengths": infinicore.from_list(seq_lens, dtype=infinicore.int32),
             "input_offsets": infinicore.from_list(seq_offsets, dtype=infinicore.int32),
+            "cu_seqlens": infinicore.from_list(cu_seqlens, dtype=infinicore.int32),
             "block_tables": infinicore.from_list(block_tables, dtype=infinicore.int32),
             "slot_mapping": infinicore.from_list(slot_mapping, dtype=infinicore.int64),
             "temperature": temperature,

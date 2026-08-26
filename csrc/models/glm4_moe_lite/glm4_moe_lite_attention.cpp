@@ -5,10 +5,13 @@
 
 #include "infinicore/ops.hpp"
 #include "infinicore/ops/baddbmm.hpp"
+#include "infinicore/ops/broadcast_to.hpp"
 #include "infinicore/ops/cat.hpp"
 #include "infinicore/ops/deepseek_v4_fused_rope.hpp"
+#include "infinicore/ops/mha_varlen.hpp"
 
 #include <cmath>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -129,6 +132,71 @@ void Glm4MoeLiteAttention::apply_rope_(const infinicore::Tensor &positions,
     infinicore::op::deepseek_v4_fused_rope_(query, key, rope_freqs_cis_, positions, false);
 }
 
+infinicore::Tensor Glm4MoeLiteAttention::forward_mha(const infinicore::Tensor &q,
+                                                     const infinicore::Tensor &kv_c,
+                                                     const infinicore::Tensor &k_pe,
+                                                     size_t tokens) const {
+    const auto &attn_metadata = infinilm::global_state::get_forward_context().flashmla_attn_metadata;
+    if (!attn_metadata.input_offsets || !attn_metadata.query_start_loc) {
+        throw std::runtime_error("Glm4MoeLiteAttention::forward_mha requires input_offsets and query_start_loc metadata");
+    }
+
+    mla_attn_->do_kv_cache_update(kv_c, k_pe);
+
+    auto kv_c_by_head = infinicore::op::broadcast_to(
+        kv_c->view({1, tokens, kv_lora_rank_}),
+        {static_cast<int64_t>(num_local_attention_heads_),
+         static_cast<int64_t>(tokens),
+         static_cast<int64_t>(kv_lora_rank_)});
+    auto k_nope_input = infinicore::Tensor::empty(
+        {num_local_attention_heads_, tokens, qk_nope_head_dim_},
+        kv_c->dtype(),
+        kv_c->device());
+    auto k_nope = infinicore::op::baddbmm(k_nope_input, kv_c_by_head, w_kc_t_, 0.0f, 1.0f)
+                      ->permute({1, 0, 2})
+                      ->contiguous();
+    auto k_pe_heads = infinicore::op::broadcast_to(
+        k_pe->view({tokens, 1, qk_rope_head_dim_}),
+        {static_cast<int64_t>(tokens),
+         static_cast<int64_t>(num_local_attention_heads_),
+         static_cast<int64_t>(qk_rope_head_dim_)});
+    auto key = infinicore::op::cat({k_nope, k_pe_heads}, 2);
+
+    auto value_input = infinicore::Tensor::empty(
+        {num_local_attention_heads_, tokens, v_head_dim_},
+        kv_c->dtype(),
+        kv_c->device());
+    auto value = infinicore::op::baddbmm(value_input, kv_c_by_head, w_vc_, 0.0f, 1.0f)
+                     ->permute({1, 0, 2})
+                     ->contiguous();
+
+    auto attn_output = infinicore::Tensor::empty(
+        {tokens, num_local_attention_heads_, v_head_dim_},
+        q->dtype(),
+        q->device());
+    const size_t max_query_len = attn_metadata.max_query_len > 0
+                                   ? attn_metadata.max_query_len
+                                   : tokens;
+    const size_t max_seq_len = attn_metadata.max_seq_len > 0
+                                 ? attn_metadata.max_seq_len
+                                 : tokens;
+    infinicore::op::mha_varlen_(
+        attn_output,
+        q,
+        key,
+        value,
+        attn_metadata.input_offsets,
+        attn_metadata.query_start_loc,
+        std::nullopt,
+        static_cast<int>(max_query_len),
+        static_cast<int>(max_seq_len),
+        std::nullopt,
+        static_cast<float>(softmax_scale_));
+
+    auto out_flat = attn_output->view({tokens, num_local_attention_heads_ * v_head_dim_});
+    return o_proj_->forward(out_flat);
+}
+
 infinicore::Tensor Glm4MoeLiteAttention::forward(const infinicore::Tensor &positions,
                                                  const infinicore::Tensor &hidden_states) const {
     const auto hidden_shape = hidden_states->shape();
@@ -146,7 +214,7 @@ infinicore::Tensor Glm4MoeLiteAttention::forward(const infinicore::Tensor &posit
     q_lora = q_a_layernorm_->forward(q_lora);
 
     auto kv_c = kv_latent->narrow({{1, 0, kv_lora_rank_}});
-    auto k_pe = kv_latent->narrow({{1, kv_lora_rank_, qk_rope_head_dim_}});
+    auto k_pe = kv_latent->narrow({{1, kv_lora_rank_, qk_rope_head_dim_}})->contiguous();
     kv_c = kv_a_layernorm_->forward(kv_c);
 
     auto q = q_b_proj_->forward(q_lora)->view({tokens, num_local_attention_heads_, qk_head_dim_});
@@ -154,6 +222,19 @@ infinicore::Tensor Glm4MoeLiteAttention::forward(const infinicore::Tensor &posit
     auto q_pe = q->narrow({{2, qk_nope_head_dim_, qk_rope_head_dim_}});
     auto k_pe_for_rope = k_pe->unsqueeze(1);
     apply_rope_(positions->view({positions->numel()}), q_pe, k_pe_for_rope);
+
+    const auto &forward_context = infinilm::global_state::get_forward_context();
+    const auto &flashmla_attn_metadata = forward_context.flashmla_attn_metadata;
+    if (!flashmla_attn_metadata.seq_lens) {
+        throw std::runtime_error("Glm4MoeLiteAttention::forward requires FlashMLA seq_lens metadata");
+    }
+    const size_t num_requests = flashmla_attn_metadata.seq_lens->numel();
+    const bool is_prefill = tokens != num_requests;
+
+    if (is_prefill) {
+        auto output = forward_mha(q, kv_c, k_pe, tokens);
+        return restore_3d_shape ? output->view(hidden_shape) : output;
+    }
 
     auto q_nope_by_head = q_nope->permute({1, 0, 2})->contiguous();
     auto q_nope_out_input = infinicore::Tensor::empty(
@@ -164,13 +245,7 @@ infinicore::Tensor Glm4MoeLiteAttention::forward(const infinicore::Tensor &posit
                           ->permute({1, 0, 2})
                           ->contiguous();
     auto q_flash_flat = infinicore::op::cat({q_nope_out, q_pe}, 2);
-    const auto &flashmla_attn_metadata = infinilm::global_state::get_forward_context().flashmla_attn_metadata;
-    const size_t num_requests = flashmla_attn_metadata.seq_lens
-                                  ? flashmla_attn_metadata.seq_lens->numel()
-                                  : 0;
-    auto q_flash = (num_requests > 0 && tokens == num_requests)
-                     ? q_flash_flat->view({tokens, 1, num_local_attention_heads_, latent_dim})
-                     : q_flash_flat->view({1, tokens, num_local_attention_heads_, latent_dim});
+    auto q_flash = q_flash_flat->view({tokens, 1, num_local_attention_heads_, latent_dim});
 
     auto [attn_latent_4d, lse] = mla_attn_->forward_mqa(q_flash, kv_c, k_pe);
     (void)lse;
@@ -206,6 +281,7 @@ void Glm4MoeLiteAttention::process_weights_after_loading() {
     }
     auto kv_b_view = kv_b_weight->view({num_local_attention_heads_, qk_nope_head_dim_ + v_head_dim_, kv_lora_rank_});
     w_kc_ = kv_b_view->narrow({{1, 0, qk_nope_head_dim_}})->contiguous();
+    w_kc_t_ = w_kc_->permute({0, 2, 1})->contiguous();
     w_vc_ = kv_b_view->narrow({{1, qk_nope_head_dim_, v_head_dim_}})->permute({0, 2, 1})->contiguous();
 }
 

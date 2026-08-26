@@ -15,20 +15,31 @@ struct FlashMLAMetadata {
     infinicore::Tensor slot_mapping;
     infinicore::Tensor block_tables;
     infinicore::Tensor seq_lens;
+    infinicore::Tensor input_offsets;
+    infinicore::Tensor query_start_loc; // query_start_loc is equivalent to cu_seqlens.
+    size_t max_query_len{0};
+    size_t max_seq_len{0};
     infinilm::global_state::FlashMLASchedMeta scheduler_metadata;
 
     FlashMLAMetadata() = default;
 
     FlashMLAMetadata(infinicore::Tensor slot_mapping,
                      infinicore::Tensor block_tables,
-                     infinicore::Tensor seq_lens)
+                     infinicore::Tensor seq_lens,
+                     infinicore::Tensor input_offsets,
+                     infinicore::Tensor query_start_loc,
+                     size_t max_query_len = 0,
+                     size_t max_seq_len = 0)
         : slot_mapping(std::move(slot_mapping)),
           block_tables(std::move(block_tables)),
-          seq_lens(std::move(seq_lens)) {}
+          seq_lens(std::move(seq_lens)),
+          input_offsets(std::move(input_offsets)),
+          query_start_loc(std::move(query_start_loc)),
+          max_query_len(max_query_len),
+          max_seq_len(max_seq_len) {}
 
     bool has_sched_meta() const {
-        return slot_mapping && block_tables && seq_lens
-            && scheduler_metadata.has_sched_meta();
+        return slot_mapping && block_tables && seq_lens && scheduler_metadata.has_sched_meta();
     }
 };
 
@@ -69,12 +80,12 @@ public:
         infinicore::Tensor &kv_cache,
         FlashMLAMetadata &attn_metadata) const;
 
-private:
     void do_kv_cache_update(const infinicore::Tensor &kv_c,
                             const infinicore::Tensor &k_pe,
                             infinicore::Tensor &kv_cache,
                             const infinicore::Tensor &slot_mapping) const;
 
+private:
     size_t num_heads_;
     size_t head_size_;
     float scale_;

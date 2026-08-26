@@ -29,6 +29,11 @@ private:
                      infinicore::Tensor query,
                      infinicore::Tensor key) const;
 
+    infinicore::Tensor forward_mha(const infinicore::Tensor &q,
+                                   const infinicore::Tensor &kv_c,
+                                   const infinicore::Tensor &k_pe,
+                                   size_t tokens) const;
+
     size_t layer_idx_{0};
     size_t hidden_size_{0};
     size_t num_attention_heads_{0};
@@ -46,6 +51,7 @@ private:
 
     infinicore::Tensor rope_freqs_cis_;
     infinicore::Tensor w_kc_;
+    infinicore::Tensor w_kc_t_;
     infinicore::Tensor w_vc_;
 
     std::shared_ptr<infinilm::layers::linear::FusedReplicatedLinear> qkv_a_proj_;

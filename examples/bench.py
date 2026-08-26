@@ -929,15 +929,14 @@ if __name__ == "__main__":
                 * warmup_case["batch_size"]
             )
             max_num_blocks = max(max_num_blocks, warmup_num_blocks)
+        if is_deepseek_v4:
+            max_num_blocks = max(max_num_blocks * 10, 10)
         max_batch_size = max(batch_size)
         cache_config = PagedKVCacheConfig(
             max_num_blocks,
             paged_kv_block_size,
             max_batch_size=max_batch_size,
         )
-        if is_deepseek_v4:
-            max_num_blocks = max(max_num_blocks * 10, 10)
-        cache_config = PagedKVCacheConfig(max_num_blocks, paged_kv_block_size)
     else:
         cache_config = None
 

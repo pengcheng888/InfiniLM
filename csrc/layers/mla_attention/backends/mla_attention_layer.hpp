@@ -37,6 +37,9 @@ public:
         const infinicore::Tensor &kv_c,
         const infinicore::Tensor &k_pe) const;
 
+    void do_kv_cache_update(const infinicore::Tensor &kv_c,
+                            const infinicore::Tensor &k_pe) const;
+
     inline infinicore::Tensor get_k_scale() const { return k_scale_; }
     inline infinicore::Tensor get_v_scale() const { return v_scale_; }
 

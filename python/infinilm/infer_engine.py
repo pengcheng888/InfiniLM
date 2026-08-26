@@ -803,6 +803,10 @@ class InferEngine(_infinilm.InferEngine):
                     dtype=infinicore.int32,
                 )
 
+            if _measure_and_log_time:
+                build_ms = (time.perf_counter() - start_time) * 1000.0
+                forward_start = time.perf_counter()
+
             output_id = self(
                 input_ids=input_ids,
                 pixel_values=pixel_values if iter == 0 else None,
@@ -823,6 +827,24 @@ class InferEngine(_infinilm.InferEngine):
                 top_p=generation_config.top_p,
             )
 
+            if _measure_and_log_time:
+                infinicore.sync_stream()
+                forward_ms = (time.perf_counter() - forward_start) * 1000.0
+                end_time = time.perf_counter()
+                total_ms = (end_time - start_time) * 1000.0
+                time_measurements.append((end_time - start_time))
+                phase = "prefill" if iter == 0 else "decode"
+                step_label = "" if iter == 0 else f" step={iter}"
+                request_count = batch_size
+                token_count = batch_size * seq_len
+                print(
+                    f"[INFINILM_MODEL_RUNNER_TIME] {phase}{step_label} "
+                    f"requests={request_count} tokens={token_count} "
+                    f"build_ms={build_ms:.3f} forward_ms={forward_ms:.3f} "
+                    f"total_ms={total_ms:.3f}",
+                    flush=True,
+                )
+
             output_ids.append(output_id)
 
             if (
@@ -837,11 +859,6 @@ class InferEngine(_infinilm.InferEngine):
             input_ids = output_id.view([batch_size, 1])
 
             past_seq_len = past_seq_len + seq_len
-
-            if _measure_and_log_time:
-                end_time = time.perf_counter()
-
-                time_measurements.append((end_time - start_time))
 
         if _measure_and_log_time:
             print(

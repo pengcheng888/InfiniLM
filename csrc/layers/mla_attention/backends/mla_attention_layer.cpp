@@ -38,4 +38,23 @@ std::pair<infinicore::Tensor, infinicore::Tensor> MLAAttentionLayer::forward_mqa
         impl_);
 }
 
+void MLAAttentionLayer::do_kv_cache_update(const infinicore::Tensor &kv_c,
+                                           const infinicore::Tensor &k_pe) const {
+    auto &forward_context = infinilm::global_state::get_forward_context();
+    auto &attn_metadata = forward_context.flashmla_attn_metadata;
+    if (forward_context.kv_cache_vec.size() <= layer_idx_ || !forward_context.kv_cache_vec[layer_idx_]) {
+        throw std::runtime_error("MLAAttentionLayer::do_kv_cache_update requires MLA KV cache allocation");
+    }
+    if (!attn_metadata.slot_mapping) {
+        throw std::runtime_error("MLAAttentionLayer::do_kv_cache_update requires slot_mapping");
+    }
+    auto &kv_cache = forward_context.kv_cache_vec[layer_idx_];
+
+    std::visit(
+        [&](auto &impl_ptr) {
+            impl_ptr->do_kv_cache_update(kv_c, k_pe, kv_cache, attn_metadata.slot_mapping);
+        },
+        impl_);
+}
+
 } // namespace infinilm::layers::mla_attention

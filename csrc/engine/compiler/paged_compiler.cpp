@@ -41,7 +41,9 @@ void bind_flashmla_forward_context_from_input(
     forward_context.flashmla_attn_metadata = infinilm::global_state::FlashMLAMetadata(
         input.slot_mapping.value(),
         input.block_tables.value(),
-        input.total_sequence_lengths.value());
+        input.total_sequence_lengths.value(),
+        input.input_offsets.value(),
+        input.cu_seqlens.value());
     forward_context.flashmla_attn_metadata.scheduler_metadata = flashmla_sched_meta;
 }
 
@@ -214,7 +216,9 @@ void PagedCompiler::compile() {
             forward_context.flashmla_attn_metadata = infinilm::global_state::FlashMLAMetadata(
                 input.slot_mapping.value(),
                 input.block_tables.value(),
-                input.total_sequence_lengths.value());
+                input.total_sequence_lengths.value(),
+                input.input_offsets.value(),
+                input.cu_seqlens.value());
             // Hybrid linear-attention layers read cache indices from the same
             // thread-local context. These tensors remain alive in CompiledResult
             // and are updated in place before every graph replay.
