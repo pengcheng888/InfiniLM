@@ -163,7 +163,14 @@ infinicore::Tensor Glm4MoeLiteAttention::forward(const infinicore::Tensor &posit
     auto q_nope_out = infinicore::op::baddbmm(q_nope_out_input, q_nope_by_head, w_kc_, 0.0f, 1.0f)
                           ->permute({1, 0, 2})
                           ->contiguous();
-    auto q_flash = infinicore::op::cat({q_nope_out, q_pe}, 2)->view({1, tokens, num_local_attention_heads_, latent_dim});
+    auto q_flash_flat = infinicore::op::cat({q_nope_out, q_pe}, 2);
+    const auto &flashmla_attn_metadata = infinilm::global_state::get_forward_context().flashmla_attn_metadata;
+    const size_t num_requests = flashmla_attn_metadata.seq_lens
+                                  ? flashmla_attn_metadata.seq_lens->numel()
+                                  : 0;
+    auto q_flash = (num_requests > 0 && tokens == num_requests)
+                     ? q_flash_flat->view({tokens, 1, num_local_attention_heads_, latent_dim})
+                     : q_flash_flat->view({1, tokens, num_local_attention_heads_, latent_dim});
 
     auto [attn_latent_4d, lse] = mla_attn_->forward_mqa(q_flash, kv_c, k_pe);
     (void)lse;

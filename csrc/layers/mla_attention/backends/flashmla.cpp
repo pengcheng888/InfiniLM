@@ -1,7 +1,7 @@
 #include "flashmla.hpp"
 
-#include "infinicore/ops/deepseek_v4_concat_and_cache_mla.hpp"
 #include "infinicore/context/context.hpp"
+#include "infinicore/ops/deepseek_v4_concat_and_cache_mla.hpp"
 #include "infinicore/ops/flash_mla/dense_decode_fwd.hpp"
 #include "infinicore/ops/flash_mla/sparse_decode_fwd.hpp"
 
@@ -193,10 +193,8 @@ std::pair<infinicore::Tensor, infinicore::Tensor> flash_mla_with_kvcache(
         ASSERT(k_cache->size(1) == 64 && "flash_mla_with_kvcache dense attention requires page_block_size == 64");
 
         const bool has_schedule = sched_meta.tile_scheduler_metadata && sched_meta.num_splits;
-        std::optional<infinicore::Tensor> decode_tile_scheduler_metadata =
-            has_schedule ? std::optional<infinicore::Tensor>(sched_meta.tile_scheduler_metadata) : std::nullopt;
-        std::optional<infinicore::Tensor> decode_num_splits =
-            has_schedule ? std::optional<infinicore::Tensor>(sched_meta.num_splits) : std::nullopt;
+        std::optional<infinicore::Tensor> decode_tile_scheduler_metadata = has_schedule ? std::optional<infinicore::Tensor>(sched_meta.tile_scheduler_metadata) : std::nullopt;
+        std::optional<infinicore::Tensor> decode_num_splits = has_schedule ? std::optional<infinicore::Tensor>(sched_meta.num_splits) : std::nullopt;
 
         auto [out, lse, new_tile_scheduler_metadata, new_num_splits] = infinicore::op::flash_mla::dense_decode_fwd(q,
                                                                                                                    k_cache,
@@ -259,8 +257,8 @@ std::pair<infinicore::Tensor, infinicore::Tensor> FlashMLAImpl::forward_mqa(
 
     auto &scheduler_metadata = attn_metadata.scheduler_metadata;
 
-    const size_t tokens = query->size(1);
-    const bool causal = tokens > attn_metadata.seq_lens->numel();
+    const size_t query_tokens = query->size(0) * query->size(1);
+    const bool causal = query_tokens > attn_metadata.seq_lens->numel();
     return flash_mla_with_kvcache(query,
                                   kv_cache_4d,
                                   attn_metadata.block_tables,
