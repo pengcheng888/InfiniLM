@@ -1,9 +1,9 @@
 #pragma once
 
 #include "../../config/model_config.hpp"
-#include "../../global_state/flash_mla_sched_meta.hpp"
 #include "../../layers/linear/fused_linear.hpp"
 #include "../../layers/linear/linear.hpp"
+#include "../../layers/mla_attention/backends/mla_attention_layer.hpp"
 #include "infinicore/nn/module.hpp"
 #include "infinicore/nn/rmsnorm.hpp"
 #include "infinicore/tensor.hpp"
@@ -47,12 +47,12 @@ private:
     infinicore::Tensor rope_freqs_cis_;
     infinicore::Tensor w_kc_;
     infinicore::Tensor w_vc_;
-    mutable infinilm::global_state::FlashMLASchedMeta flashmla_metadata_;
 
     std::shared_ptr<infinilm::layers::linear::FusedReplicatedLinear> qkv_a_proj_;
     std::shared_ptr<infinilm::layers::linear::ColumnParallelLinear> q_b_proj_;
     std::shared_ptr<infinilm::layers::linear::ColumnParallelLinear> kv_b_proj_;
     std::shared_ptr<infinilm::layers::linear::RowParallelLinear> o_proj_;
+    std::shared_ptr<infinilm::layers::mla_attention::MLAAttentionLayer> mla_attn_;
     INFINICORE_NN_MODULE(infinicore::nn::RMSNorm, q_a_layernorm);
     INFINICORE_NN_MODULE(infinicore::nn::RMSNorm, kv_a_layernorm);
 };

@@ -266,6 +266,11 @@ InferEngine::Input::to_model_input(infinicore::Device device) const {
 
     auto &forward_context = infinilm::global_state::get_forward_context();
 
+    forward_context.flashmla_attn_metadata = infinilm::global_state::FlashMLAMetadata(
+        input.slot_mapping.value_or(infinicore::Tensor()),
+        input.block_tables.value_or(infinicore::Tensor()),
+        input.total_sequence_lengths.value_or(infinicore::Tensor()));
+
     forward_context.dsv4_attn_metadata = infinilm::global_state::DSV4AttnMetadata(input);
 
     forward_context.mamba_metadata = {

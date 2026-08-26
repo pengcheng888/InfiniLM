@@ -1,13 +1,11 @@
 #include "glm4_moe_lite_attention.hpp"
 
 #include "../../global_state/global_state.hpp"
-#include "../../layers/mla_attention/flash_mla/flash_mla.hpp"
 #include "../deepseek_v4/deepseek_v4_rope.hpp"
 
 #include "infinicore/ops.hpp"
 #include "infinicore/ops/baddbmm.hpp"
 #include "infinicore/ops/cat.hpp"
-#include "infinicore/ops/deepseek_v4_concat_and_cache_mla.hpp"
 #include "infinicore/ops/deepseek_v4_fused_rope.hpp"
 
 #include <cmath>
@@ -41,6 +39,7 @@ Glm4MoeLiteAttention::Glm4MoeLiteAttention(std::shared_ptr<infinilm::config::Mod
     }
     num_local_attention_heads_ = num_attention_heads_ / tp_size_;
     softmax_scale_ = 1.0 / std::sqrt(static_cast<double>(qk_head_dim_));
+    const size_t latent_dim = kv_lora_rank_ + qk_rope_head_dim_;
 
     auto register_qkv_a_param = [this](const std::string &name, infinicore::nn::Parameter param) {
         this->register_parameter(name, std::move(param));
@@ -92,6 +91,17 @@ Glm4MoeLiteAttention::Glm4MoeLiteAttention(std::shared_ptr<infinilm::config::Mod
         tp_size_,
         rank_info.comm);
 
+    mla_attn_ = std::make_shared<infinilm::layers::mla_attention::MLAAttentionLayer>(
+        num_local_attention_heads_,
+        latent_dim,
+        static_cast<float>(softmax_scale_),
+        1,
+        layer_idx_,
+        kv_lora_rank_,
+        infinicore::Tensor(),
+        infinicore::Tensor(),
+        infinilm::backends::AttentionBackend::FLASHMLA);
+
     INFINICORE_NN_MODULE_INIT(q_a_layernorm, q_lora_rank_, rms_norm_eps_, dtype, device);
     INFINICORE_NN_MODULE_INIT(kv_a_layernorm, kv_lora_rank_, rms_norm_eps_, dtype, device);
 
@@ -121,15 +131,6 @@ void Glm4MoeLiteAttention::apply_rope_(const infinicore::Tensor &positions,
 
 infinicore::Tensor Glm4MoeLiteAttention::forward(const infinicore::Tensor &positions,
                                                  const infinicore::Tensor &hidden_states) const {
-    auto &forward_context = infinilm::global_state::get_forward_context();
-    auto &attn_metadata = forward_context.attn_metadata;
-    if (forward_context.kv_cache_vec.size() <= layer_idx_ || !forward_context.kv_cache_vec[layer_idx_]) {
-        throw std::runtime_error("Glm4MoeLiteAttention::forward requires MLA KV cache allocation");
-    }
-    if (!attn_metadata.block_tables.has_value() || !attn_metadata.total_sequence_lengths.has_value() || !attn_metadata.slot_mapping.has_value()) {
-        throw std::runtime_error("Glm4MoeLiteAttention::forward requires paged attention metadata");
-    }
-
     const auto hidden_shape = hidden_states->shape();
     if (hidden_shape.empty() || hidden_shape.back() != hidden_size_) {
         throw std::runtime_error("Glm4MoeLiteAttention::forward expects hidden size in the last dimension");
@@ -164,42 +165,7 @@ infinicore::Tensor Glm4MoeLiteAttention::forward(const infinicore::Tensor &posit
                           ->contiguous();
     auto q_flash = infinicore::op::cat({q_nope_out, q_pe}, 2)->view({1, tokens, num_local_attention_heads_, latent_dim});
 
-    auto kv_cache = forward_context.kv_cache_vec[layer_idx_];
-    auto cache_scale = infinicore::Tensor::ones({1}, infinicore::DataType::F32, kv_cache->device());
-    infinicore::op::deepseek_v4_concat_and_cache_mla_(
-        kv_c,
-        k_pe,
-        kv_cache,
-        attn_metadata.slot_mapping.value(),
-        "auto",
-        cache_scale);
-
-    auto kv_cache_4d = kv_cache->view({kv_cache->size(0), kv_cache->size(1), 1, latent_dim});
-
-    flashmla_metadata_.have_initialized = false;
-    flashmla_metadata_.graph_refresh_recorded = false;
-    flashmla_metadata_.config.reset();
-    flashmla_metadata_.tile_scheduler_metadata = infinicore::Tensor();
-    flashmla_metadata_.num_splits = infinicore::Tensor();
-
-    const bool causal = tokens > attn_metadata.total_sequence_lengths.value()->numel();
-    auto [attn_latent_4d, lse] = infinilm::layers::mla_attention::flash_mla_with_kvcache(
-        q_flash,
-        kv_cache_4d,
-        attn_metadata.block_tables,
-        attn_metadata.total_sequence_lengths,
-        static_cast<int64_t>(kv_lora_rank_),
-        flashmla_metadata_,
-        std::nullopt,
-        softmax_scale_,
-        causal,
-        false,
-        std::nullopt,
-        std::nullopt,
-        std::nullopt,
-        std::nullopt,
-        std::nullopt,
-        std::nullopt);
+    auto [attn_latent_4d, lse] = mla_attn_->forward_mqa(q_flash, kv_c, k_pe);
     (void)lse;
 
     auto attn_by_head = attn_latent_4d->view({tokens, num_local_attention_heads_, kv_lora_rank_})

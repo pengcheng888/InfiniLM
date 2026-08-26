@@ -1,17 +1,53 @@
-#include "flash_mla.hpp"
+#include "flashmla.hpp"
 
+#include "infinicore/ops/deepseek_v4_concat_and_cache_mla.hpp"
+#include "infinicore/context/context.hpp"
 #include "infinicore/ops/flash_mla/dense_decode_fwd.hpp"
 #include "infinicore/ops/flash_mla/sparse_decode_fwd.hpp"
 
 #include "../../../utils.hpp"
 
 #include <cmath>
+#include <cstdint>
+#include <stdexcept>
 
 namespace infinilm::layers::mla_attention {
 
 #define FLASH_MLA_SCHED_META_HELPER_MSG                        \
     " Your input arguments are inconsistent with sched_meta. " \
     "Please make sure the input arguments are consistent across different invocations of flash_mla_with_kvcache on the same sched_meta."
+
+namespace {
+
+void copy_flashmla_schedule_tensor(infinicore::Tensor &dst,
+                                   const infinicore::Tensor &src) {
+    if (!src) {
+        throw std::runtime_error("flash_mla_with_kvcache: empty FlashMLA schedule tensor");
+    }
+    if (src->dtype() != infinicore::DataType::I32) {
+        throw std::runtime_error("flash_mla_with_kvcache: FlashMLA schedule tensor must be int32");
+    }
+    if (!src->is_contiguous()) {
+        throw std::runtime_error("flash_mla_with_kvcache: FlashMLA schedule tensor must be contiguous");
+    }
+    if (!dst || dst->shape() != src->shape() || dst->dtype() != src->dtype() || dst->device() != src->device()) {
+        dst = infinicore::Tensor::empty(src->shape(), src->dtype(), src->device());
+    }
+    const size_t bytes = src->numel() * sizeof(std::int32_t);
+    infinicore::context::memcpyD2D(dst->data(), src->data(), bytes, false);
+}
+
+void cache_flashmla_schedule_metadata(infinilm::global_state::FlashMLASchedMeta &sched_meta,
+                                      const infinicore::Tensor &tile_scheduler_metadata,
+                                      const infinicore::Tensor &num_splits) {
+    copy_flashmla_schedule_tensor(sched_meta.tile_scheduler_metadata,
+                                  tile_scheduler_metadata);
+    copy_flashmla_schedule_tensor(sched_meta.num_splits,
+                                  num_splits);
+    sched_meta.have_initialized = sched_meta.tile_scheduler_metadata && sched_meta.num_splits;
+}
+
+} // namespace
 
 std::pair<infinicore::Tensor, infinicore::Tensor> flash_mla_with_kvcache(
     const infinicore::Tensor &q,
@@ -119,14 +155,11 @@ std::pair<infinicore::Tensor, infinicore::Tensor> flash_mla_with_kvcache(
             ASSERT(!(num_splits.has_value()) && "num_splits override is only supported by BF16 sparse decode");
         }
 
-        // std::optional<infinicore::Tensor> decode_tile_scheduler_metadata = had_initialized ? std::optional<infinicore::Tensor>(sched_meta.tile_scheduler_metadata) : std::nullopt;
-        // std::optional<infinicore::Tensor> decode_num_splits = (num_splits.has_value() && num_splits.value())
-        //                                                         ? num_splits
-        //                                                         : (had_initialized ? std::optional<infinicore::Tensor>(sched_meta.num_splits) : std::nullopt);
+        std::optional<infinicore::Tensor> decode_tile_scheduler_metadata = had_initialized ? std::optional<infinicore::Tensor>(sched_meta.tile_scheduler_metadata) : std::nullopt;
+        std::optional<infinicore::Tensor> decode_num_splits = (num_splits.has_value() && num_splits.value())
+                                                                ? num_splits
+                                                                : (had_initialized ? std::optional<infinicore::Tensor>(sched_meta.num_splits) : std::nullopt);
 
-        // 注意：不再复用scheduler_metadata，请不要修改。
-        std::optional<infinicore::Tensor> decode_tile_scheduler_metadata = std::nullopt;
-        std::optional<infinicore::Tensor> decode_num_splits = std::nullopt;
         auto [out, lse, new_tile_scheduler_metadata, new_num_splits] = infinicore::op::flash_mla::sparse_decode_fwd(q,
                                                                                                                     k_cache,
                                                                                                                     indices_in_kvcache.value(),
@@ -139,9 +172,8 @@ std::pair<infinicore::Tensor, infinicore::Tensor> flash_mla_with_kvcache(
                                                                                                                     extra_topk_length,
                                                                                                                     head_dim_v,
                                                                                                                     scale);
-        // 注意：不再复用scheduler_metadata，请不要修改。
-        // sched_meta.tile_scheduler_metadata = new_tile_scheduler_metadata;
-        // sched_meta.num_splits = new_num_splits;
+        sched_meta.tile_scheduler_metadata = new_tile_scheduler_metadata;
+        sched_meta.num_splits = new_num_splits;
         return {out, lse};
     } else {
         // Dense attention
@@ -160,6 +192,12 @@ std::pair<infinicore::Tensor, infinicore::Tensor> flash_mla_with_kvcache(
         ASSERT((block_table.has_value() && block_table.value() && cache_seqlens.has_value() && cache_seqlens.value()) && "block_table and cache_seqlens must be provided when dense attention is used.");
         ASSERT(k_cache->size(1) == 64 && "flash_mla_with_kvcache dense attention requires page_block_size == 64");
 
+        const bool has_schedule = sched_meta.tile_scheduler_metadata && sched_meta.num_splits;
+        std::optional<infinicore::Tensor> decode_tile_scheduler_metadata =
+            has_schedule ? std::optional<infinicore::Tensor>(sched_meta.tile_scheduler_metadata) : std::nullopt;
+        std::optional<infinicore::Tensor> decode_num_splits =
+            has_schedule ? std::optional<infinicore::Tensor>(sched_meta.num_splits) : std::nullopt;
+
         auto [out, lse, new_tile_scheduler_metadata, new_num_splits] = infinicore::op::flash_mla::dense_decode_fwd(q,
                                                                                                                    k_cache,
                                                                                                                    head_dim_v,
@@ -167,14 +205,93 @@ std::pair<infinicore::Tensor, infinicore::Tensor> flash_mla_with_kvcache(
                                                                                                                    block_table.value(),
                                                                                                                    scale,
                                                                                                                    causal,
-                                                                                                                   sched_meta.tile_scheduler_metadata,
-                                                                                                                   sched_meta.num_splits);
-        sched_meta.tile_scheduler_metadata = new_tile_scheduler_metadata;
-        sched_meta.num_splits = new_num_splits;
+                                                                                                                   decode_tile_scheduler_metadata,
+                                                                                                                   decode_num_splits);
+        if (!has_schedule) {
+            cache_flashmla_schedule_metadata(sched_meta,
+                                             new_tile_scheduler_metadata,
+                                             new_num_splits);
+        }
         return {out, lse};
     }
 }
 
 #undef FLASH_MLA_SCHED_META_HELPER_MSG
 
+namespace backends {
+
+FlashMLAImpl::FlashMLAImpl(size_t num_heads,
+                           size_t head_size,
+                           float scale,
+                           size_t num_kv_heads,
+                           size_t layer_idx,
+                           size_t head_dim_v)
+    : num_heads_(num_heads),
+      head_size_(head_size),
+      scale_(scale),
+      num_kv_heads_(num_kv_heads),
+      layer_idx_(layer_idx),
+      head_dim_v_(head_dim_v) {}
+
+std::pair<infinicore::Tensor, infinicore::Tensor> FlashMLAImpl::forward_mqa(
+    const MLAAttentionLayer &layer,
+    const infinicore::Tensor &query,
+    const infinicore::Tensor &kv_c,
+    const infinicore::Tensor &k_pe,
+    infinicore::Tensor &kv_cache,
+    FlashMLAMetadata &attn_metadata) const {
+    (void)layer;
+    ASSERT(query);
+    ASSERT(kv_c);
+    ASSERT(k_pe);
+    ASSERT(kv_cache);
+    ASSERT(query->ndim() == 4);
+    ASSERT(kv_cache->ndim() == 3);
+    ASSERT(kv_cache->size(1) == 64 && "FlashMLAImpl requires block_size == 64");
+    ASSERT(num_kv_heads_ == 1 && "FlashMLAImpl currently supports MQA KV cache only");
+
+    if (!attn_metadata.block_tables || !attn_metadata.seq_lens || !attn_metadata.slot_mapping) {
+        throw std::runtime_error("FlashMLAImpl::forward_mqa requires FlashMLA attention metadata");
+    }
+
+    do_kv_cache_update(kv_c, k_pe, kv_cache, attn_metadata.slot_mapping);
+    auto kv_cache_4d = kv_cache->view({kv_cache->size(0), kv_cache->size(1), 1, head_size_});
+
+    auto &scheduler_metadata = attn_metadata.scheduler_metadata;
+
+    const size_t tokens = query->size(1);
+    const bool causal = tokens > attn_metadata.seq_lens->numel();
+    return flash_mla_with_kvcache(query,
+                                  kv_cache_4d,
+                                  attn_metadata.block_tables,
+                                  attn_metadata.seq_lens,
+                                  static_cast<int64_t>(head_dim_v_),
+                                  scheduler_metadata,
+                                  std::nullopt,
+                                  static_cast<double>(scale_),
+                                  causal,
+                                  false,
+                                  std::nullopt,
+                                  std::nullopt,
+                                  std::nullopt,
+                                  std::nullopt,
+                                  std::nullopt,
+                                  std::nullopt);
+}
+
+void FlashMLAImpl::do_kv_cache_update(const infinicore::Tensor &kv_c,
+                                      const infinicore::Tensor &k_pe,
+                                      infinicore::Tensor &kv_cache,
+                                      const infinicore::Tensor &slot_mapping) const {
+    auto cache_scale = infinicore::Tensor::ones({1}, infinicore::DataType::F32, kv_cache->device());
+    infinicore::op::deepseek_v4_concat_and_cache_mla_(
+        kv_c,
+        k_pe,
+        kv_cache,
+        slot_mapping,
+        "auto",
+        cache_scale);
+}
+
+} // namespace backends
 } // namespace infinilm::layers::mla_attention

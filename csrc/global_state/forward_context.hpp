@@ -2,6 +2,7 @@
 
 #include "flash_mla_sched_meta.hpp"
 
+#include "../layers/mla_attention/backends/flashmla.hpp"
 #include "../models/infinilm_model.hpp"
 
 #include <cstddef>
@@ -150,8 +151,11 @@ struct MambaMetadata {
     std::optional<infinicore::Tensor> final_state_indices;
 };
 
+using FlashMLAMetadata = infinilm::layers::mla_attention::FlashMLAMetadata;
+
 struct ForwardContext {
     AttentionMetadata attn_metadata;
+    FlashMLAMetadata flashmla_attn_metadata;
     DSV4AttnMetadata dsv4_attn_metadata;
     MambaMetadata mamba_metadata;
     MultiModalMetadata mm_metadata;

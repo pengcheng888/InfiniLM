@@ -1,7 +1,7 @@
 #include "deepseek_v4_attention.hpp"
 
 #include "../../global_state/global_state.hpp"
-#include "../../layers/mla_attention/flash_mla/flash_mla.hpp"
+#include "../../layers/mla_attention/backends/flashmla.hpp"
 #include "deepseek_v4_profile.hpp"
 #include "deepseek_v4_rope.hpp"
 #include "infinicore/context/context.hpp"

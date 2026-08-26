@@ -34,6 +34,34 @@ void bind_forward_context_from_input(const InfinilmModel::Input &input) {
     forward_context.attn_metadata = infinilm::global_state::AttentionMetadata(input);
 }
 
+void bind_flashmla_forward_context_from_input(
+    const InfinilmModel::Input &input,
+    const infinilm::global_state::FlashMLASchedMeta &flashmla_sched_meta) {
+    auto &forward_context = infinilm::global_state::get_forward_context();
+    forward_context.flashmla_attn_metadata = infinilm::global_state::FlashMLAMetadata(
+        input.slot_mapping.value(),
+        input.block_tables.value(),
+        input.total_sequence_lengths.value());
+    forward_context.flashmla_attn_metadata.scheduler_metadata = flashmla_sched_meta;
+}
+
+void bind_flashmla_forward_context_from_input(
+    const InfinilmModel::Input &input,
+    const std::vector<infinilm::global_state::FlashMLASchedMeta> &flashmla_sched_meta_vec) {
+    ASSERT(flashmla_sched_meta_vec.size() == 1);
+    ASSERT(flashmla_sched_meta_vec.front().has_sched_meta());
+    bind_flashmla_forward_context_from_input(input, flashmla_sched_meta_vec.front());
+}
+
+std::vector<infinilm::global_state::FlashMLASchedMeta> collect_flashmla_sched_meta_vec_from_forward_context() {
+    const auto &flashmla_attn_metadata = infinilm::global_state::get_forward_context().flashmla_attn_metadata;
+    if (!flashmla_attn_metadata.has_sched_meta()) {
+        return {};
+    }
+
+    return {flashmla_attn_metadata.scheduler_metadata};
+}
+
 bool copy_graph_input_tensor(infinicore::Tensor &dst, const infinicore::Tensor &src) {
     if (!dst || !src) {
         return false;
@@ -183,6 +211,10 @@ void PagedCompiler::compile() {
                 input.block_tables,
                 input.slot_mapping,
             };
+            forward_context.flashmla_attn_metadata = infinilm::global_state::FlashMLAMetadata(
+                input.slot_mapping.value(),
+                input.block_tables.value(),
+                input.total_sequence_lengths.value());
             // Hybrid linear-attention layers read cache indices from the same
             // thread-local context. These tensors remain alive in CompiledResult
             // and are updated in place before every graph replay.
@@ -222,6 +254,11 @@ void PagedCompiler::compile() {
             barrier_->wait();
             (void)model_->forward(input);
             infinicore::context::syncStream();
+            auto flashmla_sched_meta_vec = collect_flashmla_sched_meta_vec_from_forward_context();
+            if (!flashmla_sched_meta_vec.empty()) {
+                bind_flashmla_forward_context_from_input(input, flashmla_sched_meta_vec);
+            }
+
             infinilm::global_state::DSV4AttnMetadata dsv4_attn_metadata;
             if (is_deepseek_v4_model) {
                 dsv4_attn_metadata = infinilm::global_state::get_forward_context().dsv4_attn_metadata;
@@ -244,6 +281,7 @@ void PagedCompiler::compile() {
 
             compiled_map_decode_[b] = CompiledResult{
                 std::move(input),
+                std::move(flashmla_sched_meta_vec),
                 std::move(dsv4_attn_metadata),
                 std::make_tuple(graph, shared_output)};
         }
@@ -269,7 +307,9 @@ PagedCompiler::Compiled PagedCompiler::get_compiled(const InfinilmModel::Input &
             graph_input.position_ids.value()->copy_from(input.position_ids.value());
             graph_input.total_sequence_lengths.value()->copy_from(input.total_sequence_lengths.value());
             graph_input.input_offsets.value()->copy_from(input.input_offsets.value());
-            graph_input.cu_seqlens.value()->copy_from(input.cu_seqlens.value());
+            if (input.cu_seqlens.has_value()) {
+                graph_input.cu_seqlens.value()->copy_from(input.cu_seqlens.value());
+            }
 
             const size_t compiled_block_per_req = graph_input.block_tables.value()->size(1);
             if (block_per_req > compiled_block_per_req) {
@@ -315,6 +355,11 @@ PagedCompiler::Compiled PagedCompiler::get_compiled(const InfinilmModel::Input &
                 if (!dsv4_copied) {
                     return {nullptr, nullptr};
                 }
+            }
+            if (!result->second.flashmla_sched_meta_vec.empty()) {
+                bind_flashmla_forward_context_from_input(
+                    graph_input,
+                    result->second.flashmla_sched_meta_vec);
             }
             // CUDA graph replay reuses the same per-layer Marlin workspaces.
             // The graph itself does not contain a workspace reset, so enqueue

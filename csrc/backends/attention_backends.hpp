@@ -29,6 +29,8 @@ inline std::ostream &operator<<(std::ostream &os, AttentionBackend backend) {
         return os << "AttentionBackend::FLASH_ATTN";
     case AttentionBackend::FLASHINFER:
         return os << "AttentionBackend::FLASHINFER";
+    case AttentionBackend::FLASHMLA:
+        return os << "AttentionBackend::FLASHMLA";
     default:
         throw std::invalid_argument("infinilm::backends: invalid attention backend: " + std::to_string(static_cast<int>(backend)));
         break;
@@ -51,9 +53,12 @@ inline AttentionBackend parse_attention_backend(const std::string &backend) {
     if (backend == "flashinfer") {
         return AttentionBackend::FLASHINFER;
     }
+    if (backend == "flashmla") {
+        return AttentionBackend::FLASHMLA;
+    }
 
     throw std::invalid_argument(
-        "Invalid attention_backend: " + backend + ". Valid options are: static-attn, paged-attn, flash-attn, flashinfer");
+        "Invalid attention_backend: " + backend + ". Valid options are: static-attn, paged-attn, flash-attn, flashinfer, flashmla");
 }
 
 } // namespace infinilm::backends

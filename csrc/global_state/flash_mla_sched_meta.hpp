@@ -35,6 +35,10 @@ struct FlashMLASchedMeta {
     infinicore::Tensor o_accum;
 
     FlashMLASchedMeta() = default;
+
+    bool has_sched_meta() const {
+        return tile_scheduler_metadata && num_splits;
+    }
 };
 
 } // namespace infinilm::global_state
