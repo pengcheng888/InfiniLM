@@ -293,7 +293,7 @@ void DeepseekV4Attention::refresh_flashmla_schedule_metadata(
                                                                     extra_topk_lengths,
                                                                     extra_topk);
     flashmla_metadata.have_initialized = true;
-    flashmla_metadata.graph_refresh_recorded = true;
+    flashmla_metadata.have_refreshed = true;
 }
 
 void DeepseekV4Attention::compute_sparse_attention(
@@ -319,7 +319,7 @@ void DeepseekV4Attention::compute_sparse_attention(
     {
         profile::ScopedTimer timer(profile::Event::AttentionFlashMLASchedule, seq_len);
         flashmla_metadata = &dsv4_metadata.get_flashmla_metadata(compress_ratio_);
-        if (!flashmla_metadata->graph_refresh_recorded
+        if (!flashmla_metadata->have_refreshed
             && flashmla_metadata->tile_scheduler_metadata
             && flashmla_metadata->num_splits) {
             refresh_flashmla_schedule_metadata(*flashmla_metadata,

@@ -51,7 +51,7 @@ void prepare_flashmla_metadata(infinilm::global_state::FlashMLASchedMeta &metada
                                                         device);
     }
     metadata.have_initialized = false;
-    metadata.graph_refresh_recorded = false;
+    metadata.have_refreshed = false;
     metadata.config.reset();
 }
 
@@ -71,9 +71,9 @@ void copy_flashmla_metadata(infinilm::global_state::DSV4AttnMetadata &dst,
     dst.c1_flashmla_metadata = src.c1_flashmla_metadata;
     dst.c4_flashmla_metadata = src.c4_flashmla_metadata;
     dst.c128_flashmla_metadata = src.c128_flashmla_metadata;
-    dst.c1_flashmla_metadata.graph_refresh_recorded = false;
-    dst.c4_flashmla_metadata.graph_refresh_recorded = false;
-    dst.c128_flashmla_metadata.graph_refresh_recorded = false;
+    dst.c1_flashmla_metadata.have_refreshed = false;
+    dst.c4_flashmla_metadata.have_refreshed = false;
+    dst.c128_flashmla_metadata.have_refreshed = false;
 }
 
 } // namespace

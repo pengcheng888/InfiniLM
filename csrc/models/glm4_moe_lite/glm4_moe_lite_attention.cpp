@@ -143,54 +143,57 @@ infinicore::Tensor Glm4MoeLiteAttention::forward_mha(const infinicore::Tensor &q
 
     mla_attn_->do_kv_cache_update(kv_c, k_pe);
 
-    auto kv_c_by_head = infinicore::op::broadcast_to(
-        kv_c->view({1, tokens, kv_lora_rank_}),
-        {static_cast<int64_t>(num_local_attention_heads_),
-         static_cast<int64_t>(tokens),
-         static_cast<int64_t>(kv_lora_rank_)});
-    auto k_nope_input = infinicore::Tensor::empty(
-        {num_local_attention_heads_, tokens, qk_nope_head_dim_},
-        kv_c->dtype(),
-        kv_c->device());
-    auto k_nope = infinicore::op::baddbmm(k_nope_input, kv_c_by_head, w_kc_t_, 0.0f, 1.0f)
-                      ->permute({1, 0, 2})
-                      ->contiguous();
-    auto k_pe_heads = infinicore::op::broadcast_to(
-        k_pe->view({tokens, 1, qk_rope_head_dim_}),
-        {static_cast<int64_t>(tokens),
-         static_cast<int64_t>(num_local_attention_heads_),
-         static_cast<int64_t>(qk_rope_head_dim_)});
+    auto kv_c_by_head = infinicore::op::broadcast_to(kv_c->view({1, tokens, kv_lora_rank_}),
+                                                     {static_cast<int64_t>(num_local_attention_heads_),
+                                                      static_cast<int64_t>(tokens),
+                                                      static_cast<int64_t>(kv_lora_rank_)});
+
+    auto k_nope_input = infinicore::Tensor::empty({num_local_attention_heads_, tokens, qk_nope_head_dim_},
+                                                  kv_c->dtype(),
+                                                  kv_c->device());
+    auto k_nope = infinicore::op::baddbmm(k_nope_input, kv_c_by_head, w_kc_t_, 0.0f, 1.0f)->permute({1, 0, 2})->contiguous();
+
+    auto k_pe_heads = infinicore::op::broadcast_to(k_pe->view({tokens, 1, qk_rope_head_dim_}),
+                                                   {static_cast<int64_t>(tokens),
+                                                    static_cast<int64_t>(num_local_attention_heads_),
+                                                    static_cast<int64_t>(qk_rope_head_dim_)});
     auto key = infinicore::op::cat({k_nope, k_pe_heads}, 2);
 
-    auto value_input = infinicore::Tensor::empty(
-        {num_local_attention_heads_, tokens, v_head_dim_},
-        kv_c->dtype(),
-        kv_c->device());
-    auto value = infinicore::op::baddbmm(value_input, kv_c_by_head, w_vc_, 0.0f, 1.0f)
-                     ->permute({1, 0, 2})
-                     ->contiguous();
+    auto value_input = infinicore::Tensor::empty({num_local_attention_heads_, tokens, v_head_dim_},
+                                                 kv_c->dtype(),
+                                                 kv_c->device());
 
-    auto attn_output = infinicore::Tensor::empty(
-        {tokens, num_local_attention_heads_, v_head_dim_},
-        q->dtype(),
-        q->device());
-    const size_t max_query_len = attn_metadata.max_query_len > 0
-                                   ? attn_metadata.max_query_len
-                                   : tokens;
+    auto value = infinicore::op::baddbmm(value_input, kv_c_by_head, w_vc_, 0.0f, 1.0f)->permute({1, 0, 2})->contiguous();
+
+    auto attn_output = infinicore::Tensor::empty({tokens, num_local_attention_heads_, v_head_dim_},
+                                                 q->dtype(),
+                                                 q->device());
+
+    const size_t max_query_len = attn_metadata.max_query_len > 0 ? attn_metadata.max_query_len : tokens;
+
     // key/value are dense tensors materialized only for the current prefill tokens.
     // They must use the same offsets as q; total cu_seqlens may include cached prefix tokens.
-    // infinicore::op::mha_varlen_(
-    //     attn_output,
-    //     q,
-    //     key,
-    //     value,
-    //     attn_metadata.input_offsets,
-    //     attn_metadata.input_offsets,
-    //     std::nullopt,
-    //     static_cast<int>(max_query_len),
-    //     static_cast<int>(max_query_len),
-    //     std::nullopt,
-    //     static_cast<float>(softmax_scale_));
+
+    /*
+    如果后续要让 prefill attention 看到历史 cache，那么更合理的做法不是把 GLM 当前调用里的第二个
+    input_offsets 换成 query_start_loc/cu_seqlens，
+    而是改成 paged prefill 语义：传 kv_cache、block_tables，
+    并让 cum_seqlens_kv 使用 total sequence lengths。
+
+    当前 GLM 的 dense forward_mha() 路径下，应保留 input_offsets/input_offsets。
+    */
+    infinicore::op::mha_varlen_(
+        attn_output,
+        q,
+        key,
+        value,
+        attn_metadata.input_offsets,
+        attn_metadata.input_offsets,
+        std::nullopt,
+        static_cast<int>(max_query_len),
+        static_cast<int>(max_query_len),
+        std::nullopt,
+        static_cast<float>(softmax_scale_));
 
     auto out_flat = attn_output->view({tokens, num_local_attention_heads_ * v_head_dim_});
     return o_proj_->forward(out_flat);

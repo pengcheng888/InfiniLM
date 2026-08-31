@@ -159,37 +159,68 @@ std::pair<infinicore::Tensor, infinicore::Tensor> flash_mla_with_kvcache(
         ASSERT((block_table.has_value() && block_table.value() && cache_seqlens.has_value() && cache_seqlens.value()) && "block_table and cache_seqlens must be provided when dense attention is used.");
         ASSERT(k_cache->size(1) == 64 && "flash_mla_with_kvcache dense attention requires page_block_size == 64");
 
-        const bool has_schedule = sched_meta.tile_scheduler_metadata && sched_meta.num_splits;
-        std::optional<infinicore::Tensor> decode_tile_scheduler_metadata = has_schedule ? std::optional<infinicore::Tensor>(sched_meta.tile_scheduler_metadata) : std::nullopt;
-        std::optional<infinicore::Tensor> decode_num_splits = has_schedule ? std::optional<infinicore::Tensor>(sched_meta.num_splits) : std::nullopt;
-        bool reuse_sched_metadata = {false};
-        if (!reuse_sched_metadata) {
-            decode_tile_scheduler_metadata = std::nullopt;
-            decode_num_splits = std::nullopt;
-        }
-        auto [out, lse, new_tile_scheduler_metadata, new_num_splits] = infinicore::op::flash_mla::dense_decode_fwd(q,
-                                                                                                                   k_cache,
-                                                                                                                   head_dim_v,
-                                                                                                                   cache_seqlens.value(),
-                                                                                                                   block_table.value(),
-                                                                                                                   scale,
-                                                                                                                   causal,
-                                                                                                                   decode_tile_scheduler_metadata,
-                                                                                                                   decode_num_splits);
-        if (!has_schedule) {
-            if (!new_tile_scheduler_metadata || !new_num_splits) {
-                throw std::runtime_error("flash_mla_with_kvcache: empty FlashMLA dense schedule metadata");
+        // bool reuse_sched_metadata = {true};
+        // if (!reuse_sched_metadata) {
+        //     decode_tile_scheduler_metadata = std::nullopt;
+        //     decode_num_splits = std::nullopt;
+        // }
+
+        infinicore::Tensor out = infinicore::Tensor::empty({q->size(0), q->size(1), q->size(2), static_cast<size_t>(head_dim_v)},
+                                                           q->dtype(),
+                                                           q->device());
+        infinicore::Tensor lse = infinicore::Tensor::empty({q->size(0), q->size(2), q->size(1)},
+                                                           infinicore::DataType::F32,
+                                                           q->device());
+
+        std::optional<infinicore::Tensor> new_tile_scheduler_metadata;
+        std::optional<infinicore::Tensor> new_num_splits;
+        if (infinicore::context::isGraphRecording()) {
+            ASSERT(sched_meta.tile_scheduler_metadata && sched_meta.num_splits && "sched meta的空间必须已经分配。");
+
+            if (!sched_meta.have_refreshed) {
+                new_tile_scheduler_metadata = infinicore::Tensor::empty(sched_meta.tile_scheduler_metadata->shape(),
+                                                                        sched_meta.tile_scheduler_metadata->dtype(),
+                                                                        sched_meta.tile_scheduler_metadata->device());
+                new_num_splits = infinicore::Tensor::empty(sched_meta.num_splits->shape(),
+                                                           sched_meta.num_splits->dtype(),
+                                                           sched_meta.num_splits->device());
+
+                sched_meta.tile_scheduler_metadata = {};
+                sched_meta.num_splits = {};
+
+                sched_meta.have_refreshed = true;
+            } else {
+                new_tile_scheduler_metadata = sched_meta.tile_scheduler_metadata;
+                new_num_splits = sched_meta.num_splits;
             }
-            if (new_tile_scheduler_metadata->dtype() != infinicore::DataType::I32
-                || new_num_splits->dtype() != infinicore::DataType::I32) {
+        }
+
+        std::optional<infinicore::Tensor> decode_tile_scheduler_metadata
+            = sched_meta.tile_scheduler_metadata ? std::optional<infinicore::Tensor>(sched_meta.tile_scheduler_metadata) : std::nullopt;
+        std::optional<infinicore::Tensor> decode_num_splits
+            = sched_meta.num_splits ? std::optional<infinicore::Tensor>(sched_meta.num_splits) : std::nullopt;
+        infinicore::op::flash_mla::dense_decode_fwd_(out,
+                                                     lse,
+                                                     new_tile_scheduler_metadata,
+                                                     new_num_splits,
+                                                     q,
+                                                     k_cache,
+                                                     head_dim_v,
+                                                     cache_seqlens.value(),
+                                                     block_table.value(),
+                                                     scale,
+                                                     causal,
+                                                     decode_tile_scheduler_metadata,
+                                                     decode_num_splits);
+        if (new_tile_scheduler_metadata && new_num_splits) {
+            if (new_tile_scheduler_metadata.value()->dtype() != infinicore::DataType::I32 || new_num_splits.value()->dtype() != infinicore::DataType::I32) {
                 throw std::runtime_error("flash_mla_with_kvcache: FlashMLA dense schedule metadata must be int32");
             }
-            if (!new_tile_scheduler_metadata->is_contiguous()
-                || !new_num_splits->is_contiguous()) {
+            if (!new_tile_scheduler_metadata.value()->is_contiguous() || !new_num_splits.value()->is_contiguous()) {
                 throw std::runtime_error("flash_mla_with_kvcache: FlashMLA dense schedule metadata must be contiguous");
             }
-            sched_meta.tile_scheduler_metadata = new_tile_scheduler_metadata;
-            sched_meta.num_splits = new_num_splits;
+            sched_meta.tile_scheduler_metadata = new_tile_scheduler_metadata.value();
+            sched_meta.num_splits = new_num_splits.value();
             sched_meta.have_initialized = true;
         }
         return {out, lse};

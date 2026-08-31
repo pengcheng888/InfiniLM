@@ -24,7 +24,7 @@ struct FlashMLASchedMeta {
     };
 
     bool have_initialized{false};
-    bool graph_refresh_recorded{false};
+    bool have_refreshed{false};
     std::optional<Config> config;
     infinicore::Tensor tile_scheduler_metadata;
     infinicore::Tensor num_splits;
