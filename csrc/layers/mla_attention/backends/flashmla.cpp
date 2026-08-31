@@ -162,7 +162,11 @@ std::pair<infinicore::Tensor, infinicore::Tensor> flash_mla_with_kvcache(
         const bool has_schedule = sched_meta.tile_scheduler_metadata && sched_meta.num_splits;
         std::optional<infinicore::Tensor> decode_tile_scheduler_metadata = has_schedule ? std::optional<infinicore::Tensor>(sched_meta.tile_scheduler_metadata) : std::nullopt;
         std::optional<infinicore::Tensor> decode_num_splits = has_schedule ? std::optional<infinicore::Tensor>(sched_meta.num_splits) : std::nullopt;
-
+        bool reuse_sched_metadata = {false};
+        if (!reuse_sched_metadata) {
+            decode_tile_scheduler_metadata = std::nullopt;
+            decode_num_splits = std::nullopt;
+        }
         auto [out, lse, new_tile_scheduler_metadata, new_num_splits] = infinicore::op::flash_mla::dense_decode_fwd(q,
                                                                                                                    k_cache,
                                                                                                                    head_dim_v,

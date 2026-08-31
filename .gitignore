@@ -44,3 +44,7 @@ csrc/models/deepseek_v4/profile_logs/hipprof_20260723/infinilm_dsv4_tp8_fused_mh
 csrc/models/deepseek_v4/profile_logs/hipprof_20260723/infinilm_dsv4_tp8_fused_mhc_kernel_4tok.hiptrace.csv
 csrc/models/deepseek_v4/profile_logs/hipprof_20260723/infinilm_dsv4_tp8_fused_mhc_kernel_4tok.rccltrace.csv
 csrc/models/deepseek_v4/profile_logs/hipprof_20260723/infinilm_dsv4_tp8_fused_mhc_kernel_4tok.db
+
+glm47_graph_*/
+glm47_nograph_*/
+glm47_flash*/

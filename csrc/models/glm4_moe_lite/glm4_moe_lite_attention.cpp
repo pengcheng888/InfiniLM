@@ -177,21 +177,20 @@ infinicore::Tensor Glm4MoeLiteAttention::forward_mha(const infinicore::Tensor &q
     const size_t max_query_len = attn_metadata.max_query_len > 0
                                    ? attn_metadata.max_query_len
                                    : tokens;
-    const size_t max_seq_len = attn_metadata.max_seq_len > 0
-                                 ? attn_metadata.max_seq_len
-                                 : tokens;
-    infinicore::op::mha_varlen_(
-        attn_output,
-        q,
-        key,
-        value,
-        attn_metadata.input_offsets,
-        attn_metadata.query_start_loc,
-        std::nullopt,
-        static_cast<int>(max_query_len),
-        static_cast<int>(max_seq_len),
-        std::nullopt,
-        static_cast<float>(softmax_scale_));
+    // key/value are dense tensors materialized only for the current prefill tokens.
+    // They must use the same offsets as q; total cu_seqlens may include cached prefix tokens.
+    // infinicore::op::mha_varlen_(
+    //     attn_output,
+    //     q,
+    //     key,
+    //     value,
+    //     attn_metadata.input_offsets,
+    //     attn_metadata.input_offsets,
+    //     std::nullopt,
+    //     static_cast<int>(max_query_len),
+    //     static_cast<int>(max_query_len),
+    //     std::nullopt,
+    //     static_cast<float>(softmax_scale_));
 
     auto out_flat = attn_output->view({tokens, num_local_attention_heads_ * v_head_dim_});
     return o_proj_->forward(out_flat);
