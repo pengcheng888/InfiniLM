@@ -160,7 +160,12 @@ std::pair<infinicore::Tensor, infinicore::Tensor> flash_mla_with_kvcache(
         ASSERT(k_cache->size(1) == 64 && "flash_mla_with_kvcache dense attention requires page_block_size == 64");
 
         const bool has_sched_buffer = sched_meta.has_sched_buffer();
-        const bool can_reuse_sched_meta = infinicore::context::isGraphRecording() && sched_meta.has_valid_sched_meta();
+        if (infinicore::context::isGraphRecording()) {
+            ASSERT(has_sched_buffer && "FlashMLA graph mode requires preallocated scheduler metadata buffers.");
+        }
+
+        // const bool can_reuse_sched_meta = infinicore::context::isGraphRecording() && sched_meta.has_valid_sched_meta();
+        const bool can_reuse_sched_meta = sched_meta.has_valid_sched_meta();
         std::optional<infinicore::Tensor> decode_tile_scheduler_metadata
             = can_reuse_sched_meta ? std::optional<infinicore::Tensor>(sched_meta.tile_scheduler_metadata) : std::nullopt;
         std::optional<infinicore::Tensor> decode_num_splits
@@ -173,11 +178,8 @@ std::pair<infinicore::Tensor, infinicore::Tensor> flash_mla_with_kvcache(
                                                            infinicore::DataType::F32,
                                                            q->device());
 
-        std::optional<infinicore::Tensor> new_tile_scheduler_metadata;
-        std::optional<infinicore::Tensor> new_num_splits;
-        if (infinicore::context::isGraphRecording()) {
-            ASSERT(has_sched_buffer && "FlashMLA graph mode requires preallocated scheduler metadata buffers.");
-        }
+        std::optional<infinicore::Tensor> new_tile_scheduler_metadata = std::nullopt;
+        std::optional<infinicore::Tensor> new_num_splits = std::nullopt;
         if (has_sched_buffer) {
             new_tile_scheduler_metadata = sched_meta.tile_scheduler_metadata;
             new_num_splits = sched_meta.num_splits;
@@ -195,6 +197,7 @@ std::pair<infinicore::Tensor, infinicore::Tensor> flash_mla_with_kvcache(
                                                      causal,
                                                      decode_tile_scheduler_metadata,
                                                      decode_num_splits);
+
         if (new_tile_scheduler_metadata && new_num_splits) {
             if (new_tile_scheduler_metadata.value()->dtype() != infinicore::DataType::I32 || new_num_splits.value()->dtype() != infinicore::DataType::I32) {
                 throw std::runtime_error("flash_mla_with_kvcache: FlashMLA dense schedule metadata must be int32");
