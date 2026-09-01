@@ -47,21 +47,26 @@ void bind_flashmla_forward_context_from_input(
     forward_context.flashmla_attn_metadata.scheduler_metadata = flashmla_sched_meta;
 }
 
-void bind_flashmla_forward_context_from_input(
-    const InfinilmModel::Input &input,
-    const std::vector<infinilm::global_state::FlashMLASchedMeta> &flashmla_sched_meta_vec) {
-    ASSERT(flashmla_sched_meta_vec.size() == 1);
-    ASSERT(flashmla_sched_meta_vec.front().has_sched_meta());
-    bind_flashmla_forward_context_from_input(input, flashmla_sched_meta_vec.front());
-}
-
-std::vector<infinilm::global_state::FlashMLASchedMeta> collect_flashmla_sched_meta_vec_from_forward_context() {
+std::vector<infinilm::global_state::FlashMLASchedMeta> make_flashmla_sched_buffers_from_forward_context() {
     const auto &flashmla_attn_metadata = infinilm::global_state::get_forward_context().flashmla_attn_metadata;
-    if (!flashmla_attn_metadata.has_sched_meta()) {
+    const auto &sched_meta = flashmla_attn_metadata.scheduler_metadata;
+    if (!sched_meta.has_sched_buffer()) {
         return {};
     }
 
-    return {flashmla_attn_metadata.scheduler_metadata};
+    infinilm::global_state::FlashMLASchedMeta sched_buffer;
+    sched_buffer.tile_scheduler_metadata = infinicore::Tensor::empty(
+        sched_meta.tile_scheduler_metadata->shape(),
+        sched_meta.tile_scheduler_metadata->dtype(),
+        sched_meta.tile_scheduler_metadata->device());
+    sched_buffer.num_splits = infinicore::Tensor::empty(
+        sched_meta.num_splits->shape(),
+        sched_meta.num_splits->dtype(),
+        sched_meta.num_splits->device());
+    sched_buffer.have_initialized = false;
+    sched_buffer.have_refreshed = false;
+    sched_buffer.config.reset();
+    return {std::move(sched_buffer)};
 }
 
 bool copy_graph_input_tensor(infinicore::Tensor &dst, const infinicore::Tensor &src) {
@@ -258,9 +263,10 @@ void PagedCompiler::compile() {
             barrier_->wait();
             (void)model_->forward(input);
             infinicore::context::syncStream();
-            auto flashmla_sched_meta_vec = collect_flashmla_sched_meta_vec_from_forward_context();
-            if (!flashmla_sched_meta_vec.empty()) {
-                bind_flashmla_forward_context_from_input(input, flashmla_sched_meta_vec);
+            auto flashmla_sched_buffers = make_flashmla_sched_buffers_from_forward_context();
+            if (!flashmla_sched_buffers.empty()) {
+                ASSERT(flashmla_sched_buffers.size() == 1);
+                bind_flashmla_forward_context_from_input(input, flashmla_sched_buffers.front());
             }
 
             infinilm::global_state::DSV4AttnMetadata dsv4_attn_metadata;
@@ -285,7 +291,7 @@ void PagedCompiler::compile() {
 
             compiled_map_decode_[b] = CompiledResult{
                 std::move(input),
-                std::move(flashmla_sched_meta_vec),
+                std::move(flashmla_sched_buffers),
                 std::move(dsv4_attn_metadata),
                 std::make_tuple(graph, shared_output)};
         }
@@ -360,10 +366,11 @@ PagedCompiler::Compiled PagedCompiler::get_compiled(const InfinilmModel::Input &
                     return {nullptr, nullptr};
                 }
             }
-            if (!result->second.flashmla_sched_meta_vec.empty()) {
+            if (!result->second.flashmla_sched_buffers.empty()) {
+                ASSERT(result->second.flashmla_sched_buffers.size() == 1);
                 bind_flashmla_forward_context_from_input(
                     graph_input,
-                    result->second.flashmla_sched_meta_vec);
+                    result->second.flashmla_sched_buffers.front());
             }
             // CUDA graph replay reuses the same per-layer Marlin workspaces.
             // The graph itself does not contain a workspace reset, so enqueue

@@ -22,7 +22,7 @@ private:
 
     struct CompiledResult {
         InfinilmModel::Input input;
-        std::vector<infinilm::global_state::FlashMLASchedMeta> flashmla_sched_meta_vec;
+        std::vector<infinilm::global_state::FlashMLASchedMeta> flashmla_sched_buffers;
         infinilm::global_state::DSV4AttnMetadata dsv4_attn_metadata;
         Compiled compiled;
     };

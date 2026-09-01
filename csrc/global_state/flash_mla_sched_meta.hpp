@@ -36,8 +36,16 @@ struct FlashMLASchedMeta {
 
     FlashMLASchedMeta() = default;
 
-    bool has_sched_meta() const {
+    bool has_sched_buffer() const {
         return tile_scheduler_metadata && num_splits;
+    }
+
+    bool has_valid_sched_meta() const {
+        return has_sched_buffer() && have_refreshed;
+    }
+
+    bool has_sched_meta() const {
+        return has_sched_buffer();
     }
 };
 

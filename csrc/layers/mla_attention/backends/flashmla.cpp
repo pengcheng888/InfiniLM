@@ -159,11 +159,12 @@ std::pair<infinicore::Tensor, infinicore::Tensor> flash_mla_with_kvcache(
         ASSERT((block_table.has_value() && block_table.value() && cache_seqlens.has_value() && cache_seqlens.value()) && "block_table and cache_seqlens must be provided when dense attention is used.");
         ASSERT(k_cache->size(1) == 64 && "flash_mla_with_kvcache dense attention requires page_block_size == 64");
 
-        // bool reuse_sched_metadata = {true};
-        // if (!reuse_sched_metadata) {
-        //     decode_tile_scheduler_metadata = std::nullopt;
-        //     decode_num_splits = std::nullopt;
-        // }
+        const bool has_sched_buffer = sched_meta.has_sched_buffer();
+        const bool can_reuse_sched_meta = infinicore::context::isGraphRecording() && sched_meta.has_valid_sched_meta();
+        std::optional<infinicore::Tensor> decode_tile_scheduler_metadata
+            = can_reuse_sched_meta ? std::optional<infinicore::Tensor>(sched_meta.tile_scheduler_metadata) : std::nullopt;
+        std::optional<infinicore::Tensor> decode_num_splits
+            = can_reuse_sched_meta ? std::optional<infinicore::Tensor>(sched_meta.num_splits) : std::nullopt;
 
         infinicore::Tensor out = infinicore::Tensor::empty({q->size(0), q->size(1), q->size(2), static_cast<size_t>(head_dim_v)},
                                                            q->dtype(),
@@ -175,30 +176,12 @@ std::pair<infinicore::Tensor, infinicore::Tensor> flash_mla_with_kvcache(
         std::optional<infinicore::Tensor> new_tile_scheduler_metadata;
         std::optional<infinicore::Tensor> new_num_splits;
         if (infinicore::context::isGraphRecording()) {
-            ASSERT(sched_meta.tile_scheduler_metadata && sched_meta.num_splits && "sched meta的空间必须已经分配。");
-
-            if (!sched_meta.have_refreshed) {
-                new_tile_scheduler_metadata = infinicore::Tensor::empty(sched_meta.tile_scheduler_metadata->shape(),
-                                                                        sched_meta.tile_scheduler_metadata->dtype(),
-                                                                        sched_meta.tile_scheduler_metadata->device());
-                new_num_splits = infinicore::Tensor::empty(sched_meta.num_splits->shape(),
-                                                           sched_meta.num_splits->dtype(),
-                                                           sched_meta.num_splits->device());
-
-                sched_meta.tile_scheduler_metadata = {};
-                sched_meta.num_splits = {};
-
-                sched_meta.have_refreshed = true;
-            } else {
-                new_tile_scheduler_metadata = sched_meta.tile_scheduler_metadata;
-                new_num_splits = sched_meta.num_splits;
-            }
+            ASSERT(has_sched_buffer && "FlashMLA graph mode requires preallocated scheduler metadata buffers.");
         }
-
-        std::optional<infinicore::Tensor> decode_tile_scheduler_metadata
-            = sched_meta.tile_scheduler_metadata ? std::optional<infinicore::Tensor>(sched_meta.tile_scheduler_metadata) : std::nullopt;
-        std::optional<infinicore::Tensor> decode_num_splits
-            = sched_meta.num_splits ? std::optional<infinicore::Tensor>(sched_meta.num_splits) : std::nullopt;
+        if (has_sched_buffer) {
+            new_tile_scheduler_metadata = sched_meta.tile_scheduler_metadata;
+            new_num_splits = sched_meta.num_splits;
+        }
         infinicore::op::flash_mla::dense_decode_fwd_(out,
                                                      lse,
                                                      new_tile_scheduler_metadata,
@@ -222,6 +205,7 @@ std::pair<infinicore::Tensor, infinicore::Tensor> flash_mla_with_kvcache(
             sched_meta.tile_scheduler_metadata = new_tile_scheduler_metadata.value();
             sched_meta.num_splits = new_num_splits.value();
             sched_meta.have_initialized = true;
+            sched_meta.have_refreshed = true;
         }
         return {out, lse};
     }

@@ -39,7 +39,7 @@ struct FlashMLAMetadata {
           max_seq_len(max_seq_len) {}
 
     bool has_sched_meta() const {
-        return slot_mapping && block_tables && seq_lens && scheduler_metadata.has_sched_meta();
+        return slot_mapping && block_tables && seq_lens && scheduler_metadata.has_sched_buffer();
     }
 };
 
