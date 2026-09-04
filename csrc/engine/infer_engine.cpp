@@ -88,6 +88,8 @@ InferEngine::InferEngine(
     int world_size = communication_group_.get_world_size();
     barrier_ = std::make_unique<RankBarrier>((size_t)world_size);
     workers_.reserve(world_size);
+    const bool serialize_worker_init =
+        enable_graph_compiling && device_type == infinicore::Device::Type::METAX;
     for (int r = 0; r < world_size; ++r) {
         workers_.emplace_back(std::make_unique<RankWorker>(
             infinilm_config,
@@ -96,10 +98,15 @@ InferEngine::InferEngine(
             barrier_.get(),
             enable_graph_compiling,
             attention_backend_));
+        if (serialize_worker_init) {
+            workers_.back()->wait_for_init();
+        }
     }
 
-    for (auto &worker : workers_) {
-        worker->wait_for_init();
+    if (!serialize_worker_init) {
+        for (auto &worker : workers_) {
+            worker->wait_for_init();
+        }
     }
     // Graphs must be compiled after weights are loaded and post-processed.
     // Quantized models may replace their linear implementations during
