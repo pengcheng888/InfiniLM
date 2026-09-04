@@ -148,36 +148,33 @@ def test(
     print("=================== start generate ====================")
 
     try:
-        outputs = model.chat(
-            messages=conversations,
-        )
+        if input_ids is not None:
+            prompt_token_ids_list = [input_ids for _ in range(len(prompts))]
+            outputs = _generate_from_input_ids(
+                model,
+                prompt_token_ids_list,
+                max_new_tokens,
+                temperature,
+                top_p,
+                top_k,
+                ignore_eos,
+            )
+        else:
+            sampling_params = SamplingParams(
+                temperature=temperature,
+                top_p=top_p,
+                top_k=top_k,
+                max_tokens=max_new_tokens,
+                ignore_eos=ignore_eos,
+            )
+            outputs = model.chat(
+                messages=conversations,
+                sampling_params=sampling_params,
+                use_tqdm=False,
+            )
+        t2 = time.time()
     finally:
         model.close()
-    if input_ids is not None:
-        prompt_token_ids_list = [input_ids for _ in range(len(prompts))]
-        outputs = _generate_from_input_ids(
-            model,
-            prompt_token_ids_list,
-            max_new_tokens,
-            temperature,
-            top_p,
-            top_k,
-            ignore_eos,
-        )
-    else:
-        sampling_params = SamplingParams(
-            temperature=temperature,
-            top_p=top_p,
-            top_k=top_k,
-            max_tokens=max_new_tokens,
-            ignore_eos=ignore_eos,
-        )
-        outputs = model.chat(
-            messages=conversations,
-            sampling_params=sampling_params,
-            use_tqdm=False,
-        )
-    t2 = time.time()
 
     for i, output in enumerate(outputs):
         print(f"Resquest {i}:")

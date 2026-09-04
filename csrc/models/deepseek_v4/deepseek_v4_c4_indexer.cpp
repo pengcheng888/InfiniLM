@@ -3,7 +3,6 @@
 #include "../../global_state/forward_context.hpp"
 #include "deepseek_v4_profile.hpp"
 #include "infinicore/ops/deepseek_v4_c4_paged_mqa_logits.hpp"
-#include "infinicore/ops/deepseek_v4_c4_paged_mqa_with_topk_transform_512.hpp"
 #include "infinicore/ops/deepseek_v4_flashmla_cache.hpp"
 #include "infinicore/ops/deepseek_v4_flashmla_compute.hpp"
 #include "infinicore/ops/deepseek_v4_fused_q_indexer_rope_hadamard_quant.hpp"

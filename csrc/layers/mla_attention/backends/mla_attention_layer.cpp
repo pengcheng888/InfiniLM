@@ -13,7 +13,7 @@ MLAAttentionLayer::MLAAttentionLayer(size_t num_heads,
                                      ::infinilm::backends::AttentionBackend attn_backend) : k_scale_(k_scale), v_scale_(v_scale), layer_idx_(layer_idx) {
     switch (attn_backend) {
     case ::infinilm::backends::AttentionBackend::FLASHMLA:
-        impl_ = std::make_shared<backends::FlashMLAImpl>(num_heads, head_size, scale, num_kv_heads, layer_idx, head_dim_v);
+        impl_ = std::make_shared<backends::FlashMLAV2Impl>(num_heads, head_size, scale, num_kv_heads, layer_idx, head_dim_v);
         break;
     default:
         throw std::runtime_error("infinilm::layers::mla_attention::MLAAttentionLayer: unsupported attention backend");

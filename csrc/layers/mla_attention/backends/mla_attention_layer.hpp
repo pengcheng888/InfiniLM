@@ -2,13 +2,13 @@
 
 #include "../../../backends/attention_backends.hpp"
 #include "../../../global_state/global_state.hpp"
-#include "flashmla.hpp"
+#include "flashmla_v2.hpp"
 #include "infinicore/tensor.hpp"
 #include <memory>
 #include <variant>
 
 namespace infinilm::layers::mla_attention {
-using MLAAttentionImpl = std::variant<std::shared_ptr<backends::FlashMLAImpl>>;
+using MLAAttentionImpl = std::variant<std::shared_ptr<backends::FlashMLAV2Impl>>;
 
 /**
  * @brief Attention layer.
