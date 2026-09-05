@@ -3,6 +3,96 @@
 #include <spdlog/spdlog.h>
 
 namespace infinilm::layers::linear {
+
+FusedReplicatedLinear::FusedReplicatedLinear(size_t hidden_size,
+                                             size_t split_size,
+                                             const std::string &first_name,
+                                             const std::string &second_name,
+                                             RegisterParamFn register_fn,
+                                             const infinicore::DataType &dtype,
+                                             const infinicore::Device &device)
+    : FusedReplicatedLinear(hidden_size,
+                            split_size,
+                            split_size,
+                            first_name,
+                            second_name,
+                            std::move(register_fn),
+                            std::make_shared<infinilm::quantization::NoneQuantization>(),
+                            false,
+                            dtype,
+                            device) {}
+
+FusedReplicatedLinear::FusedReplicatedLinear(
+    size_t hidden_size,
+    size_t first_size,
+    size_t second_size,
+    const std::string &first_name,
+    const std::string &second_name,
+    RegisterParamFn register_fn,
+    std::shared_ptr<infinilm::quantization::BaseQuantization> quantization,
+    bool bias,
+    const infinicore::DataType &dtype,
+    const infinicore::Device &device)
+    : infinilm::nn::Linear(
+          hidden_size,
+          first_size + second_size,
+          quantization ? std::move(quantization)
+                       : std::make_shared<infinilm::quantization::NoneQuantization>(),
+          bias,
+          dtype,
+          device),
+      first_size_(first_size),
+      second_size_(second_size),
+      first_name_(first_name),
+      second_name_(second_name),
+      register_fn_(std::move(register_fn)) {
+    if (!register_fn_) {
+        throw std::runtime_error("FusedReplicatedLinear requires a parameter register function");
+    }
+    register_split_params();
+}
+
+void FusedReplicatedLinear::register_split_params() {
+    const std::string key_name = parameters_.count("qweight") ? "qweight" : "weight";
+    const auto &key_param = get_parameter_ref(key_name);
+    const int fused_dim = get_quantization()->get_fused_split_dim();
+    const size_t logical_output = get_quantization()->get_logical_dim_size(
+        key_param->size(static_cast<size_t>(fused_dim)));
+    if (logical_output != first_size_ + second_size_) {
+        throw std::runtime_error("FusedReplicatedLinear split sizes do not match fused output size");
+    }
+
+    split_infos_ = {
+        {first_name_, 0, first_size_},
+        {second_name_, first_size_, second_size_},
+    };
+    auto params = get_quantization()->split_params(parameters_, split_infos_, fused_dim, 0, 1, -1);
+    for (auto &split_param : params) {
+        register_fn_(split_param.full_name, std::move(split_param.param));
+    }
+}
+
+void FusedReplicatedLinear::process_weights_after_loading() {
+    infinilm::nn::BaseLinear::process_weights_after_loading();
+    register_split_params();
+}
+
+infinicore::Tensor FusedReplicatedLinear::forward(const infinicore::Tensor &input) const {
+    if (input->ndim() != 2 || input->size(1) != in_features()) {
+        throw std::runtime_error("FusedReplicatedLinear::forward expects input [tokens, hidden_size]");
+    }
+    auto input_ref = input;
+    return infinilm::nn::Linear::forward(input_ref);
+}
+
+std::tuple<infinicore::Tensor, infinicore::Tensor>
+FusedReplicatedLinear::forward_split(const infinicore::Tensor &input) const {
+    auto output = forward(input);
+    auto first = output->narrow({{1, 0, first_size_}});
+    auto second = output->narrow({{1, first_size_, second_size_}});
+    return {first, second};
+}
+
 // ---------------------------------------------------------
 // QKV Parallel Linear
 // ---------------------------------------------------------

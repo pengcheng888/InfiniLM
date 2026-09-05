@@ -581,6 +581,22 @@ def _remap_glm4(state_dict, config=None):
     )
 
 
+def _remap_glm4_moe_lite(state_dict, config=None):
+    """Drop layers and MTP weights that are outside the configured text model."""
+    num_hidden_layers = int((config or {}).get("num_hidden_layers", 0))
+    layer_pattern = re.compile(r"^model\.layers\.(\d+)\.")
+    remapped = {}
+    for key, tensor in state_dict.items():
+        if key.startswith("mtp.") or ".mtp." in key:
+            continue
+        match = layer_pattern.match(key)
+        if match is not None and num_hidden_layers > 0:
+            if int(match.group(1)) >= num_hidden_layers:
+                continue
+        remapped[key] = tensor
+    return remapped
+
+
 def _remap_chatglm(state_dict, config=None):
     """Remap ChatGLM weights to InfiniLM format.
 
@@ -1073,6 +1089,7 @@ def _remap_kimi_k3(state_dict, config):
 
 _WEIGHT_REMAPPER = {
     "glm4": _remap_glm4,
+    "glm4_moe_lite": _remap_glm4_moe_lite,
     "chatglm": _remap_chatglm,
     "baichuan": _remap_baichuan,
     "gpt2": _remap_gpt2,

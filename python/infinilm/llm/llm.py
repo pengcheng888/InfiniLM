@@ -34,6 +34,8 @@ from infinilm.multimodal.multimodal import resolve_multimodal_inputs
 
 logger = logging.getLogger(__name__)
 
+_PREFIX_CACHING_UNSUPPORTED_MODELS = {"glm4_moe_lite"}
+
 
 class LLMEngine:
     """Low-level LLM engine that handles inference execution."""
@@ -41,6 +43,16 @@ class LLMEngine:
     def __init__(self, config: EngineConfig):
         self.config = config
         hf_config = read_hf_config(config.model_path)
+        model_type = hf_config.get("model_type")
+        if (
+            model_type in _PREFIX_CACHING_UNSUPPORTED_MODELS
+            and config.enable_prefix_caching
+        ):
+            logger.warning(
+                "Prefix caching is temporarily disabled for model %r.", model_type
+            )
+            config.enable_prefix_caching = False
+
         has_mamba_cache = model_uses_mamba_cache(hf_config)
         if has_mamba_cache and config.enable_prefix_caching:
             model_type = hf_config["model_type"]
