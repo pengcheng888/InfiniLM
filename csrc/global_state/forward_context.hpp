@@ -2,6 +2,13 @@
 
 #include "../models/infinilm_model.hpp"
 
+#include "infinicore/ops/flash_mla/flash_mla_sched_meta/flash_mla_sched_meta.hpp"
+
+#include <cstddef>
+#include <optional>
+#include <utility>
+#include <vector>
+
 namespace infinilm::global_state {
 
 struct AttentionMetadata {
@@ -63,10 +70,67 @@ struct MambaMetadata {
     std::optional<infinicore::Tensor> final_state_indices;
 };
 
+struct SchedMeta {
+    using FlashMLASchedMeta = infinicore::op::flash_mla::FlashMLASchedMeta;
+
+    std::vector<FlashMLASchedMeta> sched_meta_vec;
+
+    void clear() {
+        sched_meta_vec.clear();
+    }
+
+    void resize_flash_mla_sched_meta(size_t size) {
+        sched_meta_vec.assign(size, FlashMLASchedMeta());
+    }
+
+    void clear_flash_mla_sched_meta() {
+        for (auto &sched_meta : sched_meta_vec) {
+            sched_meta = FlashMLASchedMeta();
+        }
+    }
+
+    void reset_flash_mla_sched_meta() {
+        for (auto &sched_meta : sched_meta_vec) {
+            sched_meta.reset_sched_meta();
+        }
+    }
+
+    SchedMeta allocate_flash_mla_sched_meta_buffers() const {
+        if (sched_meta_vec.empty()) {
+            return {};
+        }
+
+        SchedMeta sched_buffers;
+        sched_buffers.sched_meta_vec.reserve(sched_meta_vec.size());
+        for (const auto &sched_meta : sched_meta_vec) {
+            if (!sched_meta.has_sched_buffer()) {
+                return {};
+            }
+
+            FlashMLASchedMeta sched_buffer;
+            sched_buffer.tile_scheduler_metadata = infinicore::Tensor::empty(
+                sched_meta.tile_scheduler_metadata->shape(),
+                sched_meta.tile_scheduler_metadata->dtype(),
+                sched_meta.tile_scheduler_metadata->device());
+            sched_buffer.num_splits = infinicore::Tensor::empty(
+                sched_meta.num_splits->shape(),
+                sched_meta.num_splits->dtype(),
+                sched_meta.num_splits->device());
+            sched_buffers.sched_meta_vec.push_back(std::move(sched_buffer));
+        }
+
+        return sched_buffers;
+    }
+};
+
 struct ForwardContext {
     AttentionMetadata attn_metadata;
     MambaMetadata mamba_metadata;
     MultiModalMetadata mm_metadata;
+
+    // Note: 缓存每次step时的flash mla算子的sched_meta
+    SchedMeta sched_meta;
+
     std::vector<infinicore::Tensor> kv_cache_vec;
     std::vector<infinicore::Tensor> conv_state_vec;
     std::vector<infinicore::Tensor> ssm_state_vec;

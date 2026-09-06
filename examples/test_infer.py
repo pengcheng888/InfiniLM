@@ -4,6 +4,7 @@ import time
 
 from infinilm.base_config import BaseConfig
 from infinilm.llm.llm import LLM
+from infinilm.llm.sampling_params import SamplingParams
 from infinilm.moe_config import configure_moe_ep_backend
 from infinilm.processors.videonsa_processor import decode_video_frames
 
@@ -41,6 +42,7 @@ def test(
     use_legacy_moe=False,
     enable_prefix_caching=True,
     pre_transpose=False,
+    warmup=False,
 ):
     model_path = os.path.expanduser(model_path)
     # ---------------------------------------------------------------------------- #
@@ -97,10 +99,26 @@ def test(
                 {"type": "image_url", "image_url": {"url": image_path}}
             ] + conversation[0]["content"]
 
-    t1 = time.time()
-    print("=================== start generate ====================")
-
     try:
+        if warmup:
+            warmup_max_tokens = 4 if max_new_tokens > 1 else 1
+            warmup_sampling_params = SamplingParams(
+                temperature=temperature,
+                top_p=top_p,
+                top_k=top_k,
+                max_tokens=warmup_max_tokens,
+            )
+            print("=================== warmup start ====================")
+            model.chat(
+                messages=conversations[:1],
+                sampling_params=warmup_sampling_params,
+                use_tqdm=False,
+            )
+            print("=================== warmup done ====================")
+
+        t1 = time.time()
+        print("=================== start generate ====================")
+
         outputs = model.chat(
             messages=conversations,
         )
@@ -185,4 +203,5 @@ if __name__ == "__main__":
         use_legacy_moe=cfg.use_legacy_moe,
         enable_prefix_caching=cfg.enable_prefix_caching,
         pre_transpose=cfg.pre_transpose,
+        warmup=cfg.warmup,
     )

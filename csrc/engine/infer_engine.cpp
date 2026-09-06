@@ -265,6 +265,8 @@ InferEngine::Input::to_model_input(infinicore::Device device) const {
         image_req_ids,
         visual_token_ranges};
 
+    global_state::get_forward_context().sched_meta.reset_flash_mla_sched_meta();
+
     return input;
 }
 

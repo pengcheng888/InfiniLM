@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 namespace infinilm::engine {
@@ -141,9 +142,9 @@ void PagedCompiler::compile() {
             };
             return input;
         };
-
         {
             const size_t warmup_batch_size = std::min(max_batch_size, static_cast<size_t>(64));
+            forward_context.sched_meta.clear_flash_mla_sched_meta();
             auto input = make_decode_input(warmup_batch_size);
             model_->forward(input);
             infinicore::context::syncStream();
@@ -155,11 +156,16 @@ void PagedCompiler::compile() {
         }
 
         for (size_t b : decode_batch_sizes_) {
+            forward_context.sched_meta.clear_flash_mla_sched_meta();
             auto input = make_decode_input(b);
 
             barrier_->wait();
             (void)model_->forward(input);
             infinicore::context::syncStream();
+            auto sched_meta = forward_context.sched_meta.allocate_flash_mla_sched_meta_buffers();
+            if (!sched_meta.sched_meta_vec.empty()) {
+                forward_context.sched_meta = sched_meta;
+            }
             // Capture must not start with stale Marlin locks from previous
             // warmup/capture attempts. This reset is intentionally outside
             // graph capture; the current implementation still pays a memset
@@ -174,7 +180,9 @@ void PagedCompiler::compile() {
             auto shared_output = std::shared_ptr<InfinilmModel::Output>(
                 new InfinilmModel::Output{infinicore::graph::GraphTensor(output.logits)});
 
-            compiled_map_decode_[b] = CompiledResult{std::move(input), std::make_tuple(graph, shared_output)};
+            compiled_map_decode_[b] = CompiledResult{std::move(input),
+                                                     std::move(sched_meta),
+                                                     std::make_tuple(graph, shared_output)};
         }
     }
 }
@@ -224,6 +232,11 @@ PagedCompiler::Compiled PagedCompiler::get_compiled(const InfinilmModel::Input &
                     input.mamba_init_state_indices.value());
                 graph_input.mamba_final_state_indices.value()->copy_from(
                     input.mamba_final_state_indices.value());
+            }
+
+            if (!result->second.sched_meta.sched_meta_vec.empty()) {
+                infinilm::global_state::get_forward_context().sched_meta
+                    = result->second.sched_meta;
             }
             // CUDA graph replay reuses the same per-layer Marlin workspaces.
             // The graph itself does not contain a workspace reset, so enqueue

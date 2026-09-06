@@ -2,7 +2,10 @@
 
 #include "graph_compiler.hpp"
 
+#include "../../global_state/forward_context.hpp"
+
 #include <unordered_map>
+#include <vector>
 
 namespace infinilm::engine {
 class PagedCompiler : public GraphCompiler {
@@ -20,6 +23,7 @@ private:
 
     struct CompiledResult {
         InfinilmModel::Input input;
+        infinilm::global_state::SchedMeta sched_meta;
         Compiled compiled;
     };
 
