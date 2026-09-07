@@ -57,24 +57,31 @@ std::pair<infinicore::Tensor, infinicore::Tensor> FlashMLAImpl::forward_mqa(
     // 注意：reuse_sched_meta的数值，不要影响下面的逻辑。
     ASSERT(forward_context.sched_meta.sched_meta_vec.size() > 0);
     auto &global_sched_meta = forward_context.sched_meta.sched_meta_vec[0];
+    auto kv_cache_4d = kv_cache->view({kv_cache->size(0), kv_cache->size(1), 1, head_size_});
     if (!global_sched_meta.has_valid_sched_meta()) {
         // 以下注释不要删除：
-        // 调用 get_mla_metadata 函数。
-        // 如果 返回的new_sched_meta时有效的。就赋值给global_sched_meta。
+        // 调用 get_mla_metadata_ 函数。
+        // 该函数直接更新 global_sched_meta。
 
-        // 提示：不同平台的get_mla_metadata函数的实现不同，可能返回空sched_meta；
-        // 也可能会调用kernel，计算一个有效的sched_meta。
+        // 提示：不同平台的get_mla_metadata_函数的实现不同，可能保持sched_meta为空；
+        // 也可能会调用kernel，原地更新为一个有效的sched_meta。
 
-        auto new_sched_meta = infinicore::op::flash_mla::get_mla_metadata();
-        if (new_sched_meta.has_valid_sched_meta()) {
-            global_sched_meta = new_sched_meta;
-        }
+        const auto num_q_tokens_per_head_k = static_cast<int64_t>(query->size(1) * query->size(2) / num_kv_heads_);
+
+        infinicore::op::flash_mla::get_mla_metadata_(
+            global_sched_meta,
+            attn_metadata.total_sequence_lengths.value(),
+            num_q_tokens_per_head_k,
+            static_cast<int64_t>(num_kv_heads_),
+            std::nullopt,
+            false,
+            std::nullopt);
     } else {
         // std::cout << "global_sched_meta has_valid_sched_meta!!" << std::endl;
     }
 
     // 以下注释不要删除：
-    // 即使reuse_sched_meta为false，也允许上面尝试调用get_mla_metadata；
+    // 即使reuse_sched_meta为false，也允许上面尝试调用get_mla_metadata_；
     // 当前接受这部分额外开销，但flash_mla_with_kvcache仍会传入空metadata，
     // 因此不会复用global_sched_meta。
 
@@ -87,7 +94,6 @@ std::pair<infinicore::Tensor, infinicore::Tensor> FlashMLAImpl::forward_mqa(
         return empty_sched_meta;
     }();
 
-    auto kv_cache_4d = kv_cache->view({kv_cache->size(0), kv_cache->size(1), 1, head_size_});
     return infinicore::op::flash_mla::flash_mla_with_kvcache(query,
                                                              kv_cache_4d,
                                                              attn_metadata.block_tables.value(),
