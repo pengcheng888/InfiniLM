@@ -151,6 +151,9 @@ inline void bind_infer_engine(py::module &m) {
                          std::optional<infinicore::Tensor> cu_seqlens,
                          std::optional<infinicore::Tensor> block_tables,
                          std::optional<infinicore::Tensor> slot_mapping,
+                         std::optional<infinicore::Tensor> swa_indices,
+                         std::optional<infinicore::Tensor> swa_topk_lengths,
+                         std::optional<infinicore::Tensor> raw_out_loc,
                          std::optional<infinicore::Tensor> mamba_init_state_indices,
                          std::optional<infinicore::Tensor> mamba_final_state_indices,
                          std::optional<std::vector<infinicore::Tensor>> pixel_values,
@@ -171,6 +174,9 @@ inline void bind_infer_engine(py::module &m) {
                     std::move(cu_seqlens),
                     std::move(block_tables),
                     std::move(slot_mapping),
+                    std::move(swa_indices),
+                    std::move(swa_topk_lengths),
+                    std::move(raw_out_loc),
                     std::move(mamba_init_state_indices),
                     std::move(mamba_final_state_indices),
                     std::move(pixel_values),
@@ -222,6 +228,9 @@ inline void bind_infer_engine(py::module &m) {
             py::arg("cu_seqlens") = std::nullopt,
             py::arg("block_tables") = std::nullopt,
             py::arg("slot_mapping") = std::nullopt,
+            py::arg("swa_indices") = std::nullopt,
+            py::arg("swa_topk_lengths") = std::nullopt,
+            py::arg("raw_out_loc") = std::nullopt,
             py::arg("mamba_init_state_indices") = std::nullopt,
             py::arg("mamba_final_state_indices") = std::nullopt,
             py::arg("pixel_values") = std::nullopt,
@@ -240,6 +249,9 @@ inline void bind_infer_engine(py::module &m) {
         .def_readwrite("cu_seqlens", &InferEngine::Input::cu_seqlens)
         .def_readwrite("block_tables", &InferEngine::Input::block_tables)
         .def_readwrite("slot_mapping", &InferEngine::Input::slot_mapping)
+        .def_readwrite("swa_indices", &InferEngine::Input::swa_indices)
+        .def_readwrite("swa_topk_lengths", &InferEngine::Input::swa_topk_lengths)
+        .def_readwrite("raw_out_loc", &InferEngine::Input::raw_out_loc)
         .def_readwrite("mamba_init_state_indices", &InferEngine::Input::mamba_init_state_indices)
         .def_readwrite("mamba_final_state_indices", &InferEngine::Input::mamba_final_state_indices)
         .def_readwrite("pixel_values", &InferEngine::Input::pixel_values)

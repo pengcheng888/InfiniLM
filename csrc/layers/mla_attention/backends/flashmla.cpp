@@ -2,9 +2,8 @@
 
 #include "../../../global_state/global_state.hpp"
 #include "../../../utils.hpp"
+#include "../flashmla.hpp"
 
-#include "infinicore/ops/concat_and_cache_mla.hpp"
-#include "infinicore/ops/flash_mla/flash_mla_with_kvcache.hpp"
 #include "infinicore/ops/flash_mla/get_mla_metadata.hpp"
 
 #include <optional>
@@ -12,12 +11,12 @@
 
 namespace infinilm::layers::mla_attention::backends {
 
-FlashMLAImpl::FlashMLAImpl(size_t num_heads,
-                           size_t head_size,
-                           float scale,
-                           size_t num_kv_heads,
-                           size_t layer_idx,
-                           size_t head_dim_v)
+DenseFlashMLAImpl::DenseFlashMLAImpl(size_t num_heads,
+                                     size_t head_size,
+                                     float scale,
+                                     size_t num_kv_heads,
+                                     size_t layer_idx,
+                                     size_t head_dim_v)
     : num_heads_(num_heads),
       head_size_(head_size),
       scale_(scale),
@@ -25,33 +24,26 @@ FlashMLAImpl::FlashMLAImpl(size_t num_heads,
       layer_idx_(layer_idx),
       head_dim_v_(head_dim_v) {}
 
-std::pair<infinicore::Tensor, infinicore::Tensor> FlashMLAImpl::forward_mqa(
-    const infinicore::Tensor &query,
-    const infinicore::Tensor &kv_c,
-    const infinicore::Tensor &k_pe) const {
+std::pair<infinicore::Tensor, infinicore::Tensor> DenseFlashMLAImpl::forward_mqa(
+    const infinicore::Tensor &query) const {
     auto &forward_context = infinilm::global_state::get_forward_context();
     auto &attn_metadata = forward_context.attn_metadata;
     if (forward_context.kv_cache_vec.size() <= layer_idx_ || !forward_context.kv_cache_vec[layer_idx_]) {
-        throw std::runtime_error("FlashMLAImpl::forward_mqa requires MLA KV cache allocation");
+        throw std::runtime_error("DenseFlashMLAImpl::forward_mqa requires MLA KV cache allocation");
     }
-    if (!attn_metadata.total_sequence_lengths || !attn_metadata.block_tables || !attn_metadata.slot_mapping) {
-        throw std::runtime_error("FlashMLAImpl::forward_mqa requires paged attention metadata");
+    if (!attn_metadata.total_sequence_lengths || !attn_metadata.block_tables) {
+        throw std::runtime_error("DenseFlashMLAImpl::forward_mqa requires paged attention metadata");
     }
     if (!query || query->ndim() != 4 || query->size(1) != 1 || query->size(2) != num_heads_ || query->size(3) != head_size_) {
-        throw std::runtime_error("FlashMLAImpl::forward_mqa expects decode query [batch, 1, heads, head_size]");
+        throw std::runtime_error("DenseFlashMLAImpl::forward_mqa expects decode query [batch, 1, heads, head_size]");
     }
     if (num_kv_heads_ != 1) {
-        throw std::runtime_error("FlashMLAImpl::forward_mqa currently supports one MLA KV head");
+        throw std::runtime_error("DenseFlashMLAImpl::forward_mqa currently supports one MLA KV head");
     }
 
     auto &kv_cache = forward_context.kv_cache_vec[layer_idx_];
-    do_kv_cache_update(kv_c,
-                       k_pe,
-                       kv_cache,
-                       attn_metadata.slot_mapping.value());
-
     if (kv_cache->ndim() != 3 || kv_cache->size(1) != 64 || kv_cache->size(2) != head_size_) {
-        throw std::runtime_error("FlashMLAImpl::forward_mqa expects KV cache [blocks, 64, head_size]");
+        throw std::runtime_error("DenseFlashMLAImpl::forward_mqa expects KV cache [blocks, 64, head_size]");
     }
 
     // 注意：reuse_sched_meta的数值，不要影响下面的逻辑。
@@ -69,8 +61,6 @@ std::pair<infinicore::Tensor, infinicore::Tensor> FlashMLAImpl::forward_mqa(
         if (new_sched_meta.has_valid_sched_meta()) {
             global_sched_meta = new_sched_meta;
         }
-    } else {
-        // std::cout << "global_sched_meta has_valid_sched_meta!!" << std::endl;
     }
 
     // 以下注释不要删除：
@@ -88,42 +78,69 @@ std::pair<infinicore::Tensor, infinicore::Tensor> FlashMLAImpl::forward_mqa(
     }();
 
     auto kv_cache_4d = kv_cache->view({kv_cache->size(0), kv_cache->size(1), 1, head_size_});
-    return infinicore::op::flash_mla::flash_mla_with_kvcache(query,
-                                                             kv_cache_4d,
-                                                             attn_metadata.block_tables.value(),
-                                                             attn_metadata.total_sequence_lengths.value(),
-                                                             static_cast<int64_t>(head_dim_v_),
-                                                             current_sched_meta,
-                                                             std::nullopt,
-                                                             static_cast<double>(scale_),
-                                                             false,
-                                                             false);
+    return infinilm::layers::mla_attention::compute_dense_flash_mla(
+        query,
+        kv_cache_4d,
+        attn_metadata.block_tables.value(),
+        attn_metadata.total_sequence_lengths.value(),
+        head_dim_v_,
+        current_sched_meta,
+        scale_);
 }
 
-void FlashMLAImpl::do_kv_cache_update(const infinicore::Tensor &kv_c,
-                                      const infinicore::Tensor &k_pe) const {
+SparseFlashMLAImpl::SparseFlashMLAImpl(size_t num_heads,
+                                       size_t head_size,
+                                       float scale,
+                                       size_t num_kv_heads,
+                                       size_t head_dim_v)
+    : num_heads_(num_heads),
+      head_size_(head_size),
+      scale_(scale),
+      num_kv_heads_(num_kv_heads),
+      head_dim_v_(head_dim_v) {}
 
-    auto &forward_context = infinilm::global_state::get_forward_context();
-    if (forward_context.kv_cache_vec.size() <= layer_idx_
-        || !forward_context.kv_cache_vec[layer_idx_]
-        || !forward_context.attn_metadata.slot_mapping) {
-        throw std::runtime_error("FlashMLAImpl::do_kv_cache_update requires cache and slot mapping");
+std::pair<infinicore::Tensor, infinicore::Tensor> SparseFlashMLAImpl::forward_mqa(
+    const infinicore::Tensor &query,
+    const infinicore::Tensor &kv_cache,
+    const infinicore::Tensor &indices,
+    const infinicore::Tensor &attn_sink,
+    const infinicore::Tensor &topk_lengths,
+    infinicore::op::flash_mla::FlashMLASchedMeta &sched_meta) const {
+    if (!query || query->ndim() != 4 || query->size(1) != 1
+        || query->size(2) != num_heads_ || query->size(3) != head_size_) {
+        throw std::runtime_error("SparseFlashMLAImpl::forward_mqa expects query [tokens, 1, heads, head_size]");
     }
-    auto &kv_cache = forward_context.kv_cache_vec[layer_idx_];
-    do_kv_cache_update(kv_c,
-                       k_pe,
-                       kv_cache,
-                       forward_context.attn_metadata.slot_mapping.value());
-}
+    if (num_kv_heads_ != 1) {
+        throw std::runtime_error("SparseFlashMLAImpl::forward_mqa currently supports one MLA KV head");
+    }
+    if (!kv_cache || kv_cache->ndim() != 4 || kv_cache->size(2) != num_kv_heads_
+        || kv_cache->dtype() != infinicore::DataType::F8) {
+        throw std::runtime_error("SparseFlashMLAImpl::forward_mqa expects FP8 KV cache [blocks, page_size, 1, cache_dim]");
+    }
+    if (!indices || indices->ndim() != 3 || indices->dtype() != infinicore::DataType::I32
+        || indices->size(0) != query->size(0) || indices->size(1) != query->size(1)) {
+        throw std::runtime_error("SparseFlashMLAImpl::forward_mqa expects indices [tokens, 1, topk]");
+    }
+    if (!topk_lengths || topk_lengths->ndim() != 1
+        || topk_lengths->dtype() != infinicore::DataType::I32
+        || topk_lengths->size(0) != query->size(0) * query->size(1)) {
+        throw std::runtime_error("SparseFlashMLAImpl::forward_mqa expects topk_lengths [tokens]");
+    }
+    if (!attn_sink || attn_sink->ndim() != 1
+        || attn_sink->dtype() != infinicore::DataType::F32
+        || attn_sink->size(0) != num_heads_) {
+        throw std::runtime_error("SparseFlashMLAImpl::forward_mqa expects FP32 attn_sink [heads]");
+    }
 
-void FlashMLAImpl::do_kv_cache_update(const infinicore::Tensor &kv_c,
-                                      const infinicore::Tensor &k_pe,
-                                      infinicore::Tensor &kv_cache,
-                                      const infinicore::Tensor &slot_mapping) const {
-
-    auto cache_scale = infinicore::Tensor::ones({1}, infinicore::DataType::F32, kv_cache->device());
-
-    infinicore::op::concat_and_cache_mla_(kv_c, k_pe, kv_cache, slot_mapping, "auto", cache_scale);
+    return infinilm::layers::mla_attention::compute_sparse_flash_mla(
+        query,
+        kv_cache,
+        indices,
+        attn_sink,
+        topk_lengths,
+        head_dim_v_,
+        sched_meta,
+        scale_);
 }
 
 } // namespace infinilm::layers::mla_attention::backends

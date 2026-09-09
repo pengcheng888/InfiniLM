@@ -5,6 +5,7 @@
 #include "infinicore/ops/baddbmm.hpp"
 #include "infinicore/ops/broadcast_to.hpp"
 #include "infinicore/ops/cat.hpp"
+#include "infinicore/ops/concat_and_cache_mla.hpp"
 #include "infinicore/ops/mha_varlen.hpp"
 
 #include <cmath>
@@ -92,7 +93,7 @@ Glm4MoeLiteAttention::Glm4MoeLiteAttention(
         tp_size_,
         rank_info.comm);
 
-    mla_attn_ = std::make_shared<infinilm::layers::mla_attention::backends::FlashMLAImpl>(
+    mla_attn_ = std::make_shared<infinilm::layers::mla_attention::backends::DenseFlashMLAImpl>(
         num_local_attention_heads_,
         latent_dim,
         static_cast<float>(softmax_scale_),
@@ -111,6 +112,26 @@ Glm4MoeLiteAttention::Glm4MoeLiteAttention(
         infinicore::nn::RoPE::Algo::GPT_J,
         dtype,
         device);
+}
+
+void Glm4MoeLiteAttention::do_kv_cache_update(const infinicore::Tensor &kv_c,
+                                              const infinicore::Tensor &k_pe) const {
+    auto &forward_context = infinilm::global_state::get_forward_context();
+    if (forward_context.kv_cache_vec.size() <= layer_idx_
+        || !forward_context.kv_cache_vec[layer_idx_]
+        || !forward_context.attn_metadata.slot_mapping) {
+        throw std::runtime_error("Glm4MoeLiteAttention::do_kv_cache_update requires cache and slot mapping");
+    }
+
+    auto &kv_cache = forward_context.kv_cache_vec[layer_idx_];
+    auto cache_scale = infinicore::Tensor::ones({1}, infinicore::DataType::F32, kv_cache->device());
+    infinicore::op::concat_and_cache_mla_(
+        kv_c,
+        k_pe,
+        kv_cache,
+        forward_context.attn_metadata.slot_mapping.value(),
+        "auto",
+        cache_scale);
 }
 
 void Glm4MoeLiteAttention::apply_rope_(const infinicore::Tensor &positions,
@@ -132,7 +153,7 @@ infinicore::Tensor Glm4MoeLiteAttention::forward_mha(
         throw std::runtime_error("Glm4MoeLiteAttention::forward_mha requires input_offsets");
     }
 
-    mla_attn_->do_kv_cache_update(kv_c, k_pe);
+    do_kv_cache_update(kv_c, k_pe);
 
     auto kv_c_by_head = infinicore::op::broadcast_to(kv_c->view({1, tokens, kv_lora_rank_}),
                                                      {static_cast<int64_t>(num_local_attention_heads_),
@@ -193,7 +214,7 @@ infinicore::Tensor Glm4MoeLiteAttention::forward_mha_v2(
         throw std::runtime_error("Glm4MoeLiteAttention::forward_mha requires input_offsets");
     }
 
-    mla_attn_->do_kv_cache_update(kv_c, k_pe);
+    do_kv_cache_update(kv_c, k_pe);
 
     auto kv_c_mut = kv_c;
     auto kv = kv_b_proj_->forward(kv_c_mut)->view({tokens, num_local_attention_heads_, qk_nope_head_dim_ + v_head_dim_});
@@ -282,7 +303,8 @@ infinicore::Tensor Glm4MoeLiteAttention::forward(const infinicore::Tensor &posit
     auto q_flash = infinicore::op::cat({q_nope_out, q_pe}, 2)
                        ->view({tokens, 1, num_local_attention_heads_, latent_dim});
 
-    auto [attn_latent_4d, _] = mla_attn_->forward_mqa(q_flash, kv_c, k_pe);
+    do_kv_cache_update(kv_c, k_pe);
+    auto [attn_latent_4d, _] = mla_attn_->forward_mqa(q_flash);
 
     auto attn_by_head = attn_latent_4d->view({tokens, num_local_attention_heads_, kv_lora_rank_})
                             ->permute({1, 0, 2})
