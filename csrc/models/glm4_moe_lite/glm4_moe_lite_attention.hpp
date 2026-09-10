@@ -3,7 +3,7 @@
 #include "../../config/model_config.hpp"
 #include "../../layers/linear/fused_linear.hpp"
 #include "../../layers/linear/linear.hpp"
-#include "../../layers/mla_attention/backends/flashmla.hpp"
+#include "../../layers/mla_attention/flashmla.hpp"
 #include "infinicore/nn/module.hpp"
 #include "infinicore/nn/rmsnorm.hpp"
 #include "infinicore/nn/rope.hpp"
@@ -26,6 +26,9 @@ public:
     void reset_runtime_state() const override;
 
 private:
+    void do_kv_cache_update(const infinicore::Tensor &kv_c,
+                            const infinicore::Tensor &k_pe) const;
+
     void apply_rope_(const infinicore::Tensor &positions,
                      infinicore::Tensor query,
                      infinicore::Tensor key) const;
@@ -62,7 +65,7 @@ private:
     std::shared_ptr<infinilm::layers::linear::ColumnParallelLinear> q_b_proj_;
     std::shared_ptr<infinilm::layers::linear::ColumnParallelLinear> kv_b_proj_;
     std::shared_ptr<infinilm::layers::linear::RowParallelLinear> o_proj_;
-    std::shared_ptr<infinilm::layers::mla_attention::backends::FlashMLAImpl> mla_attn_;
+    std::shared_ptr<infinilm::layers::mla_attention::DenseFlashMLAImpl> mla_attn_;
     std::shared_ptr<infinicore::nn::RoPE> rotary_emb_;
     INFINICORE_NN_MODULE(infinicore::nn::RMSNorm, q_a_layernorm);
     INFINICORE_NN_MODULE(infinicore::nn::RMSNorm, kv_a_layernorm);

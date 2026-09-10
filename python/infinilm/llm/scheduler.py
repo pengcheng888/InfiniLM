@@ -44,12 +44,14 @@ class SchedulerOutput:
         scheduled_requests: List[InferenceRequest],
         is_prefill: bool = False,
         speculative_cache_ops: Optional[SpeculativeCacheOps] = None,
+        dsv4_swa_block_size: Optional[int] = None,
     ):
         self.scheduled_requests = scheduled_requests
         self.num_requests = len(scheduled_requests)
         self.is_prefill = is_prefill
         self.speculative_cache_ops = speculative_cache_ops
         self.kv_connector_metadata = None
+        self.dsv4_swa_block_size = dsv4_swa_block_size
 
 
 class Scheduler:
@@ -299,6 +301,7 @@ class Scheduler:
                 scheduled_requests=scheduled_requests,
                 is_prefill=is_prefill,
                 speculative_cache_ops=self.speculative_cache_ops,
+                dsv4_swa_block_size=self.block_size,
             )
             if self.connector is not None:
                 meta = self.connector.build_connector_meta()
@@ -358,6 +361,7 @@ class Scheduler:
                 scheduled_requests=scheduled_requests,
                 is_prefill=is_prefill,
                 speculative_cache_ops=self.speculative_cache_ops,
+                dsv4_swa_block_size=self.block_size,
             )
 
             if self.connector is not None:
@@ -369,6 +373,7 @@ class Scheduler:
             scheduler_output = SchedulerOutput(
                 scheduled_requests=[],
                 speculative_cache_ops=self.speculative_cache_ops,
+                dsv4_swa_block_size=self.block_size,
             )
             meta = self.connector.build_connector_meta()
             scheduler_output.kv_connector_metadata = meta

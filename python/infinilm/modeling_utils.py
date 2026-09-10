@@ -62,7 +62,9 @@ def _is_internal_moe_packed_weight(key: str) -> bool:
     # are expected missing keys during non-strict checkpoint loading.
     return (
         key.endswith(".mlp.experts.w13_weight")
+        or key.endswith(".mlp.experts.w13_weight_scale")
         or key.endswith(".mlp.experts.w2_weight")
+        or key.endswith(".mlp.experts.w2_weight_scale")
         or key.endswith(".mlp.experts.w1")
         or key.endswith(".mlp.experts.w2")
     )
@@ -204,6 +206,23 @@ def load_model_state_dict_by_file(
     preserve_fp32_suffixes = (".e_score_correction_bias",)
     if model_type == "kimi_k3":
         preserve_fp32_suffixes += (".A_log", ".dt_bias")
+    if model_type == "deepseek_v4":
+        preserve_fp32_suffixes += (
+            ".scale",
+            ".weight_scale",
+            ".attn_sink",
+            ".hc_attn_fn",
+            ".hc_ffn_fn",
+            ".hc_attn_base",
+            ".hc_ffn_base",
+            ".hc_attn_scale",
+            ".hc_ffn_scale",
+            ".ffn.gate.bias",
+            ".mlp.gate.bias",
+            "hc_head_fn",
+            "hc_head_base",
+            "hc_head_scale",
+        )
 
     torch_device = "cpu"
     torch_dtype = infinicore.utils.to_torch_dtype(dtype)
@@ -594,6 +613,44 @@ def _remap_glm4_moe_lite(state_dict, config=None):
             if int(match.group(1)) >= num_hidden_layers:
                 continue
         remapped[key] = tensor
+    return remapped
+
+
+def _remap_deepseek_v4(state_dict, config=None):
+    """Adapt Hygon DeepSeek-V4 checkpoint names to this simplified InfiniLM tree."""
+    remapped = {}
+    for key, tensor in state_dict.items():
+        if key.startswith("mtp.") or ".mtp." in key:
+            continue
+        if (
+            ".compressor." in key
+            or ".indexer." in key
+        ):
+            continue
+
+        if key == "embed.weight":
+            new_key = "model.embed_tokens.weight"
+        elif key == "head.weight":
+            new_key = "lm_head.weight"
+        elif key == "norm.weight":
+            new_key = "model.norm.weight"
+        elif key.startswith("hc_head_"):
+            new_key = "model." + key
+        elif key.startswith("layers."):
+            new_key = "model." + key
+        else:
+            new_key = key
+
+        new_key = new_key.replace(".attn.", ".self_attn.")
+        new_key = new_key.replace(".attn_norm.", ".input_layernorm.")
+        new_key = new_key.replace(".ffn_norm.", ".post_attention_layernorm.")
+        new_key = new_key.replace(".ffn.", ".mlp.")
+
+        if new_key.endswith(".scale"):
+            new_key = new_key.removesuffix(".scale") + ".weight_scale"
+        if new_key.endswith(".weight_scale") and tensor.is_floating_point():
+            tensor = tensor.to(dtype=torch.float32)
+        remapped[new_key] = tensor
     return remapped
 
 
@@ -1090,6 +1147,7 @@ def _remap_kimi_k3(state_dict, config):
 _WEIGHT_REMAPPER = {
     "glm4": _remap_glm4,
     "glm4_moe_lite": _remap_glm4_moe_lite,
+    "deepseek_v4": _remap_deepseek_v4,
     "chatglm": _remap_chatglm,
     "baichuan": _remap_baichuan,
     "gpt2": _remap_gpt2,

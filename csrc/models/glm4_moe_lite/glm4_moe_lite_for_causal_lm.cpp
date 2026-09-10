@@ -3,6 +3,7 @@
 #include "../../backends/attention_backends.hpp"
 #include "../../cache/kv_cache.hpp"
 #include "../../global_state/global_state.hpp"
+#include "../../layers/mla_attention/flashmla.hpp"
 #include "../models_registry.hpp"
 
 #include "infinicore/context/context.hpp"
@@ -49,8 +50,9 @@ void Glm4MoeLiteForCausalLM::reset_cache(const cache::CacheConfig *cache_config)
 
     kv_cache_vec.resize(num_hidden_layers);
     for (size_t layer_idx = local_layer_begin; layer_idx < local_layer_end; ++layer_idx) {
-        kv_cache_vec[layer_idx] = infinicore::Tensor::empty(
-            {paged_config->num_blocks(), paged_config->block_size(), latent_dim},
+        kv_cache_vec[layer_idx] = infinilm::layers::mla_attention::DenseFlashMLAImpl::create_layer_kv_cache(
+            *paged_config,
+            latent_dim,
             dtype,
             device_);
     }

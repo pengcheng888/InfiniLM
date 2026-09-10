@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <optional>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 
@@ -70,11 +71,42 @@ struct MambaMetadata {
     std::optional<infinicore::Tensor> final_state_indices;
 };
 
+struct SWAAttnMetadata {
+    infinicore::Tensor swa_indices;
+    infinicore::Tensor swa_topk_lengths;
+    infinicore::Tensor raw_out_loc;
+
+    SWAAttnMetadata() = default;
+
+    explicit SWAAttnMetadata(const infinilm::InfinilmModel::Input &input)
+        : swa_indices(input.swa_indices.value_or(infinicore::Tensor())),
+          swa_topk_lengths(input.swa_topk_lengths.value_or(infinicore::Tensor())),
+          raw_out_loc(input.raw_out_loc.value_or(infinicore::Tensor())) {
+        (void)has_metadata();
+    }
+
+    [[nodiscard]] bool has_metadata() const {
+        const bool has_indices = static_cast<bool>(swa_indices);
+        const bool has_lengths = static_cast<bool>(swa_topk_lengths);
+        const bool has_raw_out_loc = static_cast<bool>(raw_out_loc);
+
+        if (has_indices && has_lengths && has_raw_out_loc) {
+            return true;
+        }
+        if (!has_indices && !has_lengths && !has_raw_out_loc) {
+            return false;
+        }
+
+        throw std::runtime_error("SWAAttnMetadata requires swa_indices, swa_topk_lengths, and raw_out_loc to be either all present or all absent");
+    }
+};
+
 struct SchedMeta {
     using FlashMLASchedMeta = infinicore::op::flash_mla::FlashMLASchedMeta;
 
     std::vector<FlashMLASchedMeta> sched_meta_vec;
 
+    // Drop every FlashMLA metadata slot, including any captured graph buffers.
     void clear() {
         sched_meta_vec.clear();
     }
@@ -83,18 +115,26 @@ struct SchedMeta {
         sched_meta_vec.assign(size, FlashMLASchedMeta());
     }
 
+    // Recreate empty metadata entries while keeping the vector size unchanged.
+    // This intentionally releases scheduler buffers and is used before graph
+    // warmup/capture so stale buffer owners are not carried into a new plan.
     void clear_flash_mla_sched_meta() {
         for (auto &sched_meta : sched_meta_vec) {
             sched_meta = FlashMLASchedMeta();
         }
     }
 
+    // Preserve preallocated scheduler buffers but mark the values invalid for
+    // the next decode step. Layer 0 may refresh the metadata, and later layers
+    // can reuse it only after that refresh marks the entry valid again.
     void reset_flash_mla_sched_meta() {
         for (auto &sched_meta : sched_meta_vec) {
             sched_meta.reset_sched_meta();
         }
     }
 
+    // Allocate graph-stable buffers with the same shapes as the latest eager
+    // metadata. The returned SchedMeta owns fresh buffers but no valid values.
     SchedMeta allocate_flash_mla_sched_meta_buffers() const {
         if (sched_meta_vec.empty()) {
             return {};
@@ -127,7 +167,8 @@ struct ForwardContext {
     AttentionMetadata attn_metadata;
     MambaMetadata mamba_metadata;
     MultiModalMetadata mm_metadata;
-
+    // Sparse/sliding-window attention metadata for the mla.
+    SWAAttnMetadata swa_attn_metadata;
     // Note: 缓存每次step时的flash mla算子的sched_meta
     SchedMeta sched_meta;
 

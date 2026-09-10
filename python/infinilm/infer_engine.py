@@ -265,6 +265,9 @@ class InferEngine(_infinilm.InferEngine):
         cu_seqlens=None,
         block_tables=None,
         slot_mapping=None,
+        swa_indices=None,
+        swa_topk_lengths=None,
+        raw_out_loc=None,
         mamba_init_state_indices=None,
         mamba_final_state_indices=None,
         pixel_values=None,
@@ -292,6 +295,9 @@ class InferEngine(_infinilm.InferEngine):
         block_tables = unwrap_tensor(block_tables)
         cu_seqlens = unwrap_tensor(cu_seqlens)
         slot_mapping = unwrap_tensor(slot_mapping)
+        swa_indices = unwrap_tensor(swa_indices)
+        swa_topk_lengths = unwrap_tensor(swa_topk_lengths)
+        raw_out_loc = unwrap_tensor(raw_out_loc)
         mamba_init_state_indices = unwrap_tensor(mamba_init_state_indices)
         mamba_final_state_indices = unwrap_tensor(mamba_final_state_indices)
         target_hidden_states = unwrap_tensor(target_hidden_states)
@@ -323,6 +329,9 @@ class InferEngine(_infinilm.InferEngine):
             cu_seqlens=cu_seqlens,
             block_tables=block_tables,
             slot_mapping=slot_mapping,
+            swa_indices=swa_indices,
+            swa_topk_lengths=swa_topk_lengths,
+            raw_out_loc=raw_out_loc,
             mamba_init_state_indices=mamba_init_state_indices,
             mamba_final_state_indices=mamba_final_state_indices,
             pixel_values=pixel_values,
@@ -349,6 +358,9 @@ class InferEngine(_infinilm.InferEngine):
         cu_seqlens=None,
         block_tables=None,
         slot_mapping=None,
+        swa_indices=None,
+        swa_topk_lengths=None,
+        raw_out_loc=None,
         mamba_init_state_indices=None,
         mamba_final_state_indices=None,
         pixel_values=None,
@@ -383,6 +395,15 @@ class InferEngine(_infinilm.InferEngine):
             cu_seqlens = cu_seqlens._underlying if cu_seqlens is not None else None
             slot_mapping = (
                 slot_mapping._underlying if slot_mapping is not None else None
+            )
+            swa_indices = (
+                swa_indices._underlying if swa_indices is not None else None
+            )
+            swa_topk_lengths = (
+                swa_topk_lengths._underlying if swa_topk_lengths is not None       else None
+            )
+            raw_out_loc = (
+                raw_out_loc._underlying if raw_out_loc is not None else None
             )
             mamba_init_state_indices = (
                 mamba_init_state_indices._underlying
@@ -421,6 +442,9 @@ class InferEngine(_infinilm.InferEngine):
                         cu_seqlens=cu_seqlens,
                         block_tables=block_tables,
                         slot_mapping=slot_mapping,
+                        swa_indices=swa_indices,
+                        swa_topk_lengths=swa_topk_lengths,
+                        raw_out_loc=raw_out_loc,
                         mamba_init_state_indices=mamba_init_state_indices,
                         mamba_final_state_indices=mamba_final_state_indices,
                         pixel_values=pixel_values,
@@ -452,6 +476,9 @@ class InferEngine(_infinilm.InferEngine):
         cu_seqlens=None,
         block_tables=None,
         slot_mapping=None,
+        swa_indices=None,
+        swa_topk_lengths=None,
+        raw_out_loc=None,
         pixel_values=None,
         image_bound=None,
         tgt_sizes=None,
@@ -474,6 +501,9 @@ class InferEngine(_infinilm.InferEngine):
                     cu_seqlens=cu_seqlens,
                     block_tables=block_tables,
                     slot_mapping=slot_mapping,
+                    swa_indices=swa_indices,
+                    swa_topk_lengths=swa_topk_lengths,
+                    raw_out_loc=raw_out_loc,
                     pixel_values=pixel_values,
                     image_bound=image_bound,
                     tgt_sizes=tgt_sizes,
