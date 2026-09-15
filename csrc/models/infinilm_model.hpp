@@ -6,6 +6,7 @@
 #include "infinicore/nn/module.hpp"
 #include "infinicore/tensor.hpp"
 
+#include <cstdint>
 #include <optional>
 #include <vector>
 
@@ -34,6 +35,12 @@ public:
         std::optional<infinicore::Tensor> block_tables;
         /// Slot ids for each token `[seq]`. Used for paged cache.
         std::optional<infinicore::Tensor> slot_mapping;
+        /// Sparse/sliding-window attention indices, shape `[seq, topk]`.
+        std::optional<infinicore::Tensor> swa_indices;
+        /// Number of valid sparse/sliding-window entries per token, shape `[seq]`.
+        std::optional<infinicore::Tensor> swa_topk_lengths;
+        /// Raw attention-cache output locations, shape `[seq]`.
+        std::optional<infinicore::Tensor> raw_out_loc;
         /// Mamba state cache indices read at the start of each request forward, of shape `[num_requests]`.
         std::optional<infinicore::Tensor> mamba_init_state_indices;
         /// Mamba state cache indices written with the final state of each request forward, of shape `[num_requests]`.

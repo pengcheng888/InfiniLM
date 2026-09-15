@@ -92,12 +92,11 @@ Glm4MoeLiteAttention::Glm4MoeLiteAttention(
         tp_size_,
         rank_info.comm);
 
-    mla_attn_ = std::make_shared<infinilm::layers::mla_attention::backends::FlashMLAImpl>(
+    mla_attn_ = std::make_shared<infinilm::layers::mla_attention::DenseFlashMLAImpl>(
         num_local_attention_heads_,
         latent_dim,
         static_cast<float>(softmax_scale_),
         1,
-        layer_idx_,
         kv_lora_rank_);
 
     INFINICORE_NN_MODULE_INIT(q_a_layernorm, q_lora_rank_, rms_norm_eps_, dtype, device);
@@ -111,6 +110,27 @@ Glm4MoeLiteAttention::Glm4MoeLiteAttention(
         infinicore::nn::RoPE::Algo::GPT_J,
         dtype,
         device);
+}
+
+const infinilm::layers::mla_attention::DenseFlashMLACache &
+Glm4MoeLiteAttention::do_kv_cache_update(const infinicore::Tensor &kv_c,
+                                         const infinicore::Tensor &k_pe) const {
+    auto &forward_context = infinilm::global_state::get_forward_context();
+    if (forward_context.flashmla_cache_vec.size() <= layer_idx_
+        || !forward_context.flashmla_cache_vec[layer_idx_]
+        || !forward_context.attn_metadata.slot_mapping) {
+        throw std::runtime_error("Glm4MoeLiteAttention::do_kv_cache_update requires cache and slot mapping");
+    }
+
+    auto *cache = dynamic_cast<infinilm::layers::mla_attention::DenseFlashMLACache *>(
+        forward_context.flashmla_cache_vec[layer_idx_].get());
+    if (cache == nullptr) {
+        throw std::runtime_error("Glm4MoeLiteAttention requires a DenseFlashMLACache");
+    }
+
+    cache->set_key_buffer(
+        kv_c, k_pe, forward_context.attn_metadata.slot_mapping.value());
+    return *cache;
 }
 
 void Glm4MoeLiteAttention::apply_rope_(const infinicore::Tensor &positions,
@@ -132,7 +152,7 @@ infinicore::Tensor Glm4MoeLiteAttention::forward_mha(
         throw std::runtime_error("Glm4MoeLiteAttention::forward_mha requires input_offsets");
     }
 
-    mla_attn_->do_kv_cache_update(kv_c, k_pe);
+    do_kv_cache_update(kv_c, k_pe);
 
     auto kv_c_by_head = infinicore::op::broadcast_to(kv_c->view({1, tokens, kv_lora_rank_}),
                                                      {static_cast<int64_t>(num_local_attention_heads_),
@@ -193,7 +213,7 @@ infinicore::Tensor Glm4MoeLiteAttention::forward_mha_v2(
         throw std::runtime_error("Glm4MoeLiteAttention::forward_mha requires input_offsets");
     }
 
-    mla_attn_->do_kv_cache_update(kv_c, k_pe);
+    do_kv_cache_update(kv_c, k_pe);
 
     auto kv_c_mut = kv_c;
     auto kv = kv_b_proj_->forward(kv_c_mut)->view({tokens, num_local_attention_heads_, qk_nope_head_dim_ + v_head_dim_});
@@ -260,7 +280,8 @@ infinicore::Tensor Glm4MoeLiteAttention::forward(const infinicore::Tensor &posit
                 q_pe,
                 k_pe->unsqueeze(1));
 
-    const auto &attn_metadata = infinilm::global_state::get_forward_context().attn_metadata;
+    auto &forward_context = infinilm::global_state::get_forward_context();
+    const auto &attn_metadata = forward_context.attn_metadata;
     if (!attn_metadata.total_sequence_lengths) {
         throw std::runtime_error("Glm4MoeLiteAttention::forward requires total_sequence_lengths");
     }
@@ -282,7 +303,12 @@ infinicore::Tensor Glm4MoeLiteAttention::forward(const infinicore::Tensor &posit
     auto q_flash = infinicore::op::cat({q_nope_out, q_pe}, 2)
                        ->view({tokens, 1, num_local_attention_heads_, latent_dim});
 
-    auto [attn_latent_4d, _] = mla_attn_->forward_mqa(q_flash, kv_c, k_pe);
+    const auto &kv_cache = do_kv_cache_update(kv_c, k_pe);
+    if (forward_context.sched_meta.sched_meta_vec.empty()) {
+        throw std::runtime_error("Glm4MoeLiteAttention::forward requires FlashMLA scheduler metadata storage");
+    }
+    auto &sched_meta = forward_context.sched_meta.sched_meta_vec[0];
+    auto [attn_latent_4d, _] = mla_attn_->forward(q_flash, kv_cache, sched_meta);
 
     auto attn_by_head = attn_latent_4d->view({tokens, num_local_attention_heads_, kv_lora_rank_})
                             ->permute({1, 0, 2})

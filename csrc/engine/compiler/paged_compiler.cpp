@@ -24,6 +24,48 @@ bool has_mamba_cache(const infinilm::global_state::ForwardContext &forward_conte
     return has_state(forward_context.conv_state_vec) || has_state(forward_context.ssm_state_vec);
 }
 
+bool has_flashmla_cache(
+    const infinilm::global_state::ForwardContext &forward_context,
+    const std::shared_ptr<infinilm::config::ModelConfig> &model_config) {
+    const size_t swa_topk = model_config == nullptr ? 0 : model_config->get_or<size_t>("swa_topk", 0);
+    if (swa_topk == 0) {
+        return false;
+    }
+
+    for (const auto &cache : forward_context.flashmla_cache_vec) {
+        if (cache) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void init_swa_graph_metadata(InfinilmModel::Input &input,
+                             const std::shared_ptr<infinilm::config::ModelConfig> &model_config,
+                             size_t batch_size,
+                             infinicore::Device device) {
+    const size_t swa_topk = model_config == nullptr ? 0 : model_config->get_or<size_t>("swa_topk", 0);
+    if (swa_topk == 0) {
+        return;
+    }
+
+    input.swa_indices = infinicore::Tensor::empty({batch_size, swa_topk}, infinicore::DataType::I32, device);
+    input.swa_topk_lengths = infinicore::Tensor::empty({batch_size}, infinicore::DataType::I32, device);
+    input.raw_out_loc = infinicore::Tensor::empty({batch_size}, infinicore::DataType::I32, device);
+
+    std::vector<int32_t> indices(batch_size * swa_topk, -1);
+    std::vector<int32_t> topk_lengths(batch_size, 1);
+    std::vector<int32_t> raw_out_loc(batch_size, 0);
+    for (size_t row = 0; row < batch_size; ++row) {
+        indices[row * swa_topk] = static_cast<int32_t>(row);
+        raw_out_loc[row] = static_cast<int32_t>(row);
+    }
+
+    infinicore::context::memcpyH2D(input.swa_indices.value()->data(), indices.data(), indices.size() * sizeof(int32_t), false);
+    infinicore::context::memcpyH2D(input.swa_topk_lengths.value()->data(), topk_lengths.data(), topk_lengths.size() * sizeof(int32_t), false);
+    infinicore::context::memcpyH2D(input.raw_out_loc.value()->data(), raw_out_loc.data(), raw_out_loc.size() * sizeof(int32_t), false);
+}
+
 } // namespace
 
 PagedCompiler::PagedCompiler(const std::shared_ptr<InfinilmModel> &model, RankBarrier *barrier)
@@ -61,9 +103,9 @@ void PagedCompiler::compile() {
     if (model_->get_cache_config() != nullptr && dynamic_cast<const cache::PagedKVCacheConfig *>(model_->get_cache_config())) {
         size_t nblocks = dynamic_cast<const cache::PagedKVCacheConfig *>(model_->get_cache_config())->num_blocks();
         auto &forward_context = infinilm::global_state::get_forward_context();
-        const bool has_mamba_state = has_mamba_cache(forward_context);
-
         const auto &model_config = model_->get_model_config();
+        const bool has_mamba_state = has_mamba_cache(forward_context);
+        const bool has_flashmla_state = has_flashmla_cache(forward_context, model_config);
         const size_t position_id_axes = model_config == nullptr
                                           ? 1
                                           : model_config->get_or<size_t>("position_id_axes", 1);
@@ -104,6 +146,10 @@ void PagedCompiler::compile() {
             input.slot_mapping = infinicore::Tensor::empty({b}, infinicore::DataType::I64, infinicore::context::getDevice());
             set_zeros(input.slot_mapping.value());
 
+            if (has_flashmla_state) {
+                init_swa_graph_metadata(input, model_config, b, infinicore::context::getDevice());
+            }
+
             if (has_mamba_state) {
                 input.mamba_init_state_indices = infinicore::Tensor::empty(
                     {b}, infinicore::DataType::I32, infinicore::context::getDevice());
@@ -132,6 +178,9 @@ void PagedCompiler::compile() {
                 input.block_tables,
                 input.slot_mapping,
             };
+
+            forward_context.swa_attn_metadata = infinilm::global_state::SWAAttnMetadata(input);
+
             // Hybrid linear-attention layers read cache indices from the same
             // thread-local context. These tensors remain alive in CompiledResult
             // and are updated in place before every graph replay.
@@ -232,6 +281,21 @@ PagedCompiler::Compiled PagedCompiler::get_compiled(const InfinilmModel::Input &
                     input.mamba_init_state_indices.value());
                 graph_input.mamba_final_state_indices.value()->copy_from(
                     input.mamba_final_state_indices.value());
+            }
+
+            {
+                const auto graph_swa_metadata = infinilm::global_state::SWAAttnMetadata(graph_input);
+                const auto input_swa_metadata = infinilm::global_state::SWAAttnMetadata(input);
+                const bool graph_has_swa_metadata = graph_swa_metadata.has_metadata();
+                const bool input_has_swa_metadata = input_swa_metadata.has_metadata();
+                if (graph_has_swa_metadata != input_has_swa_metadata) {
+                    return {nullptr, nullptr};
+                }
+                if (graph_has_swa_metadata) {
+                    graph_input.swa_indices.value()->copy_from(input.swa_indices.value());
+                    graph_input.swa_topk_lengths.value()->copy_from(input.swa_topk_lengths.value());
+                    graph_input.raw_out_loc.value()->copy_from(input.raw_out_loc.value());
+                }
             }
 
             if (!result->second.sched_meta.sched_meta_vec.empty()) {

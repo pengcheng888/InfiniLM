@@ -3,11 +3,13 @@
 #include "../../backends/attention_backends.hpp"
 #include "../../cache/kv_cache.hpp"
 #include "../../global_state/global_state.hpp"
+#include "../../layers/mla_attention/flashmla_cache.hpp"
 #include "../models_registry.hpp"
 
 #include "infinicore/context/context.hpp"
 #include "infinicore/nn/rope.hpp"
 
+#include <memory>
 #include <stdexcept>
 #include <string>
 
@@ -15,8 +17,8 @@ namespace infinilm::models::glm4_moe_lite {
 
 void Glm4MoeLiteForCausalLM::reset_cache(const cache::CacheConfig *cache_config) {
     auto &forward_context = infinilm::global_state::get_forward_context();
-    auto &kv_cache_vec = forward_context.kv_cache_vec;
-    kv_cache_vec.clear();
+    auto &flashmla_cache_vec = forward_context.flashmla_cache_vec;
+    flashmla_cache_vec.clear();
 
     if (cache_config == nullptr) {
         cache_config_.reset();
@@ -38,8 +40,8 @@ void Glm4MoeLiteForCausalLM::reset_cache(const cache::CacheConfig *cache_config)
     cache_config_ = cache_config->unique_copy();
 
     const size_t num_hidden_layers = model_config_->get<size_t>("num_hidden_layers");
-    const size_t latent_dim = model_config_->get<size_t>("kv_lora_rank")
-                            + model_config_->get<size_t>("qk_rope_head_dim");
+    const size_t kv_lora_rank = model_config_->get<size_t>("kv_lora_rank");
+    const size_t qk_rope_head_dim = model_config_->get<size_t>("qk_rope_head_dim");
     const auto dtype = model_config_->get_kv_cache_dtype();
     const auto &rank_info = infinilm::global_state::get_tensor_model_parallel_rank_info();
     const size_t pp_size = static_cast<size_t>(rank_info.pp_size);
@@ -47,12 +49,16 @@ void Glm4MoeLiteForCausalLM::reset_cache(const cache::CacheConfig *cache_config)
     const size_t local_layer_begin = num_hidden_layers * pp_stage / pp_size;
     const size_t local_layer_end = num_hidden_layers * (pp_stage + 1) / pp_size;
 
-    kv_cache_vec.resize(num_hidden_layers);
+    flashmla_cache_vec.resize(num_hidden_layers);
     for (size_t layer_idx = local_layer_begin; layer_idx < local_layer_end; ++layer_idx) {
-        kv_cache_vec[layer_idx] = infinicore::Tensor::empty(
-            {paged_config->num_blocks(), paged_config->block_size(), latent_dim},
-            dtype,
-            device_);
+        flashmla_cache_vec[layer_idx]
+            = std::make_unique<infinilm::layers::mla_attention::DenseFlashMLACache>(
+                paged_config->num_blocks(),
+                paged_config->block_size(),
+                kv_lora_rank,
+                qk_rope_head_dim,
+                dtype,
+                device_);
     }
     infinicore::context::syncStream();
 

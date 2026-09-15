@@ -122,18 +122,14 @@ inline void bind_infer_engine(py::module &m) {
             return state_dict_tp_all;
         })
         .def("process_weights_after_loading", &InferEngine::process_weights_after_loading, "Process the weights after loading on all workers (e.g., for quantization)")
-        .def(
-            "forward", [](InferEngine &self, const InferEngine::Input &input) -> InferEngine::Output {
+        .def("forward", [](InferEngine &self, const InferEngine::Input &input) -> InferEngine::Output {
                 // IMPORTANT: Release the GIL before calling forward() to allow other Python threads
                 // to run concurrently during inference (which may block for a long time).
                 // Do NOT remove this — without it, the GIL is held throughout inference and will
                 // deadlock or stall any other Python thread (e.g., request handling, scheduling).
                 py::gil_scoped_release release;
-                return self.forward(input);
-            },
-            "Run inference on all ranks with arbitrary arguments")
-        .def(
-            "reset_cache", [](InferEngine &self, std::shared_ptr<cache::CacheConfig> cfg) { self.reset_cache(cfg ? cfg.get() : nullptr); }, py::arg("cache_config") = py::none())
+                return self.forward(input); }, "Run inference on all ranks with arbitrary arguments")
+        .def("reset_cache", [](InferEngine &self, std::shared_ptr<cache::CacheConfig> cfg) { self.reset_cache(cfg ? cfg.get() : nullptr); }, py::arg("cache_config") = py::none())
         .def("get_kv_cache", &InferEngine::get_kv_cache, "Get per-rank kv cache list")
         .def("get_cache_config", [](const InferEngine &self) -> std::shared_ptr<cache::CacheConfig> {
             auto cfg = self.get_cache_config();
@@ -151,6 +147,9 @@ inline void bind_infer_engine(py::module &m) {
                          std::optional<infinicore::Tensor> cu_seqlens,
                          std::optional<infinicore::Tensor> block_tables,
                          std::optional<infinicore::Tensor> slot_mapping,
+                         std::optional<infinicore::Tensor> swa_indices,
+                         std::optional<infinicore::Tensor> swa_topk_lengths,
+                         std::optional<infinicore::Tensor> raw_out_loc,
                          std::optional<infinicore::Tensor> mamba_init_state_indices,
                          std::optional<infinicore::Tensor> mamba_final_state_indices,
                          std::optional<std::vector<infinicore::Tensor>> pixel_values,
@@ -171,6 +170,9 @@ inline void bind_infer_engine(py::module &m) {
                     std::move(cu_seqlens),
                     std::move(block_tables),
                     std::move(slot_mapping),
+                    std::move(swa_indices),
+                    std::move(swa_topk_lengths),
+                    std::move(raw_out_loc),
                     std::move(mamba_init_state_indices),
                     std::move(mamba_final_state_indices),
                     std::move(pixel_values),
@@ -222,6 +224,9 @@ inline void bind_infer_engine(py::module &m) {
             py::arg("cu_seqlens") = std::nullopt,
             py::arg("block_tables") = std::nullopt,
             py::arg("slot_mapping") = std::nullopt,
+            py::arg("swa_indices") = std::nullopt,
+            py::arg("swa_topk_lengths") = std::nullopt,
+            py::arg("raw_out_loc") = std::nullopt,
             py::arg("mamba_init_state_indices") = std::nullopt,
             py::arg("mamba_final_state_indices") = std::nullopt,
             py::arg("pixel_values") = std::nullopt,
@@ -240,6 +245,9 @@ inline void bind_infer_engine(py::module &m) {
         .def_readwrite("cu_seqlens", &InferEngine::Input::cu_seqlens)
         .def_readwrite("block_tables", &InferEngine::Input::block_tables)
         .def_readwrite("slot_mapping", &InferEngine::Input::slot_mapping)
+        .def_readwrite("swa_indices", &InferEngine::Input::swa_indices)
+        .def_readwrite("swa_topk_lengths", &InferEngine::Input::swa_topk_lengths)
+        .def_readwrite("raw_out_loc", &InferEngine::Input::raw_out_loc)
         .def_readwrite("mamba_init_state_indices", &InferEngine::Input::mamba_init_state_indices)
         .def_readwrite("mamba_final_state_indices", &InferEngine::Input::mamba_final_state_indices)
         .def_readwrite("pixel_values", &InferEngine::Input::pixel_values)

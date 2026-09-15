@@ -121,14 +121,14 @@ QKVParallelLinear::QKVParallelLinear(size_t hidden_size,
                                      const infinicore::Device &device,
                                      engine::distributed::RankInfo rank_info)
     : infinilm::nn::ColumnParallelLinear(
-        hidden_size,
-        calculate_out_feature_size(num_q_head, q_dim, num_k_head, k_dim, num_v_head, v_dim, rank_info),
-        quantization == nullptr ? std::make_shared<infinilm::quantization::NoneQuantization>() : quantization,
-        (q_bias || k_bias || v_bias),
-        dtype,
-        device,
-        rank_info.tp_rank,
-        rank_info.tp_size),
+          hidden_size,
+          calculate_out_feature_size(num_q_head, q_dim, num_k_head, k_dim, num_v_head, v_dim, rank_info),
+          quantization == nullptr ? std::make_shared<infinilm::quantization::NoneQuantization>() : quantization,
+          (q_bias || k_bias || v_bias),
+          dtype,
+          device,
+          rank_info.tp_rank,
+          rank_info.tp_size),
       q_dim_(q_dim),
       k_dim_(k_dim),
       v_dim_(v_dim),
@@ -224,14 +224,14 @@ GateUpParallelLinear::GateUpParallelLinear(size_t hidden_size, size_t intermedia
                                            const infinicore::DataType &dtype, const infinicore::Device &device,
                                            engine::distributed::RankInfo rank_info)
     : infinilm::nn::ColumnParallelLinear(
-        hidden_size,
-        intermediate_size * 2,
-        quantization == nullptr ? std::make_shared<infinilm::quantization::NoneQuantization>() : quantization,
-        gate_bias || up_bias,
-        dtype,
-        device,
-        rank_info.tp_rank,
-        rank_info.tp_size),
+          hidden_size,
+          intermediate_size * 2,
+          quantization == nullptr ? std::make_shared<infinilm::quantization::NoneQuantization>() : quantization,
+          gate_bias || up_bias,
+          dtype,
+          device,
+          rank_info.tp_rank,
+          rank_info.tp_size),
       gate_bias_(gate_bias),
       up_bias_(up_bias) {
     if (gate_bias_ != up_bias_) {
@@ -241,9 +241,10 @@ GateUpParallelLinear::GateUpParallelLinear(size_t hidden_size, size_t intermedia
 
 std::tuple<infinicore::Tensor, infinicore::Tensor> GateUpParallelLinear::forward_split(infinicore::Tensor &input) {
     auto output = this->forward(input);
-    auto cols = output->shape()[2];
-    auto gate_output = output->narrow({{2, 0, cols / 2}});
-    auto up_output = output->narrow({{2, cols / 2, cols / 2}});
+    const auto split_dim = output->ndim() - 1;
+    const auto cols = output->size(split_dim);
+    auto gate_output = output->narrow({{split_dim, 0, cols / 2}});
+    auto up_output = output->narrow({{split_dim, cols / 2, cols / 2}});
     return std::make_tuple(gate_output, up_output);
 }
 

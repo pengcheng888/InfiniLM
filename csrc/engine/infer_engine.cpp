@@ -231,6 +231,9 @@ InferEngine::Input::to_model_input(infinicore::Device device) const {
         to_device(cu_seqlens),
         to_device(block_tables),
         to_device(slot_mapping),
+        to_device(swa_indices),
+        to_device(swa_topk_lengths),
+        to_device(raw_out_loc),
         to_device(mamba_init_state_indices),
         to_device(mamba_final_state_indices),
         to_device_vec(pixel_values),
@@ -255,6 +258,8 @@ InferEngine::Input::to_model_input(infinicore::Device device) const {
         input.slot_mapping,
         max_query_length,
         max_sequence_length};
+    infinilm::global_state::get_forward_context().swa_attn_metadata
+        = infinilm::global_state::SWAAttnMetadata(input);
 
     infinilm::global_state::get_forward_context().mamba_metadata = {
         input.input_offsets,
