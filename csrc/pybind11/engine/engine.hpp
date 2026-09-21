@@ -121,7 +121,10 @@ inline void bind_infer_engine(py::module &m) {
             }
             return state_dict_tp_all;
         })
-        .def("process_weights_after_loading", &InferEngine::process_weights_after_loading, "Process the weights after loading on all workers (e.g., for quantization)")
+        .def("process_weights_after_loading", [](InferEngine &self) {
+                py::gil_scoped_release release;
+                self.process_weights_after_loading(); },
+             "Process the weights after loading on all workers (e.g., for quantization)")
         .def("forward", [](InferEngine &self, const InferEngine::Input &input) -> InferEngine::Output {
                 // IMPORTANT: Release the GIL before calling forward() to allow other Python threads
                 // to run concurrently during inference (which may block for a long time).
