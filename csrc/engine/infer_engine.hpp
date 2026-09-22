@@ -58,6 +58,8 @@ public:
 
     std::vector<std::vector<infinicore::Tensor>> get_kv_cache();
 
+    void close();
+
     ~InferEngine();
 
     const distributed::DistConfig &get_dist_config() const;

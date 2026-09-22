@@ -1,7 +1,9 @@
 #include "deepseek_v4_rope.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <optional>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -10,6 +12,45 @@ namespace infinilm::models::deepseek_v4 {
 namespace {
 
 constexpr double kTwoPi = 6.283185307179586476925286766559;
+
+struct RopeCacheEntry {
+    size_t qk_rope_head_dim;
+    size_t max_position_embeddings;
+    double rope_theta;
+    double rope_factor;
+    double rope_beta_fast;
+    double rope_beta_slow;
+    size_t rope_original_seq_len;
+    infinicore::Device device;
+    infinicore::Tensor tensor;
+};
+
+thread_local std::array<std::optional<RopeCacheEntry>, 2> rope_cache;
+
+const infinicore::Tensor *find_cached_rope(
+    bool use_compress_rope,
+    size_t qk_rope_head_dim,
+    size_t max_position_embeddings,
+    double rope_theta,
+    double rope_factor,
+    double rope_beta_fast,
+    double rope_beta_slow,
+    size_t rope_original_seq_len,
+    const infinicore::Device &device) {
+    const auto &cached = rope_cache[use_compress_rope ? 1 : 0];
+    if (cached
+        && cached->qk_rope_head_dim == qk_rope_head_dim
+        && cached->max_position_embeddings == max_position_embeddings
+        && cached->rope_theta == rope_theta
+        && cached->rope_factor == rope_factor
+        && cached->rope_beta_fast == rope_beta_fast
+        && cached->rope_beta_slow == rope_beta_slow
+        && cached->rope_original_seq_len == rope_original_seq_len
+        && cached->device == device) {
+        return &cached->tensor;
+    }
+    return nullptr;
+}
 
 double yarn_correction_dim(double num_rotations, size_t rotary_dim, double base, size_t original_max_position) {
     return (static_cast<double>(rotary_dim) * std::log(static_cast<double>(original_max_position) / (num_rotations * kTwoPi))) / (2.0 * std::log(base));
@@ -53,10 +94,23 @@ infinicore::Tensor build_deepseek_v4_rope_freqs_cis(size_t qk_rope_head_dim,
         throw std::runtime_error("DeepSeekV4 RoPE: invalid configuration");
     }
 
-    const size_t half_dim = qk_rope_head_dim / 2;
-    const size_t numel = max_position_embeddings * qk_rope_head_dim;
     const double rope_base = use_compress_rope ? compress_rope_theta : rope_theta;
     const size_t original_seq_len = use_compress_rope ? rope_original_seq_len : 0;
+    if (const auto *cached = find_cached_rope(
+            use_compress_rope,
+            qk_rope_head_dim,
+            max_position_embeddings,
+            rope_base,
+            rope_factor,
+            rope_beta_fast,
+            rope_beta_slow,
+            original_seq_len,
+            device)) {
+        return *cached;
+    }
+
+    const size_t half_dim = qk_rope_head_dim / 2;
+    const size_t numel = max_position_embeddings * qk_rope_head_dim;
 
     std::vector<double> inv_freq(half_dim);
     for (size_t i = 0; i < half_dim; ++i) {
@@ -89,6 +143,16 @@ infinicore::Tensor build_deepseek_v4_rope_freqs_cis(size_t qk_rope_head_dim,
     const auto cpu = infinicore::Device::cpu();
     auto freqs_cpu = infinicore::Tensor::from_blob(freqs_data.data(), {max_position_embeddings, qk_rope_head_dim}, infinicore::DataType::F32, cpu);
     freqs_cache->copy_from(freqs_cpu);
+    rope_cache[use_compress_rope ? 1 : 0] = RopeCacheEntry{
+        qk_rope_head_dim,
+        max_position_embeddings,
+        rope_base,
+        rope_factor,
+        rope_beta_fast,
+        rope_beta_slow,
+        original_seq_len,
+        device,
+        freqs_cache};
     return freqs_cache;
 }
 

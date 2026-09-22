@@ -2,6 +2,7 @@
 
 #include "../../global_state/global_state.hpp"
 
+#include "infinicore/ops/cat.hpp"
 #include "infinicore/ops/flash_mla/flash_mla_with_kvcache.hpp"
 #include "infinicore/ops/flash_mla/get_mla_metadata.hpp"
 
@@ -117,8 +118,9 @@ std::pair<infinicore::Tensor, infinicore::Tensor> SparseFlashMLAImpl::forward(
         throw std::runtime_error("SparseFlashMLAImpl::forward currently supports one MLA KV head");
     }
     if (!kv_cache || kv_cache->ndim() != 4 || kv_cache->size(2) != num_kv_heads_
-        || kv_cache->dtype() != infinicore::DataType::F8) {
-        throw std::runtime_error("SparseFlashMLAImpl::forward expects FP8 KV cache [blocks, page_size, 1, cache_dim]");
+        || (kv_cache->dtype() != infinicore::DataType::F8
+            && kv_cache->dtype() != infinicore::DataType::BF16)) {
+        throw std::runtime_error("SparseFlashMLAImpl::forward expects FP8 or BF16 KV cache [blocks, page_size, 1, cache_dim]");
     }
     if (!indices || indices->ndim() != 3 || indices->dtype() != infinicore::DataType::I32
         || indices->size(0) != query->size(0) || indices->size(1) != query->size(1)) {
@@ -153,6 +155,25 @@ std::pair<infinicore::Tensor, infinicore::Tensor> SparseFlashMLAImpl::forward(
         sched_meta = infinicore::op::flash_mla::FlashMLASchedMeta();
     }
 
+    const bool is_fp8_kvcache = (kv_cache->dtype() == infinicore::DataType::F8);
+    auto flash_query = query;
+    if (!is_fp8_kvcache && kv_cache->size(3) != query->size(3)) {
+        // MetaX BF16 FlashMLA 的 head 布局需要额外一段 rope：
+        // cache 为 [原 head, rope 副本]，query 为 [nope, 0, rope]。
+        // 中间 0 段对点积没有贡献，因此扩展后仍保持原始 QK score。
+        const size_t rope_dim = kv_cache->size(3) - query->size(3);
+        if (rope_dim == 0 || rope_dim >= query->size(3)) {
+            throw std::runtime_error("SparseFlashMLAImpl cannot adapt query to BF16 cache head size");
+        }
+        const size_t nope_dim = query->size(3) - rope_dim;
+        auto query_nope = query->narrow({{3, 0, nope_dim}});
+        auto query_rope = query->narrow({{3, nope_dim, rope_dim}});
+        auto query_pad = infinicore::Tensor::zeros({query->size(0), query->size(1), query->size(2), rope_dim},
+                                                   query->dtype(),
+                                                   query->device());
+        flash_query = infinicore::op::cat({query_nope, query_pad, query_rope}, 3);
+    }
+
     if (!sched_meta.has_valid_sched_meta()) {
         const auto num_q_tokens_per_head_k = static_cast<int64_t>(query->size(1) * query->size(2) / num_kv_heads_);
         infinicore::op::flash_mla::get_mla_metadata_(
@@ -161,7 +182,7 @@ std::pair<infinicore::Tensor, infinicore::Tensor> SparseFlashMLAImpl::forward(
             num_q_tokens_per_head_k,
             static_cast<int64_t>(num_kv_heads_),
             static_cast<int64_t>(num_heads_),
-            true,
+            is_fp8_kvcache,
             static_cast<int64_t>(indices->size(2)));
     }
 
@@ -175,7 +196,7 @@ std::pair<infinicore::Tensor, infinicore::Tensor> SparseFlashMLAImpl::forward(
     }();
 
     return infinicore::op::flash_mla::flash_mla_with_kvcache(
-        query,
+        flash_query,
         kv_cache,
         std::nullopt,
         std::nullopt,
@@ -184,7 +205,7 @@ std::pair<infinicore::Tensor, infinicore::Tensor> SparseFlashMLAImpl::forward(
         std::nullopt,
         static_cast<double>(scale_),
         false,
-        true,
+        is_fp8_kvcache,
         indices,
         attn_sink,
         std::nullopt,

@@ -205,6 +205,7 @@ def load_model_state_dict_by_file(
     """
     Load the model weights from file.
     """
+    exit(-1)
     print(" load weights ......")
     t1 = time.time()
 
@@ -382,6 +383,208 @@ def load_model_state_dict_by_file(
 
     t2 = time.time()
     print(f" load weights over! {(t2 - t1) * 1000} ms \n")
+
+
+def load_model_state_dict_by_file_v2(
+    model: infinicore.nn.Module,
+    model_path: str,
+    dtype=infinicore.dtype,
+    *,
+    batched_weight_load: bool = True,
+) -> Dict[str, infinicore.Tensor]:
+    """
+    Load the model weights from file.
+
+    ``batched_weight_load`` is enabled by default. All safetensors shards are
+    collected as torch tensors, then converted, loaded, and synchronized once.
+    """
+    print(" load weights ......")
+    if batched_weight_load:
+        print("Batched weight load enabled")
+    t1 = time.time()
+
+    model_type = model.hf_config.get("model_type", "")
+    preserve_fp32_suffixes = (".e_score_correction_bias",)
+    if model_type == "kimi_k3":
+        preserve_fp32_suffixes += (".A_log", ".dt_bias")
+    if model_type == "deepseek_v4":
+        preserve_fp32_suffixes += (
+            ".scale",
+            ".weight_scale",
+            ".attn_sink",
+            ".hc_attn_fn",
+            ".hc_ffn_fn",
+            ".hc_attn_base",
+            ".hc_ffn_base",
+            ".hc_attn_scale",
+            ".hc_ffn_scale",
+            ".ffn.gate.bias",
+            ".mlp.gate.bias",
+            "hc_head_fn",
+            "hc_head_base",
+            "hc_head_scale",
+        )
+
+    torch_device = "cpu"
+    torch_dtype = infinicore.utils.to_torch_dtype(dtype)
+    model_keys = model.state_dict_keyname()
+    model_key_set = set(model_keys)
+    dist_config = getattr(model, "distributed_config", None)
+    is_pipeline_parallel = dist_config is not None and dist_config.pp_size > 1
+    scale_emb = _get_scale_emb(model_path)
+
+    already_loaded_keys = []
+    embed_tokens_torch_unscaled = None
+    weights_processed = False
+
+    remapper = _WEIGHT_REMAPPER.get(model_type)
+
+    index_file_path = os.path.join(model_path, "model.safetensors.index.json")
+    if os.path.exists(index_file_path):
+        # Use the index mapping and sort shard names for deterministic loading.
+        print(f"Found index file: {index_file_path}. Loading shards by index.")
+        with open(index_file_path, "r") as f:
+            index_data = json.load(f)
+        weight_map = index_data.get("weight_map", {})
+        unique_filenames = set(weight_map.values())
+        file_list = [
+            os.path.join(model_path, fname)
+            for fname in sorted(unique_filenames)
+        ]
+    else:
+        print("No index file found. Scanning all safetensors files...")
+        file_list = sorted(glob.glob(os.path.join(model_path, "*.safetensors")))
+
+    if len(file_list) > 0:
+        batched_model_param = {} if batched_weight_load else None
+        for file_path in tqdm(file_list, desc="Processing files"):
+            tqdm.write(f"Processing: {os.path.basename(file_path)}")
+
+            model_param = load_state_dict(
+                file_path,
+                device=torch_device,
+                dtype=torch_dtype,
+                preserve_fp32_suffixes=preserve_fp32_suffixes,
+            )
+
+            if remapper is not None:
+                model_param = remapper(model_param, config=model.hf_config)
+
+            if "model.embed_tokens.weight" in model_param:
+                embed_tokens_torch_unscaled = model_param["model.embed_tokens.weight"]
+                if scale_emb != 1.0:
+                    model_param["model.embed_tokens.weight"] = (
+                        embed_tokens_torch_unscaled * float(scale_emb)
+                    )
+
+            if is_pipeline_parallel:
+                model_param = {
+                    key: tensor
+                    for key, tensor in model_param.items()
+                    if key in model_key_set
+                }
+
+            already_loaded_keys.extend(model_param.keys())
+
+            if batched_weight_load:
+                batched_model_param.update(model_param)
+            else:
+                model_param_infini = {}
+                for key in model_param.keys():
+                    model_param_infini[key] = infinicore.from_torch(model_param[key])
+                model.load_state_dict(model_param_infini, strict=False)
+                infinicore.sync_device()
+                del model_param_infini
+                del model_param
+                gc.collect()
+
+        if batched_weight_load:
+            model_param_infini = {
+                key: infinicore.from_torch(tensor)
+                for key, tensor in batched_model_param.items()
+            }
+            model.load_state_dict(model_param_infini, strict=False)
+            infinicore.sync_device()
+            del model_param_infini
+            del batched_model_param
+            gc.collect()
+
+        if not (
+            "lm_head.weight" in model_keys
+            and "lm_head.weight" not in already_loaded_keys
+            and embed_tokens_torch_unscaled is not None
+        ):
+            embed_tokens_torch_unscaled = None
+            gc.collect()
+
+        model.process_weights_after_loading()
+        weights_processed = True
+
+    elif os.path.exists(os.path.join(model_path, "pytorch_model.bin")):
+        file_path = os.path.join(model_path, "pytorch_model.bin")
+        model_params = torch.load(file_path, weights_only=True, map_location="cpu")
+
+        remapper = _WEIGHT_REMAPPER.get(model_type)
+        if remapper is not None:
+            model_params = remapper(model_params, config=model.hf_config)
+
+        if "model.embed_tokens.weight" in model_params:
+            embed_tokens_torch_unscaled = model_params["model.embed_tokens.weight"].to(
+                dtype=torch_dtype
+            )
+            if scale_emb != 1.0:
+                model_params["model.embed_tokens.weight"] = (
+                    embed_tokens_torch_unscaled * float(scale_emb)
+                )
+
+        if is_pipeline_parallel:
+            model_params = {
+                key: tensor
+                for key, tensor in model_params.items()
+                if key in model_key_set
+            }
+
+        model_param_infini = {}
+        for key in model_params.keys():
+            target_dtype = (
+                model_params[key].dtype
+                if key.endswith(preserve_fp32_suffixes)
+                else torch_dtype
+            )
+            model_param_infini[key] = infinicore.from_torch(
+                model_params[key].to(dtype=target_dtype)
+            )
+            already_loaded_keys.append(key)
+
+        model.load_state_dict(model_param_infini, strict=True)
+        infinicore.sync_device()
+        del model_param_infini
+        del model_params
+        gc.collect()
+    else:
+        raise KeyError("Weight file not found.")
+
+    if "lm_head.weight" in model_keys and "lm_head.weight" not in already_loaded_keys:
+        if embed_tokens_torch_unscaled is not None:
+            lm_head_tensor = infinicore.from_torch(embed_tokens_torch_unscaled)
+            model.load_state_dict({"lm_head.weight": lm_head_tensor}, strict=False)
+            already_loaded_keys.append("lm_head.weight")
+            del lm_head_tensor
+            embed_tokens_torch_unscaled = None
+            gc.collect()
+
+    check_parameters(model_keys, already_loaded_keys)
+
+    if not weights_processed:
+        model.process_weights_after_loading()
+
+    t2 = time.time()
+    print(f" load weights over! {(t2 - t1) * 1000} ms \n")
+
+
+# Keep the public name stable while making the batched v2 implementation the
+# default for normal model, speculative model, and benchmark callers.
+load_model_state_dict_by_file = load_model_state_dict_by_file_v2
 
 
 def load_model_state_dict_by_tensor(

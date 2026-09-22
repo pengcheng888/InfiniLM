@@ -571,8 +571,19 @@ void RankWorker::thread_loop() {
                 // Shouldn't reach here (no-op)
             }
         } // while
-        // Some clean up should be done before exiting the thread
+
+        infinicore::context::syncStream();
         compiler_.reset();
+        output_ = Output{};
+        pending_args_ = Input{};
+        pending_param_ = infinicore::Tensor();
+        pending_params_.clear();
+        forward_context_ = ForwardContext{};
+        cache_.reset();
+        model_.reset();
+        infinicore::context::syncStream();
+        infinicore::context::trimMemory();
+
     } catch (const std::exception &e) {
         // Top-level exception: ensure any waiters are woken and the thread exits cleanly.
         {

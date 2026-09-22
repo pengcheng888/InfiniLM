@@ -328,4 +328,5 @@ class ModelRunner:
             self.pipeline_control.close()
         if self.kv_connector is not None:
             self.kv_connector.shutdown()
+        self.model_engine.close()
         self._closed = True

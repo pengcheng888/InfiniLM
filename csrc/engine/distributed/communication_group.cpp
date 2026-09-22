@@ -117,17 +117,31 @@ int CommunicationGroup::get_world_size() const {
     return dist_config_.tp_device_ids.size();
 }
 
-CommunicationGroup::~CommunicationGroup() {
+void CommunicationGroup::close() {
     if (communicators_.size() > 1) {
-        for (auto &comm : communicators_) {
-            infinicclCommDestroy(comm);
+        for (size_t rank = 0; rank < communicators_.size(); ++rank) {
+            auto &comm = communicators_[rank];
+            if (comm != nullptr) {
+                infinicore::context::setDevice(
+                    infinicore::Device(device_type_, dist_config_.tp_device_ids[rank]));
+                infinicclCommDestroy(comm);
+                comm = nullptr;
+            }
         }
     }
-    for (auto &comm : world_communicators_) {
+    for (size_t rank = 0; rank < world_communicators_.size(); ++rank) {
+        auto &comm = world_communicators_[rank];
         if (comm != nullptr) {
+            infinicore::context::setDevice(
+                infinicore::Device(device_type_, dist_config_.tp_device_ids[rank]));
             infinicclCommDestroy(comm);
+            comm = nullptr;
         }
     }
+}
+
+CommunicationGroup::~CommunicationGroup() {
+    close();
 }
 
 } // namespace infinilm::engine::distributed

@@ -304,11 +304,17 @@ void InferEngine::compile() {
 //------------------------------------------------------
 // Destructor
 //------------------------------------------------------
-InferEngine::~InferEngine() {
-    // Close all workers
+void InferEngine::close() {
     for (auto &worker : workers_) {
         worker->close();
     }
+    workers_.clear();
+    barrier_.reset();
+    communication_group_.close();
+}
+
+InferEngine::~InferEngine() {
+    close();
 }
 
 const distributed::DistConfig &InferEngine::get_dist_config() const {

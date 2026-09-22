@@ -66,6 +66,8 @@ public:
 
     int get_world_size() const;
 
+    void close();
+
     ~CommunicationGroup();
 
 protected:

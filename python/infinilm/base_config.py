@@ -156,7 +156,7 @@ class BaseConfig:
             self.attn = "paged-attn"
 
         # Force sync weight loading for Metax devices
-        self._force_sync_for_metax()
+        #self._force_sync_for_metax()
 
     def _force_sync_for_metax(self):
         """Force weight_load_mode to 'sync' for Metax devices."""

@@ -81,11 +81,22 @@ SparseFlashMLACache::SparseFlashMLACache(
     if (qk_nope_head_dim_ == 0 || qk_rope_head_dim_ == 0) {
         throw std::runtime_error("SparseFlashMLACache expects positive qk_nope_head_dim and qk_rope_head_dim");
     }
-    if (dtype != k_with_scale_buffer_dtype_) {
-        throw std::runtime_error("SparseFlashMLACache requires U8 raw cache storage");
+    if (dtype != k_with_scale_buffer_dtype_ && dtype != infinicore::DataType::BF16) {
+        throw std::runtime_error("SparseFlashMLACache requires U8 or BF16 cache storage");
     }
     if (qk_nope_head_dim_ % quantize_block_size_ != 0) {
         throw std::runtime_error("SparseFlashMLACache expects qk_nope_head_dim to be divisible by quantize_block_size");
+    }
+
+    if (dtype == infinicore::DataType::BF16) {
+        // MetaX BF16 FlashMLA 要求 head 维度为 nope + 2 * rope：
+        // 前 nope + rope 维保存原始 cache_k，末尾 rope 维保存 rope 副本。
+        raw_cache_ = infinicore::Tensor::zeros(
+            {num_blocks, block_size, 1, qk_nope_head_dim_ + 2 * qk_rope_head_dim_},
+            dtype,
+            device);
+        flashmla_cache_view_ = raw_cache_;
+        return;
     }
 
     const size_t value_bytes_per_token = qk_nope_head_dim_ * infinicore::dsize(k_with_scale_buffer_dtype_)
@@ -105,6 +116,9 @@ SparseFlashMLACache::SparseFlashMLACache(
 }
 
 size_t SparseFlashMLACache::get_bytes_per_token() const noexcept {
+    if (flashmla_cache_view_ && flashmla_cache_view_->dtype() == infinicore::DataType::BF16) {
+        return (qk_nope_head_dim_ + 2 * qk_rope_head_dim_) * infinicore::dsize(infinicore::DataType::BF16);
+    }
     const size_t value_bytes_per_token = qk_nope_head_dim_ * infinicore::dsize(k_with_scale_buffer_dtype_)
                                        + qk_rope_head_dim_ * infinicore::dsize(rope_storage_dtype_);
     const size_t scale_bytes_per_token = qk_nope_head_dim_ / quantize_block_size_ + scale_pad_;
@@ -125,6 +139,15 @@ const infinicore::Tensor &SparseFlashMLACache::flashmla_cache_view() const noexc
 
 void SparseFlashMLACache::set_key_buffer(const infinicore::Tensor &cache_k,
                                          const infinicore::Tensor &loc) {
+    if (flashmla_cache_view_->dtype() == infinicore::DataType::BF16) {
+        // 对于metax平台：
+        // 写入时复制末尾 rope，形成 FlashMLA 需要的 576 维 BF16 cache；
+        // query 侧对应的新增区段为 0，因此 QK 点积仍等价于原始 512 维。
+        infinicore::op::deepseek_v4::store_flash_mla_bf16_cache_(
+            cache_k, flashmla_cache_view_, loc, qk_rope_head_dim_);
+        return;
+    }
+
     infinicore::op::deepseek_v4::fused_store_flashmla_cache_(
         cache_k, raw_cache_view(), loc, static_cast<int>(page_size()));
 }

@@ -137,6 +137,7 @@ inline void bind_infer_engine(py::module &m) {
         .def("get_cache_config", [](const InferEngine &self) -> std::shared_ptr<cache::CacheConfig> {
             auto cfg = self.get_cache_config();
             return cfg ? std::shared_ptr<cache::CacheConfig>(cfg->unique_copy()) : nullptr; })
+        .def("close", &InferEngine::close, "Release rank workers and communicators")
         .def("__repr__", [](const InferEngine &self) { return "<InferEngine: " + std::string(self.get_dist_config()) + ">"; });
 
     py::class_<InferEngine::Input>(infer_engine, "Input")

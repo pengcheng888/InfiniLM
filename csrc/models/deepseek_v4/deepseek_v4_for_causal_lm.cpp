@@ -78,13 +78,17 @@ void DeepseekV4ForCausalLM::reset_cache(const cache::CacheConfig *cache_config) 
 
     flashmla_cache_vec.resize(num_hidden_layers);
     for (size_t layer_idx = local_layer_begin; layer_idx < local_layer_end; ++layer_idx) {
+        // metax平台的flash mla算子不支持量化的cache.
+        const auto cache_dtype = device_.getType() == infinicore::Device::Type::METAX
+                                   ? infinicore::DataType::BF16
+                                   : infinicore::DataType::U8;
         flashmla_cache_vec[layer_idx]
             = std::make_unique<infinilm::layers::mla_attention::SparseFlashMLACache>(
                 paged_config->num_blocks(),
                 paged_config->block_size(),
                 qk_nope_head_dim,
                 qk_rope_head_dim,
-                infinicore::DataType::U8,
+                cache_dtype,
                 device_);
     }
     infinicore::context::syncStream();
