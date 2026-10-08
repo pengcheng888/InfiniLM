@@ -20,11 +20,16 @@ public:
 
     infinicore::Tensor forward(const infinilm::InfinilmModel::Input &input) const;
     infinicore::Tensor embed_tokens(const infinicore::Tensor &input_ids) const;
+    bool is_first_pp_stage() const { return pp_stage_ == 0; }
+    bool is_last_pp_stage() const { return pp_stage_ + 1 == pp_size_; }
 
     void process_weights_after_loading() override;
     void reset_runtime_state() const override;
 
 private:
+    void send_hidden_states(const infinicore::Tensor &hidden_states) const;
+    infinicore::Tensor recv_hidden_states(size_t token_count) const;
+
     INFINICORE_NN_MODULE(infinicore::nn::Embedding, embed_tokens);
     INFINICORE_NN_MODULE_VEC(DeepseekV4DecoderLayer, layers);
     INFINICORE_NN_MODULE(infinicore::nn::RMSNorm, norm);
@@ -35,6 +40,12 @@ private:
 
     size_t hidden_size_{0};
     size_t hc_mult_{4};
+    infinicore::DataType dtype_{infinicore::DataType::BF16};
+    size_t pp_size_{1};
+    size_t pp_stage_{0};
+    size_t tp_size_{1};
+    size_t tp_rank_{0};
+    infinicore::Device device_;
     double rms_norm_eps_{1e-6};
     double hc_eps_{1e-6};
 

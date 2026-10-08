@@ -34,9 +34,6 @@ void Glm4MoeLiteForCausalLM::reset_cache(const cache::CacheConfig *cache_config)
     if (paged_config == nullptr) {
         throw std::runtime_error("Glm4MoeLiteForCausalLM requires PagedKVCacheConfig");
     }
-    if (paged_config->block_size() != 64) {
-        throw std::runtime_error("Glm4MoeLiteForCausalLM requires block_size == 64");
-    }
     cache_config_ = cache_config->unique_copy();
 
     const size_t num_hidden_layers = model_config_->get<size_t>("num_hidden_layers");

@@ -23,13 +23,19 @@ DeepseekV4ForCausalLM::DeepseekV4ForCausalLM(std::shared_ptr<infinilm::config::M
     const size_t hidden_size = model_config->get<size_t>("hidden_size");
     const size_t vocab_size = model_config->get<size_t>("vocab_size");
     const auto dtype = model_config->get_dtype();
+    const auto &rank_info = infinilm::global_state::get_tensor_model_parallel_rank_info();
 
     INFINICORE_NN_MODULE_INIT(model, model_config, device);
-    INFINICORE_NN_MODULE_INIT(lm_head, hidden_size, vocab_size, false, dtype, device);
+    if (rank_info.pp_stage + 1 == static_cast<size_t>(rank_info.pp_size)) {
+        INFINICORE_NN_MODULE_INIT(lm_head, hidden_size, vocab_size, false, dtype, device);
+    }
 }
 
 infinilm::InfinilmModel::Output DeepseekV4ForCausalLM::forward(const infinilm::InfinilmModel::Input &input) const {
     auto hidden_states = model_->forward(input);
+    if (!model_->is_last_pp_stage()) {
+        return {infinicore::Tensor(), hidden_states};
+    }
     auto logits = lm_head_->forward(hidden_states);
     if (logits->ndim() == 2) {
         logits = logits->view({1, logits->size(0), logits->size(1)});
@@ -38,6 +44,9 @@ infinilm::InfinilmModel::Output DeepseekV4ForCausalLM::forward(const infinilm::I
 }
 
 infinicore::Tensor DeepseekV4ForCausalLM::logits_from_hidden(const infinicore::Tensor &hidden_states) const {
+    if (!lm_head_) {
+        throw std::runtime_error("DeepseekV4ForCausalLM::logits_from_hidden called outside the last PP stage");
+    }
     auto mutable_hidden_states = hidden_states;
     auto logits = lm_head_->forward(mutable_hidden_states);
     if (logits->ndim() == 2) {
@@ -78,17 +87,12 @@ void DeepseekV4ForCausalLM::reset_cache(const cache::CacheConfig *cache_config) 
 
     flashmla_cache_vec.resize(num_hidden_layers);
     for (size_t layer_idx = local_layer_begin; layer_idx < local_layer_end; ++layer_idx) {
-        // metax平台的flash mla算子不支持量化的cache.
-        const auto cache_dtype = device_.getType() == infinicore::Device::Type::METAX
-                                   ? infinicore::DataType::BF16
-                                   : infinicore::DataType::U8;
         flashmla_cache_vec[layer_idx]
             = std::make_unique<infinilm::layers::mla_attention::SparseFlashMLACache>(
                 paged_config->num_blocks(),
                 paged_config->block_size(),
                 qk_nope_head_dim,
                 qk_rope_head_dim,
-                cache_dtype,
                 device_);
     }
     infinicore::context::syncStream();

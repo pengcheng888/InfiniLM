@@ -39,9 +39,9 @@ std::pair<infinicore::Tensor, infinicore::Tensor> DenseFlashMLAImpl::forward(
     }
 
     const auto &kv_cache = cache.flashmla_cache_view();
-    if (kv_cache->ndim() != 4 || kv_cache->size(1) != 64
+    if (kv_cache->ndim() != 4
         || kv_cache->size(2) != num_kv_heads_ || kv_cache->size(3) != head_size_) {
-        throw std::runtime_error("DenseFlashMLAImpl::forward expects KV cache [blocks, 64, 1, head_size]");
+        throw std::runtime_error("DenseFlashMLAImpl::forward expects KV cache [blocks, page_size, 1, head_size]");
     }
 
     // 注意：reuse_sched_meta的数值，不要影响下面的逻辑。
@@ -117,11 +117,27 @@ std::pair<infinicore::Tensor, infinicore::Tensor> SparseFlashMLAImpl::forward(
     if (num_kv_heads_ != 1) {
         throw std::runtime_error("SparseFlashMLAImpl::forward currently supports one MLA KV head");
     }
-    if (!kv_cache || kv_cache->ndim() != 4 || kv_cache->size(2) != num_kv_heads_
-        || (kv_cache->dtype() != infinicore::DataType::F8
-            && kv_cache->dtype() != infinicore::DataType::BF16)) {
-        throw std::runtime_error("SparseFlashMLAImpl::forward expects FP8 or BF16 KV cache [blocks, page_size, 1, cache_dim]");
+    if (!kv_cache || kv_cache->ndim() != 4 || kv_cache->size(2) != num_kv_heads_) {
+        throw std::runtime_error("SparseFlashMLAImpl::forward expects a KV cache [blocks, page_size, 1, head_dim]");
     }
+
+    const SparseFlashMLACacheLayout cache_layout = cache.layout();
+    const bool valid_cache_shape = [&]() {
+        switch (cache_layout) {
+        case SparseFlashMLACacheLayout::PlainBf16:
+            return kv_cache->size(3) == head_size_;
+        case SparseFlashMLACacheLayout::PlainBf16RopeDuplicate:
+            return kv_cache->size(3) == head_size_ + cache.rope_head_dim();
+        case SparseFlashMLACacheLayout::PackedFp8:
+            return true;
+        }
+        return false;
+    }();
+    if (!valid_cache_shape) {
+        throw std::runtime_error("SparseFlashMLAImpl::forward cache head dimension does not match the cache layout");
+    }
+
+    const bool is_fp8_kvcache = cache_layout == SparseFlashMLACacheLayout::PackedFp8;
     if (!indices || indices->ndim() != 3 || indices->dtype() != infinicore::DataType::I32
         || indices->size(0) != query->size(0) || indices->size(1) != query->size(1)) {
         throw std::runtime_error("SparseFlashMLAImpl::forward expects indices [tokens, 1, topk]");
@@ -155,13 +171,12 @@ std::pair<infinicore::Tensor, infinicore::Tensor> SparseFlashMLAImpl::forward(
         sched_meta = infinicore::op::flash_mla::FlashMLASchedMeta();
     }
 
-    const bool is_fp8_kvcache = (kv_cache->dtype() == infinicore::DataType::F8);
     auto flash_query = query;
-    if (!is_fp8_kvcache && kv_cache->size(3) != query->size(3)) {
+    if (cache_layout == SparseFlashMLACacheLayout::PlainBf16RopeDuplicate) {
         // MetaX BF16 FlashMLA 的 head 布局需要额外一段 rope：
         // cache 为 [原 head, rope 副本]，query 为 [nope, 0, rope]。
         // 中间 0 段对点积没有贡献，因此扩展后仍保持原始 QK score。
-        const size_t rope_dim = kv_cache->size(3) - query->size(3);
+        const size_t rope_dim = cache.rope_head_dim();
         if (rope_dim == 0 || rope_dim >= query->size(3)) {
             throw std::runtime_error("SparseFlashMLAImpl cannot adapt query to BF16 cache head size");
         }

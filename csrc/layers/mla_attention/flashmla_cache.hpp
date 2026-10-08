@@ -1,10 +1,20 @@
 #pragma once
 
+#include "infinicore/device.hpp"
 #include "infinicore/tensor.hpp"
 
 #include <cstddef>
 
 namespace infinilm::layers::mla_attention {
+
+enum class SparseFlashMLACacheLayout {
+    PackedFp8,
+    PlainBf16,
+    PlainBf16RopeDuplicate,
+};
+
+[[nodiscard]] SparseFlashMLACacheLayout get_mla_cache_layout(
+    const infinicore::Device &device);
 
 class Cache {
 public:
@@ -41,9 +51,10 @@ public:
                         size_t block_size,
                         size_t qk_nope_head_dim,
                         size_t qk_rope_head_dim,
-                        infinicore::DataType dtype,
                         const infinicore::Device &device);
 
+    SparseFlashMLACacheLayout layout() const noexcept;
+    size_t rope_head_dim() const noexcept;
     size_t get_bytes_per_token() const noexcept;
 
     size_t page_size() const noexcept override;
@@ -59,6 +70,7 @@ private:
     size_t quantize_block_size_{64};
     infinicore::DataType rope_storage_dtype_{infinicore::DataType::BF16};
     infinicore::DataType k_with_scale_buffer_dtype_{infinicore::DataType::U8};
+    SparseFlashMLACacheLayout layout_;
 
     infinicore::Tensor raw_cache_;
     infinicore::Tensor flashmla_cache_view_;

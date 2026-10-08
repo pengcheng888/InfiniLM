@@ -2,6 +2,7 @@
 
 #include "../../utils.hpp"
 
+#include "infinicore/device.hpp"
 #include "infinicore/ops/concat_and_cache_mla.hpp"
 #include "infinicore/ops/deepseek_v4/fused_store_flashmla_cache.hpp"
 
@@ -15,6 +16,22 @@ size_t round_up(size_t value, size_t alignment) {
 }
 
 } // namespace
+
+SparseFlashMLACacheLayout get_mla_cache_layout(
+    const infinicore::Device &device) {
+    switch (device.getType()) {
+    case infinicore::Device::Type::ILUVATAR:
+        return SparseFlashMLACacheLayout::PlainBf16;
+    case infinicore::Device::Type::METAX:
+        return SparseFlashMLACacheLayout::PlainBf16RopeDuplicate;
+    case infinicore::Device::Type::HYGON:
+    case infinicore::Device::Type::NVIDIA:
+        return SparseFlashMLACacheLayout::PackedFp8;
+    default:
+        throw std::runtime_error(
+            "Sparse FlashMLA cache is unsupported on device " + device.toString());
+    }
+}
 
 DenseFlashMLACache::DenseFlashMLACache(
     size_t num_blocks,
@@ -68,10 +85,10 @@ SparseFlashMLACache::SparseFlashMLACache(
     size_t block_size,
     size_t qk_nope_head_dim,
     size_t qk_rope_head_dim,
-    infinicore::DataType dtype,
     const infinicore::Device &device)
     : qk_nope_head_dim_(qk_nope_head_dim),
-      qk_rope_head_dim_(qk_rope_head_dim) {
+      qk_rope_head_dim_(qk_rope_head_dim),
+      layout_(get_mla_cache_layout(device)) {
     if (num_blocks == 0 || block_size == 0) {
         throw std::runtime_error("SparseFlashMLACache expects positive num_blocks and block_size");
     }
@@ -81,43 +98,64 @@ SparseFlashMLACache::SparseFlashMLACache(
     if (qk_nope_head_dim_ == 0 || qk_rope_head_dim_ == 0) {
         throw std::runtime_error("SparseFlashMLACache expects positive qk_nope_head_dim and qk_rope_head_dim");
     }
-    if (dtype != k_with_scale_buffer_dtype_ && dtype != infinicore::DataType::BF16) {
-        throw std::runtime_error("SparseFlashMLACache requires U8 or BF16 cache storage");
-    }
-    if (qk_nope_head_dim_ % quantize_block_size_ != 0) {
-        throw std::runtime_error("SparseFlashMLACache expects qk_nope_head_dim to be divisible by quantize_block_size");
-    }
 
-    if (dtype == infinicore::DataType::BF16) {
-        // MetaX BF16 FlashMLA 要求 head 维度为 nope + 2 * rope：
-        // 前 nope + rope 维保存原始 cache_k，末尾 rope 维保存 rope 副本。
+    switch (layout_) {
+    case SparseFlashMLACacheLayout::PlainBf16: {
+        // The Iluvatar flash_mla_sparse_v2 kernel uses a plain BF16 flat KV
+        // cache instead of the DSV4 FP8 packing format.
         raw_cache_ = infinicore::Tensor::zeros(
-            {num_blocks, block_size, 1, qk_nope_head_dim_ + 2 * qk_rope_head_dim_},
-            dtype,
+            {num_blocks, block_size, 1, qk_nope_head_dim_ + qk_rope_head_dim_},
+            infinicore::DataType::BF16,
             device);
         flashmla_cache_view_ = raw_cache_;
         return;
     }
+    case SparseFlashMLACacheLayout::PlainBf16RopeDuplicate: {
+        // MetaX BF16 FlashMLA 要求 head 维度为 nope + 2 * rope：
+        // 前 nope + rope 维保存原始 cache_k，末尾 rope 维保存 rope 副本。
+        raw_cache_ = infinicore::Tensor::zeros(
+            {num_blocks, block_size, 1, qk_nope_head_dim_ + 2 * qk_rope_head_dim_},
+            infinicore::DataType::BF16,
+            device);
+        flashmla_cache_view_ = raw_cache_;
+        return;
+    }
+    case SparseFlashMLACacheLayout::PackedFp8: {
+        if (qk_nope_head_dim_ % quantize_block_size_ != 0) {
+            throw std::runtime_error("SparseFlashMLACache expects qk_nope_head_dim to be divisible by quantize_block_size");
+        }
 
-    const size_t value_bytes_per_token = qk_nope_head_dim_ * infinicore::dsize(k_with_scale_buffer_dtype_)
-                                       + qk_rope_head_dim_ * infinicore::dsize(rope_storage_dtype_);
-    const size_t bytes_per_token = get_bytes_per_token(); // 584
+        const size_t value_bytes_per_token = qk_nope_head_dim_ * infinicore::dsize(k_with_scale_buffer_dtype_)
+                                           + qk_rope_head_dim_ * infinicore::dsize(rope_storage_dtype_);
+        const size_t bytes_per_token = get_bytes_per_token(); // 584
 
-    ASSERT(bytes_per_token == (448 + 64 * 2 + 8));
-    ASSERT(dtype == infinicore::DataType::U8);
+        ASSERT(bytes_per_token == (448 + 64 * 2 + 8));
 
-    const size_t bytes_per_page_padded = round_up(block_size * bytes_per_token, value_bytes_per_token);
+        const size_t bytes_per_page_padded = round_up(block_size * bytes_per_token, value_bytes_per_token);
 
-    raw_cache_ = infinicore::Tensor::zeros({num_blocks, bytes_per_page_padded}, k_with_scale_buffer_dtype_, device);
-    auto raw_cache_f8 = infinicore::Tensor::from_blob(raw_cache_->data(), {num_blocks, bytes_per_page_padded}, infinicore::DataType::F8, device);
+        raw_cache_ = infinicore::Tensor::zeros({num_blocks, bytes_per_page_padded}, k_with_scale_buffer_dtype_, device);
+        auto raw_cache_f8 = infinicore::Tensor::from_blob(raw_cache_->data(), {num_blocks, bytes_per_page_padded}, infinicore::DataType::F8, device);
 
-    flashmla_cache_view_ = raw_cache_f8->narrow({{1, 0, block_size * bytes_per_token}})
-                               ->view({num_blocks, block_size, 1, bytes_per_token});
+        flashmla_cache_view_ = raw_cache_f8->narrow({{1, 0, block_size * bytes_per_token}})
+                                   ->view({num_blocks, block_size, 1, bytes_per_token});
+        return;
+    }
+    }
+
+    throw std::runtime_error("Invalid SparseFlashMLA cache layout");
+}
+
+SparseFlashMLACacheLayout SparseFlashMLACache::layout() const noexcept {
+    return layout_;
+}
+
+size_t SparseFlashMLACache::rope_head_dim() const noexcept {
+    return qk_rope_head_dim_;
 }
 
 size_t SparseFlashMLACache::get_bytes_per_token() const noexcept {
-    if (flashmla_cache_view_ && flashmla_cache_view_->dtype() == infinicore::DataType::BF16) {
-        return (qk_nope_head_dim_ + 2 * qk_rope_head_dim_) * infinicore::dsize(infinicore::DataType::BF16);
+    if (layout_ != SparseFlashMLACacheLayout::PackedFp8) {
+        return flashmla_cache_view_->size(3) * infinicore::dsize(flashmla_cache_view_->dtype());
     }
     const size_t value_bytes_per_token = qk_nope_head_dim_ * infinicore::dsize(k_with_scale_buffer_dtype_)
                                        + qk_rope_head_dim_ * infinicore::dsize(rope_storage_dtype_);
@@ -139,17 +177,21 @@ const infinicore::Tensor &SparseFlashMLACache::flashmla_cache_view() const noexc
 
 void SparseFlashMLACache::set_key_buffer(const infinicore::Tensor &cache_k,
                                          const infinicore::Tensor &loc) {
-    if (flashmla_cache_view_->dtype() == infinicore::DataType::BF16) {
-        // 对于metax平台：
-        // 写入时复制末尾 rope，形成 FlashMLA 需要的 576 维 BF16 cache；
-        // query 侧对应的新增区段为 0，因此 QK 点积仍等价于原始 512 维。
+    switch (layout_) {
+    case SparseFlashMLACacheLayout::PlainBf16:
+    case SparseFlashMLACacheLayout::PlainBf16RopeDuplicate:
+        // InfiniCore selects plain BF16 or rope-duplicate BF16 storage from
+        // the cache device.
         infinicore::op::deepseek_v4::store_flash_mla_bf16_cache_(
             cache_k, flashmla_cache_view_, loc, qk_rope_head_dim_);
         return;
+    case SparseFlashMLACacheLayout::PackedFp8:
+        infinicore::op::deepseek_v4::fused_store_flashmla_cache_(
+            cache_k, raw_cache_view(), loc, static_cast<int>(page_size()));
+        return;
     }
 
-    infinicore::op::deepseek_v4::fused_store_flashmla_cache_(
-        cache_k, raw_cache_view(), loc, static_cast<int>(page_size()));
+    throw std::runtime_error("Invalid SparseFlashMLA cache layout");
 }
 
 } // namespace infinilm::layers::mla_attention
