@@ -48,7 +48,9 @@ DenseFlashMLACache::DenseFlashMLACache(
     }
 
     const size_t cache_dim = kv_lora_rank + qk_rope_head_dim;
-    cache_ = infinicore::Tensor::empty({num_blocks, block_size, 1, cache_dim}, dtype, device);
+    // Some kernels load a full tail block before masking invalid positions.
+    // Tensor::zeros keeps unwritten cache slots finite and prevents uninitialized data from introducing NaNs.
+    cache_ = infinicore::Tensor::zeros({num_blocks, block_size, 1, cache_dim}, dtype, device);
 }
 
 size_t DenseFlashMLACache::page_size() const noexcept {
