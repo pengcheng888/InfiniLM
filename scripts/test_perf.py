@@ -36,7 +36,7 @@ IMAGE_PROMPTS = [
     "请结合图片，讲一个小故事。",
 ]
 
-NUM_REQUESTS = 64
+NUM_REQUESTS = 2
 CONCURRENCY = 20
 API_URL = "http://127.0.0.1:8000"
 MODEL = ""

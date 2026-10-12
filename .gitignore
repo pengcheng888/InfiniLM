@@ -34,3 +34,4 @@ __pycache__/
 *.http
 
 *.nsys-rep
+python/infinicore/lib/*.so

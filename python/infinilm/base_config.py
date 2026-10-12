@@ -46,11 +46,11 @@ def parse_list(value: str):
 class BaseConfig:
     """InfiniLM Unified Config - Command line argument parser"""
 
-    def __init__(self):
+    def __init__(self, argv: list[str] | None = None):
 
         self.parser = argparse.ArgumentParser(description="InfiniLM Unified Config")
         self._add_common_args()
-        self.args, self.extra = self.parser.parse_known_args()
+        self.args, self.extra = self.parser.parse_known_args(argv)
 
         if self.extra:
             warnings.warn(
