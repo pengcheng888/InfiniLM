@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import sys
@@ -22,8 +23,48 @@ from infinilm.server.inference_server import (
 from .config import WorkerOptions, parse_worker_cluster_args, remove_cluster_worker_args
 from .registry import FileServiceRegistry
 from .worker_discovery import WorkerDiscoveryService
+from .worker_traffic import WorkerTrafficMetrics
 
 logger = logging.getLogger(__name__)
+
+
+class DrainingUvicornServer(uvicorn.Server):
+    """Uvicorn server that advertises DRAINING before it stops accepting."""
+
+    def __init__(
+        self,
+        config: uvicorn.Config,
+        *,
+        drain_grace_seconds: float,
+    ) -> None:
+        super().__init__(config)
+        self.drain_grace_seconds = max(0.0, drain_grace_seconds)
+        self.on_drain_start = None
+        self._exit_requested = False
+
+    def handle_exit(self, sig, frame) -> None:
+        if self._exit_requested:
+            super().handle_exit(sig, frame)
+            return
+
+        self._exit_requested = True
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self.should_exit = True
+            return
+        loop.create_task(self._drain_and_exit(), name="infinilm-worker-drain")
+
+    async def _drain_and_exit(self) -> None:
+        try:
+            if self.on_drain_start is not None:
+                await self.on_drain_start()
+            if self.drain_grace_seconds:
+                await asyncio.sleep(self.drain_grace_seconds)
+        except Exception:
+            logger.exception("Worker draining failed; proceeding with shutdown")
+        finally:
+            self.should_exit = True
 
 
 class ClusterInferenceServer(InferenceServer):
@@ -40,8 +81,53 @@ class ClusterInferenceServer(InferenceServer):
         self.cluster_options = cluster_options
         self.registry = registry
         self.worker_discovery: WorkerDiscoveryService | None = None
+        self.uvicorn_server: DrainingUvicornServer | None = None
+        self.worker_traffic = WorkerTrafficMetrics()
         if cluster_options.served_model_name:
             self.model_id = cluster_options.served_model_name
+
+    async def _chat(self, request_id: str, data: dict, http_request):
+        """Count non-streaming traffic before delegating to InferenceServer."""
+        self.worker_traffic.begin(streaming=False)
+        canceled = False
+        failed = False
+        try:
+            response = await super()._chat(request_id, data, http_request)
+            failed = int(getattr(response, "status_code", 200)) >= 400
+            return response
+        except asyncio.CancelledError:
+            canceled = True
+            raise
+        except Exception:
+            failed = True
+            raise
+        finally:
+            self.worker_traffic.finish(canceled=canceled, failed=failed)
+
+    async def _stream_chat(self, request_id: str, data: dict, http_request):
+        """Count streaming traffic for the full response-generator lifetime."""
+        self.worker_traffic.begin(streaming=True)
+        canceled = False
+        failed = False
+        try:
+            async for chunk in super()._stream_chat(request_id, data, http_request):
+                if (
+                    "finish_reason" in chunk
+                    and ('"error"' in chunk or '"timeout"' in chunk)
+                ):
+                    failed = True
+                yield chunk
+        except asyncio.CancelledError:
+            canceled = True
+            raise
+        except GeneratorExit:
+            canceled = True
+            raise
+        except Exception:
+            failed = True
+            raise
+        finally:
+            self.worker_traffic.finish(canceled=canceled, failed=failed)
 
     def _create_discovery_service(
         self,
@@ -78,6 +164,7 @@ class ClusterInferenceServer(InferenceServer):
             registry=self.registry,
             record=record,
             heartbeat_interval=self.cluster_options.heartbeat_interval,
+            traffic_metrics=self.worker_traffic,
         )
 
     def _create_app(self) -> FastAPI:
@@ -89,6 +176,8 @@ class ClusterInferenceServer(InferenceServer):
             async with engine_lifespan(app):
                 discovery = self._create_discovery_service(self.engine)
                 self.worker_discovery = discovery
+                if self.uvicorn_server is not None:
+                    self.uvicorn_server.on_drain_start = discovery.start_draining
                 await discovery.start()
                 try:
                     yield
@@ -168,6 +257,20 @@ def _build_server(argv: list[str]) -> ClusterInferenceServer:
     return server
 
 
+def _run_server(server: ClusterInferenceServer) -> None:
+    config = uvicorn.Config(
+        server._create_app(),
+        host=server.host,
+        port=server.port,
+    )
+    uvicorn_server = DrainingUvicornServer(
+        config,
+        drain_grace_seconds=server.cluster_options.drain_grace_seconds,
+    )
+    server.uvicorn_server = uvicorn_server
+    uvicorn_server.run()
+
+
 def main(argv: list[str] | None = None) -> None:
     args = sys.argv[1:] if argv is None else argv
     server = _build_server(args)
@@ -179,7 +282,7 @@ def main(argv: list[str] | None = None) -> None:
         server.cluster_options.advertise_host,
         server.port,
     )
-    uvicorn.run(server._create_app(), host=server.host, port=server.port)
+    _run_server(server)
 
 
 if __name__ == "__main__":

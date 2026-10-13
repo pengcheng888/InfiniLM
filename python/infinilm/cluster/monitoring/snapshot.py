@@ -47,6 +47,8 @@ def _worker_snapshot(worker: Any, metrics: RouterMetrics) -> dict[str, Any]:
     metadata = worker.metadata or {}
     raw_load = metadata.get("load")
     load = raw_load if isinstance(raw_load, dict) else {}
+    raw_traffic = metadata.get("traffic")
+    traffic = raw_traffic if isinstance(raw_traffic, dict) else {}
     gpu = metadata.get("cuda_visible_devices")
     heartbeat_age_seconds = max(0.0, time.time() - worker.heartbeat_at)
     max_batch_size = int(
@@ -62,6 +64,7 @@ def _worker_snapshot(worker: Any, metrics: RouterMetrics) -> dict[str, Any]:
         "tp": metadata.get("tp"),
         "worker_type": worker.worker_type,
         "transport": worker.transport,
+        "state": worker.state,
         "engine_healthy": bool(worker.engine_healthy),
         "heartbeat_age_seconds": heartbeat_age_seconds,
         "load_snapshot_age_seconds": heartbeat_age_seconds,
@@ -81,6 +84,24 @@ def _worker_snapshot(worker: Any, metrics: RouterMetrics) -> dict[str, Any]:
             worker_id, float(load.get("kv_usage_ratio", 0.0))
         ),
         "requests_total": metrics.worker_requests.get(worker_id, 0),
+        "worker_received_requests_total": int(
+            traffic.get("received_requests_total", 0)
+        ),
+        "untracked_requests_total": max(
+            0,
+            int(traffic.get("received_requests_total", 0))
+            - int(metrics.worker_requests.get(worker_id, 0)),
+        ),
+        "worker_active_requests": int(traffic.get("active_requests", 0)),
+        "worker_successful_requests_total": int(
+            traffic.get("successful_requests_total", 0)
+        ),
+        "worker_failed_requests_total": int(
+            traffic.get("failed_requests_total", 0)
+        ),
+        "worker_canceled_requests_total": int(
+            traffic.get("canceled_requests_total", 0)
+        ),
         "usage_prompt_tokens_total": metrics.worker_usage_prompt_tokens.get(
             worker_id, 0
         ),
@@ -116,6 +137,10 @@ def monitoring_snapshot(
     router.update_worker_metrics(watcher.workers)
     metrics = router.metrics
     workers = watcher.workers
+    worker_states = {
+        "ready": sum(worker.state == "ready" for worker in workers),
+        "draining": sum(worker.state == "draining" for worker in workers),
+    }
 
     return {
         "generated_at": time.time(),
@@ -123,8 +148,9 @@ def monitoring_snapshot(
         "router_mode": router.router_mode,
         "request_plane": options.request_plane,
         "metrics_source": "frontend-router",
-        "ready": len(workers) >= options.router_min_initial_workers,
+        "ready": worker_states["ready"] >= options.router_min_initial_workers,
         "worker_count": len(workers),
+        "worker_states": worker_states,
         "minimum_workers": options.router_min_initial_workers,
         "global": {
             "requests_total": metrics.requests_total,
@@ -139,6 +165,36 @@ def monitoring_snapshot(
             "usage_completion_tokens_total": metrics.usage_completion_tokens_total,
             "usage_total_tokens_total": metrics.usage_total_tokens_total,
             "inflight": metrics.inflight,
+            "worker_received_requests_total": sum(
+                int(
+                    (worker.metadata or {}).get("traffic", {}).get(
+                        "received_requests_total", 0
+                    )
+                )
+                if isinstance((worker.metadata or {}).get("traffic"), dict)
+                else 0
+                for worker in workers
+            ),
+            "worker_active_requests": sum(
+                int((worker.metadata or {}).get("traffic", {}).get("active_requests", 0))
+                if isinstance((worker.metadata or {}).get("traffic"), dict)
+                else 0
+                for worker in workers
+            ),
+            "untracked_requests_total": sum(
+                max(
+                    0,
+                    int(
+                        (worker.metadata or {}).get("traffic", {}).get(
+                            "received_requests_total", 0
+                        )
+                    )
+                    - int(metrics.worker_requests.get(worker.instance_id, 0)),
+                )
+                if isinstance((worker.metadata or {}).get("traffic"), dict)
+                else 0
+                for worker in workers
+            ),
         },
         "latency": {
             "request_duration": _histogram_snapshot(

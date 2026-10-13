@@ -57,6 +57,7 @@ class WorkerOptions:
     endpoint: str = "generate"
     worker_type: str = "aggregated"
     request_plane: str = "http"
+    drain_grace_seconds: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -94,6 +95,12 @@ def parse_worker_cluster_args(argv: list[str] | None = None) -> WorkerOptions:
     _add_cluster_arguments(parser)
     parser.add_argument("--served-model-name", default=None)
     parser.add_argument("--advertise-host", default="127.0.0.1")
+    parser.add_argument(
+        "--drain-grace-seconds",
+        type=float,
+        default=1.0,
+        help="seconds to advertise DRAINING before worker shutdown",
+    )
     args, _ = parser.parse_known_args(argv)
     return WorkerOptions(
         namespace=args.namespace,
@@ -103,6 +110,7 @@ def parse_worker_cluster_args(argv: list[str] | None = None) -> WorkerOptions:
         served_model_name=args.served_model_name,
         advertise_host=args.advertise_host,
         request_plane=args.request_plane,
+        drain_grace_seconds=args.drain_grace_seconds,
     )
 
 
@@ -112,6 +120,7 @@ def remove_cluster_worker_args(argv: list[str]) -> list[str]:
     _add_cluster_arguments(parser)
     parser.add_argument("--served-model-name")
     parser.add_argument("--advertise-host")
+    parser.add_argument("--drain-grace-seconds", type=float)
     _, remaining = parser.parse_known_args(argv)
     return remaining
 

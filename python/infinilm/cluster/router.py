@@ -98,6 +98,7 @@ class ClusterRouter:
     def available_workers(self, model_name: str | None = None) -> list[WorkerRecord]:
         workers = self.watcher.workers
         workers = [worker for worker in workers if worker.transport == self.request_plane]
+        workers = [worker for worker in workers if worker.state == "ready"]
         if model_name:
             workers = [worker for worker in workers if worker.served_model_name == model_name]
         return workers
@@ -128,6 +129,7 @@ class ClusterRouter:
             )
 
     def select(self, workers: list[WorkerRecord]) -> WorkerRecord:
+        workers = [worker for worker in workers if worker.state == "ready"]
         if not workers:
             raise NoWorkersAvailable("no healthy aggregated workers are available")
 

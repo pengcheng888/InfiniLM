@@ -9,6 +9,7 @@ from dataclasses import replace
 from infinilm.llm import AsyncLLMEngine
 
 from .registry import FileServiceRegistry, WorkerRecord
+from .worker_traffic import WorkerTrafficMetrics
 
 logger = logging.getLogger(__name__)
 
@@ -23,11 +24,13 @@ class WorkerDiscoveryService:
         registry: FileServiceRegistry,
         record: WorkerRecord,
         heartbeat_interval: float | None = None,
+        traffic_metrics: WorkerTrafficMetrics | None = None,
     ) -> None:
         self.engine = engine
         self.registry = registry
         self.record = record
         self.heartbeat_interval = heartbeat_interval
+        self.traffic_metrics = traffic_metrics
         self._heartbeat_task: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
@@ -46,6 +49,21 @@ class WorkerDiscoveryService:
             "Registered HTTP request-plane worker at http://%s:%s/v1",
             self.record.host,
             self.record.port,
+        )
+
+    async def start_draining(self) -> None:
+        """Advertise DRAINING immediately before graceful shutdown."""
+        if self.record.state == "draining":
+            return
+
+        self.record = replace(self.record, state="draining")
+        self.record = await self.registry.heartbeat(
+            self.record,
+            engine_healthy=self.engine.is_healthy(),
+        )
+        logger.info(
+            "Worker %s entered DRAINING state",
+            self.record.instance_id,
         )
 
     async def stop(self) -> None:
@@ -71,17 +89,19 @@ class WorkerDiscoveryService:
             )
 
     def _with_engine_load(self) -> WorkerRecord:
+        metadata = dict(self.record.metadata)
+
         get_load_stats = getattr(self.engine, "get_load_stats", None)
-        if not callable(get_load_stats):
-            return self.record
-        try:
-            load = get_load_stats()
-        except Exception as exc:
-            logger.warning("Could not read worker load stats: %s", exc)
-            return self.record
-        if not isinstance(load, dict):
-            return self.record
-        return replace(
-            self.record,
-            metadata={**self.record.metadata, "load": load},
-        )
+        if callable(get_load_stats):
+            try:
+                load = get_load_stats()
+            except Exception as exc:
+                logger.warning("Could not read worker load stats: %s", exc)
+            else:
+                if isinstance(load, dict):
+                    metadata["load"] = load
+
+        if self.traffic_metrics is not None:
+            metadata["traffic"] = self.traffic_metrics.snapshot()
+
+        return replace(self.record, metadata=metadata)

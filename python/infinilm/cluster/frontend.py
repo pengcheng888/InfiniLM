@@ -58,7 +58,9 @@ class ClusterFrontend:
         if workers:
             return requested or workers[0].served_model_name, workers
         if not requested and self.watcher.workers:
-            return self.watcher.workers[0].served_model_name, self.watcher.workers
+            ready_workers = [worker for worker in self.watcher.workers if worker.state == "ready"]
+            if ready_workers:
+                return ready_workers[0].served_model_name, ready_workers
         return None
 
     def create_app(self) -> FastAPI:
@@ -98,11 +100,13 @@ class ClusterFrontend:
         async def health():
             """返回 frontend 自身健康状态和当前发现的 worker 数量。"""
             worker_count = len(self.watcher.workers)
+            ready_count = len(self.router.available_workers())
             return {
                 "status": "healthy",
                 "namespace": self.options.namespace,
                 "workers": worker_count,
-                "ready": worker_count >= self.options.router_min_initial_workers,
+                "ready": ready_count >= self.options.router_min_initial_workers,
+                "ready_workers": ready_count,
             }
 
         @app.get("/v1/models")

@@ -318,19 +318,26 @@ GET /api/monitoring
 - namespace、router mode、ready 状态和 worker 数；
 - requests、successful requests、streaming/non-streaming requests、errors、
   retries、inflight、usage tokens 和 token chunks；
+- worker 侧 received、active、success、failed、canceled 计数；
+- 直接访问 worker 造成的 direct / untracked 请求估计；
 - 全局 request duration、streaming TTFT 和 inter-token latency 的
   avg/p50/p95/p99；
-- 每个 worker 的 endpoint、GPU、TP、heartbeat 年龄、load score、inflight、
-  lease 剩余时间、waiting/running、KV usage、请求数、usage tokens、
-  错误数和最近成功时间。
+- 每个 worker 的 endpoint、GPU、TP、ready/draining 状态、heartbeat 年龄、
+  load score、frontend inflight、worker active、lease 剩余时间、
+  waiting/running、KV usage、frontend 路由数、worker 收到数、direct 数、
+  usage tokens、错误数和最近成功时间。
 
 页面提供“自动刷新”和“刷新”控制。自动刷新默认开启，页面隐藏时暂停，
 恢复可见后继续；接口失败时逐步退避，且旧响应不会覆盖新响应。
 
 指标语义：
 
-- 请求数、错误数、重试数和 usage tokens 只统计经过 frontend router 的请求；
-  直接访问 worker 的请求不会出现在该页面中。
+- `infinilm_router_*` 请求、错误、重试和 usage tokens 只统计经过 frontend
+  router 的请求。
+- `infinilm_worker_*` 来自 worker HTTP 进程，包含 frontend 路由请求和直接访问
+  worker 的请求。
+- direct / untracked 是按 worker 估算：
+  `max(0, worker_received_requests_total - router_worker_requests_total)`。
 - `token chunks`、TTFT 和 inter-token latency 只统计流式请求。
 - 非流式请求会更新请求数、request duration 和 worker 返回的 usage tokens。
 
@@ -400,6 +407,7 @@ Monitoring page: http://127.0.0.1:18000/monitoring
 | `lease_expires_at` | 当前租约截止时间 |
 | `engine_healthy` | `AsyncLLMEngine.is_healthy()` 的结果 |
 | `transport` | 当前固定为 `http` |
+| `state` | `ready` 或 `draining`；router 只选择 `ready` |
 | `metadata` | GPU、TP、端口、batch size、`load` 负载快照等补充信息 |
 
 时间语义：
@@ -414,10 +422,26 @@ worker 正常心跳时会持续刷新：
 heartbeat_at
 lease_expires_at
 engine_healthy
+state
 metadata.load
+metadata.traffic
 ```
 
 `registered_at` 不会随 heartbeat 更新。
+
+`metadata.traffic` 来自 worker HTTP 进程，包含直接访问 worker 的流量：
+
+```json
+{
+  "received_requests_total": 100,
+  "streaming_requests_total": 50,
+  "non_streaming_requests_total": 50,
+  "successful_requests_total": 96,
+  "failed_requests_total": 2,
+  "canceled_requests_total": 2,
+  "active_requests": 3
+}
+```
 
 ## 4. File Registry 流程
 
@@ -450,7 +474,24 @@ WorkerDiscoveryService._heartbeat()
 
 如果 `engine_healthy=false`，记录仍可能存在，但 router 会把它从可用候选中过滤掉。
 
-### 4.3 Snapshot 与过期删除
+### 4.3 DRAINING 与优雅下线
+
+worker 收到 `SIGTERM` 或 `SIGINT` 后，`DrainingUvicornServer` 会先执行：
+
+```text
+WorkerDiscoveryService.start_draining()
+  -> WorkerRecord.state = draining
+  -> 原子写入 discovery
+  -> frontend watcher 观察到 draining
+  -> ClusterRouter 不再选择该 worker
+```
+
+随后 worker 等待 `--drain-grace-seconds`，默认 1 秒。该宽限时间用于覆盖
+frontend watcher 轮询间隔，让在途路由决策有时间收敛；宽限期结束后 Uvicorn
+进入正常 shutdown，完成存量请求后 unregister。第二次退出信号会跳过宽限，
+用于运维强制中断。
+
+### 4.4 Snapshot 与过期删除
 
 frontend watcher 周期性执行：
 
@@ -800,6 +841,15 @@ infinilm_router_worker_kv_usage_ratio
 infinilm_router_worker_last_success_timestamp
 infinilm_router_worker_ttft_seconds
 infinilm_router_worker_request_duration_seconds
+infinilm_worker_state
+infinilm_worker_received_requests_total
+infinilm_worker_streaming_requests_total
+infinilm_worker_non_streaming_requests_total
+infinilm_worker_successful_requests_total
+infinilm_worker_failed_requests_total
+infinilm_worker_canceled_requests_total
+infinilm_worker_active_requests
+infinilm_worker_untracked_requests_total
 ```
 
 ## 9. 测试
@@ -820,6 +870,8 @@ PYTHONPATH=python python -m pytest -q test/service/test_cluster.py
 - least-loaded 使用 waiting / running / KV pressure 元数据选择轻载 worker；
 - `AsyncLLMEngine.get_load_stats()` 读取 scheduler 队列与 cache 状态；
 - `WorkerDiscoveryService` 注册、心跳和退出清理；
+- worker 侧请求计数、直接访问 worker 流量估算；
+- worker `DRAINING` 状态和 Uvicorn 优雅下线；
 - frontend 到 HTTP worker 的非流式请求；
 - OpenAI SSE 到内部 `delta/finish` 帧的转换；
 - worker 5xx 后切换下一个 worker。

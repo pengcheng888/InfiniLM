@@ -7,17 +7,26 @@ from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import httpx
-from infinilm.cluster.config import FrontendOptions, parse_frontend_args
+from infinilm.cluster.config import (
+    FrontendOptions,
+    parse_frontend_args,
+    parse_worker_cluster_args,
+    remove_cluster_worker_args,
+)
 from infinilm.cluster.frontend import ClusterFrontend
 from infinilm.cluster.frontend import main as frontend_main
 from infinilm.cluster.http_worker_client_factory import HttpWorkerClientFactory
 from infinilm.cluster.metrics import REQUEST_DURATION_BUCKETS, Histogram
 from infinilm.cluster.registry import FileServiceRegistry, FileServiceWatcher
 from infinilm.cluster.router import ClusterRouter
+from infinilm.cluster.worker import ClusterInferenceServer, DrainingUvicornServer
 from infinilm.cluster.worker_discovery import WorkerDiscoveryService
+from infinilm.cluster.worker_traffic import WorkerTrafficMetrics
 from infinilm.llm import AsyncLLMEngine
+from infinilm.server.inference_server import InferenceServer
 
 
 class FakeEngine:
@@ -50,6 +59,82 @@ class HistogramTest(unittest.TestCase):
             histogram.quantile(0.95, REQUEST_DURATION_BUCKETS), 0.4625
         )
         self.assertEqual(histogram.quantile(0.99, REQUEST_DURATION_BUCKETS) > 0.2, True)
+
+
+class WorkerTrafficMetricsTest(unittest.TestCase):
+    def test_counters_track_active_success_and_failure(self):
+        metrics = WorkerTrafficMetrics()
+        metrics.begin(streaming=True)
+        metrics.begin(streaming=False)
+        self.assertEqual(metrics.snapshot()["active_requests"], 2)
+
+        metrics.finish()
+        metrics.finish(failed=True)
+        snapshot = metrics.snapshot()
+        self.assertEqual(snapshot["received_requests_total"], 2)
+        self.assertEqual(snapshot["streaming_requests_total"], 1)
+        self.assertEqual(snapshot["non_streaming_requests_total"], 1)
+        self.assertEqual(snapshot["successful_requests_total"], 1)
+        self.assertEqual(snapshot["failed_requests_total"], 1)
+        self.assertEqual(snapshot["active_requests"], 0)
+
+    def test_cluster_inference_server_counts_chat_traffic(self):
+        async def fake_chat(self, request_id, data, http_request):
+            return SimpleNamespace(status_code=200)
+
+        async def fake_stream_chat(self, request_id, data, http_request):
+            yield "data: {\"choices\":[{\"delta\":{\"content\":\"Ready\"}}]}\n\n"
+            yield "data: {\"choices\":[{\"finish_reason\": \"stop\"}]}\n\n"
+
+        server = ClusterInferenceServer.__new__(ClusterInferenceServer)
+        server.worker_traffic = WorkerTrafficMetrics()
+
+        async def run():
+            with (
+                patch.object(InferenceServer, "_chat", new=fake_chat),
+                patch.object(InferenceServer, "_stream_chat", new=fake_stream_chat),
+            ):
+                await server._chat("request-1", {}, object())
+                chunks = [chunk async for chunk in server._stream_chat("request-2", {}, object())]
+
+            self.assertEqual(len(chunks), 2)
+            snapshot = server.worker_traffic.snapshot()
+            self.assertEqual(snapshot["received_requests_total"], 2)
+            self.assertEqual(snapshot["streaming_requests_total"], 1)
+            self.assertEqual(snapshot["non_streaming_requests_total"], 1)
+            self.assertEqual(snapshot["successful_requests_total"], 2)
+            self.assertEqual(snapshot["active_requests"], 0)
+
+        asyncio.run(run())
+
+
+class WorkerDrainingTest(unittest.TestCase):
+    def test_worker_options_include_drain_grace(self):
+        options = parse_worker_cluster_args(["--drain-grace-seconds", "3"])
+        self.assertEqual(options.drain_grace_seconds, 3.0)
+        self.assertEqual(parse_worker_cluster_args([]).drain_grace_seconds, 1.0)
+        remaining = remove_cluster_worker_args(
+            ["--model", "m", "--drain-grace-seconds", "3", "--tp", "1"]
+        )
+        self.assertEqual(remaining, ["--model", "m", "--tp", "1"])
+
+    def test_uvicorn_server_drains_before_exit(self):
+        async def run():
+            server = DrainingUvicornServer.__new__(DrainingUvicornServer)
+            server.drain_grace_seconds = 0.01
+            server.should_exit = False
+            called = asyncio.Event()
+
+            async def drain():
+                called.set()
+
+            server.on_drain_start = drain
+            await server._drain_and_exit()
+
+            self.assertTrue(called.is_set())
+            self.assertTrue(server.should_exit)
+
+        asyncio.run(run())
 
 
 class FileRegistryTest(unittest.TestCase):
@@ -162,6 +247,43 @@ class RouterModeTest(unittest.TestCase):
                 record.instance_id: selected.count(record) for record in records
             }
             self.assertEqual(list(counts.values()), [2, 2, 2])
+
+    def test_router_excludes_draining_worker(self):
+        with TemporaryDirectory() as temporary:
+            registry = FileServiceRegistry(Path(temporary))
+            ready = registry.new_record(
+                namespace="test",
+                component="infinilm",
+                endpoint="generate",
+                worker_type="aggregated",
+                model="/models/qwen",
+                served_model_name="qwen",
+                host="127.0.0.1",
+                port=18081,
+                transport="http",
+            )
+            draining = registry.new_record(
+                namespace="test",
+                component="infinilm",
+                endpoint="generate",
+                worker_type="aggregated",
+                model="/models/qwen",
+                served_model_name="qwen",
+                host="127.0.0.1",
+                port=18082,
+                transport="http",
+                state="draining",
+            )
+            watcher = FileServiceWatcher(registry)
+            watcher._workers = [draining, ready]
+            router = ClusterRouter(
+                watcher,
+                connect_timeout=1.0,
+                request_timeout=2.0,
+            )
+
+            self.assertEqual(router.available_workers(), [ready])
+            self.assertIs(router.select([draining, ready]), ready)
 
 
 class LoadAwareRouterTest(unittest.TestCase):
@@ -384,6 +506,7 @@ class WorkerDiscoveryServiceTest(unittest.TestCase):
                     registry=registry,
                     record=record,
                     heartbeat_interval=0.01,
+                    traffic_metrics=WorkerTrafficMetrics(),
                 )
                 await service.start()
 
@@ -402,6 +525,15 @@ class WorkerDiscoveryServiceTest(unittest.TestCase):
                     registered[0].metadata["load"]["kv_usage_ratio"],
                     0.4,
                 )
+                self.assertEqual(
+                    registered[0].metadata["traffic"]["received_requests_total"],
+                    0,
+                )
+                self.assertEqual(registered[0].state, "ready")
+
+                await service.start_draining()
+                draining = await registry.snapshot("test")
+                self.assertEqual(draining[0].state, "draining")
 
                 self.assertGreaterEqual(
                     registered[0].heartbeat_at,
@@ -467,6 +599,15 @@ class MonitoringDashboardTest(unittest.TestCase):
                             "kv_used": 40,
                             "kv_usage_ratio": 0.4,
                         },
+                        "traffic": {
+                            "received_requests_total": 9,
+                            "streaming_requests_total": 4,
+                            "non_streaming_requests_total": 5,
+                            "successful_requests_total": 8,
+                            "failed_requests_total": 1,
+                            "canceled_requests_total": 0,
+                            "active_requests": 2,
+                        },
                     },
                 )
                 await registry.register(record)
@@ -523,7 +664,18 @@ class MonitoringDashboardTest(unittest.TestCase):
                     self.assertEqual(snapshot["router_mode"], "least-loaded")
                     self.assertEqual(snapshot["metrics_source"], "frontend-router")
                     self.assertEqual(snapshot["worker_count"], 1)
+                    self.assertEqual(snapshot["worker_states"]["ready"], 1)
+                    self.assertEqual(snapshot["worker_states"]["draining"], 0)
                     self.assertEqual(snapshot["global"]["requests_total"], 7)
+                    self.assertEqual(
+                        snapshot["global"]["worker_received_requests_total"], 9
+                    )
+                    self.assertEqual(
+                        snapshot["global"]["worker_active_requests"], 2
+                    )
+                    self.assertEqual(
+                        snapshot["global"]["untracked_requests_total"], 2
+                    )
                     self.assertEqual(snapshot["global"]["streaming_requests_total"], 1)
                     self.assertEqual(
                         snapshot["global"]["non_streaming_requests_total"], 2
@@ -546,12 +698,23 @@ class MonitoringDashboardTest(unittest.TestCase):
                     self.assertEqual(worker["max_batch_size"], 8)
                     self.assertAlmostEqual(worker["kv_usage_ratio"], 0.4)
                     self.assertEqual(worker["requests_total"], 7)
+                    self.assertEqual(worker["state"], "ready")
+                    self.assertEqual(worker["worker_received_requests_total"], 9)
+                    self.assertEqual(worker["untracked_requests_total"], 2)
+                    self.assertEqual(worker["worker_active_requests"], 2)
+                    self.assertEqual(worker["worker_failed_requests_total"], 1)
                     self.assertEqual(worker["usage_total_tokens_total"], 18)
                     self.assertGreaterEqual(worker["lease_remaining_seconds"], 0)
                     self.assertGreaterEqual(worker["load_snapshot_age_seconds"], 0)
                     self.assertGreater(worker["last_success_timestamp"], 0)
                     self.assertIn("p95", snapshot["latency"]["request_duration"])
                     self.assertIn("p99", snapshot["latency"]["ttft"])
+
+                    metrics_response = await client.get("/metrics")
+                    self.assertEqual(metrics_response.status_code, 200)
+                    self.assertIn("infinilm_worker_received_requests_total", metrics_response.text)
+                    self.assertIn("infinilm_worker_untracked_requests_total", metrics_response.text)
+                    self.assertIn('infinilm_worker_state{', metrics_response.text)
 
         asyncio.run(run())
 

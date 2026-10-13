@@ -374,6 +374,110 @@ class RouterMetrics:
             f"infinilm_router_inflight {self.inflight}",
         ]
 
+        # Worker-side traffic comes from worker heartbeat metadata. Unlike router
+        # counters, it also includes requests sent directly to worker endpoints.
+        lines.extend(
+            [
+                "# HELP infinilm_worker_state Worker serving state.",
+                "# TYPE infinilm_worker_state gauge",
+            ]
+        )
+        for worker in workers:
+            worker_id = getattr(worker, "instance_id", None)
+            if worker_id is None:
+                continue
+            state = getattr(worker, "state", "ready")
+            safe = _escape_label(str(worker_id))
+            safe_state = _escape_label(str(state))
+            lines.append(
+                f'infinilm_worker_state{{worker_id="{safe}",state="{safe_state}"}} 1'
+            )
+
+        worker_traffic_names = (
+            (
+                "received_requests_total",
+                "infinilm_worker_received_requests_total",
+                "Worker-side received requests",
+            ),
+            (
+                "streaming_requests_total",
+                "infinilm_worker_streaming_requests_total",
+                "Worker-side streaming requests",
+            ),
+            (
+                "non_streaming_requests_total",
+                "infinilm_worker_non_streaming_requests_total",
+                "Worker-side non-streaming requests",
+            ),
+            (
+                "successful_requests_total",
+                "infinilm_worker_successful_requests_total",
+                "Worker-side successful requests",
+            ),
+            (
+                "failed_requests_total",
+                "infinilm_worker_failed_requests_total",
+                "Worker-side failed requests",
+            ),
+            (
+                "canceled_requests_total",
+                "infinilm_worker_canceled_requests_total",
+                "Worker-side canceled requests",
+            ),
+            (
+                "active_requests",
+                "infinilm_worker_active_requests",
+                "Worker-side active requests",
+            ),
+        )
+        for source_name, metric_name, help_text in worker_traffic_names:
+            if source_name != "active_requests":
+                lines.extend(
+                    [
+                        f"# HELP {metric_name} {help_text}.",
+                        f"# TYPE {metric_name} counter",
+                    ]
+                )
+            else:
+                lines.extend(
+                    [
+                        f"# HELP {metric_name} {help_text}.",
+                        f"# TYPE {metric_name} gauge",
+                    ]
+                )
+
+            for worker in workers:
+                worker_id = getattr(worker, "instance_id", None)
+                metadata = getattr(worker, "metadata", None)
+                traffic = metadata.get("traffic", {}) if isinstance(metadata, dict) else {}
+                if worker_id is None or not isinstance(traffic, dict):
+                    continue
+                value = traffic.get(source_name)
+                if value is None:
+                    continue
+                safe = _escape_label(str(worker_id))
+                lines.append(f'{metric_name}{{worker_id="{safe}"}} {int(value)}')
+
+        lines.extend(
+            [
+                "# HELP infinilm_worker_untracked_requests_total Worker requests not routed by this frontend.",
+                "# TYPE infinilm_worker_untracked_requests_total counter",
+            ]
+        )
+        for worker in workers:
+            worker_id = getattr(worker, "instance_id", None)
+            metadata = getattr(worker, "metadata", None)
+            traffic = metadata.get("traffic", {}) if isinstance(metadata, dict) else {}
+            if worker_id is None or not isinstance(traffic, dict):
+                continue
+            received = int(traffic.get("received_requests_total", 0))
+            routed = int(self.worker_requests.get(worker_id, 0))
+            untracked = max(0, received - routed)
+            safe = _escape_label(str(worker_id))
+            lines.append(
+                f'infinilm_worker_untracked_requests_total{{worker_id="{safe}"}} {untracked}'
+            )
+
         # 以下 per-worker counter 均携带 worker_id 标签，用于对比副本健康和负载。
         for worker_id, value in sorted(self.worker_requests.items()):
             safe = _escape_label(worker_id)

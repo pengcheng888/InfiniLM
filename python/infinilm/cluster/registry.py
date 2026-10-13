@@ -43,6 +43,8 @@ class WorkerRecord:
     lease_expires_at: float
     engine_healthy: bool = True
     transport: str = "http"
+    # ready 表示可接收新请求；draining 表示存量请求可继续，但不再接收新请求。
+    state: str = "ready"
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def discovery_key(self) -> str:
@@ -69,6 +71,7 @@ class FileServiceRegistry:
         port: int,
         engine_healthy: bool = True,
         transport: str = "http",
+        state: str = "ready",
         metadata: dict[str, Any] | None = None,
     ) -> WorkerRecord:
         now = time.time()
@@ -87,6 +90,7 @@ class FileServiceRegistry:
             lease_expires_at=now + self.lease_seconds,
             engine_healthy=engine_healthy,
             transport=transport,
+            state=state,
             metadata=metadata or {},
         )
 
