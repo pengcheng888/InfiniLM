@@ -165,6 +165,10 @@ def monitoring_snapshot(
             "usage_completion_tokens_total": metrics.usage_completion_tokens_total,
             "usage_total_tokens_total": metrics.usage_total_tokens_total,
             "inflight": metrics.inflight,
+            "affinity_requests_total": metrics.affinity_requests_total,
+            "affinity_hits_total": metrics.affinity_hits_total,
+            "affinity_misses_total": metrics.affinity_misses_total,
+            "affinity_entries": len(router.affinity),
             "worker_received_requests_total": sum(
                 int(
                     (worker.metadata or {}).get("traffic", {}).get(

@@ -8,6 +8,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, AsyncIterator
 
+from .affinity import AffinityStore, affinity_key
 from .http_worker_client_factory import (
     HttpWorkerClientFactory,
     is_retryable_http_error,
@@ -75,8 +76,10 @@ class ClusterRouter:
         request_timeout: float,
         request_plane: str = "http",
         router_mode: str = "round-robin",
+        affinity_ttl_seconds: float = 300.0,
+        affinity_capacity: int = 4096,
     ) -> None:
-        if router_mode not in {"least-loaded", "round-robin"}:
+        if router_mode not in {"least-loaded", "round-robin", "session-affinity"}:
             raise ValueError(f"unsupported router mode: {router_mode}")
 
         self.watcher = watcher
@@ -87,6 +90,10 @@ class ClusterRouter:
         self.cursor = 0
         self.metrics = RouterMetrics(router_mode=router_mode)
         self.worker_inflight: dict[str, int] = {}
+        self.affinity = AffinityStore(
+            ttl_seconds=affinity_ttl_seconds,
+            capacity=affinity_capacity,
+        )
         self.worker_client_factory = HttpWorkerClientFactory(
             connect_timeout=connect_timeout,
             request_timeout=request_timeout,
@@ -115,6 +122,13 @@ class ClusterRouter:
         )
 
     def update_worker_metrics(self, workers: list[WorkerRecord]) -> None:
+        self.affinity.retain_workers(
+            {
+                worker.instance_id
+                for worker in self.watcher.workers
+                if worker.state == "ready"
+            }
+        )
         for worker in workers:
             load = worker_load(worker)
             self.metrics.worker_inflight[worker.instance_id] = (
@@ -128,23 +142,74 @@ class ClusterRouter:
                 kv_usage=load.kv_usage,
             )
 
-    def select(self, workers: list[WorkerRecord]) -> WorkerRecord:
+    def _select_least_loaded(self, workers: list[WorkerRecord]) -> WorkerRecord:
+        scored = [(self.load_score(worker), worker) for worker in workers]
+        minimum = min(score for score, _ in scored)
+        candidates = [worker for score, worker in scored if score == minimum]
+        return candidates[self.cursor % len(candidates)]
+
+    def select(
+        self,
+        workers: list[WorkerRecord],
+        *,
+        routing_key: str | None = None,
+        count_affinity: bool = True,
+    ) -> WorkerRecord:
         workers = [worker for worker in workers if worker.state == "ready"]
         if not workers:
             raise NoWorkersAvailable("no healthy aggregated workers are available")
 
+        selected: WorkerRecord
         if self.router_mode == "round-robin":
-            candidates = workers
-        else:
-            scored = [(self.load_score(worker), worker) for worker in workers]
-            minimum = min(score for score, _ in scored)
-            candidates = [
-                worker for score, worker in scored if score == minimum
-            ]
+            selected = workers[self.cursor % len(workers)]
+        elif self.router_mode == "session-affinity":
+            if routing_key is None:
+                if count_affinity:
+                    self.metrics.affinity_unkeyed_requests_total += 1
+                selected = self._select_least_loaded(workers)
+            else:
+                if count_affinity:
+                    self.metrics.affinity_requests_total += 1
+                lookup = self.affinity.get(
+                    routing_key,
+                    {worker.instance_id for worker in workers},
+                )
+                if lookup.expired:
+                    self.metrics.affinity_expired_total += 1
 
-        index = self.cursor % len(candidates)
+                preferred = next(
+                    (
+                        worker
+                        for worker in workers
+                        if worker.instance_id == lookup.worker_id
+                    ),
+                    None,
+                )
+                minimum_load = min(self.load_score(worker) for worker in workers)
+                # Keep cache locality unless the preferred worker is clearly
+                # busier than the current minimum. One inflight request is the
+                # deliberate slack because inflight dominates the score.
+                if (
+                    preferred is not None
+                    and self.load_score(preferred) <= minimum_load + 1.0
+                ):
+                    self.affinity.assign(routing_key, preferred.instance_id)
+                    if count_affinity:
+                        self.metrics.affinity_hits_total += 1
+                    selected = preferred
+                else:
+                    selected = self._select_least_loaded(workers)
+                    evicted = self.affinity.assign(
+                        routing_key, selected.instance_id
+                    )
+                    if evicted:
+                        self.metrics.affinity_evictions_total += 1
+                    if count_affinity:
+                        self.metrics.affinity_misses_total += 1
+        else:
+            selected = self._select_least_loaded(workers)
+
         self.cursor += 1
-        selected = candidates[index]
 
         self.update_worker_metrics(workers)
         return selected
@@ -171,14 +236,32 @@ class ClusterRouter:
         first_token_seen = False
         last_token_at: float | None = None
         duration_recorded = False
+        routing_key = (
+            affinity_key(payload)
+            if self.router_mode == "session-affinity"
+            else None
+        )
+        attempted_worker_ids: set[str] = set()
 
         self.metrics.requests_total += 1
         self.metrics.mark_request_mode(bool(payload.get("stream", False)))
         self.metrics.inflight += 1
         try:
-            for _ in range(len(workers)):
-                worker = self.select(workers)
+            for attempt_index in range(len(workers)):
+                candidates = [
+                    worker
+                    for worker in workers
+                    if worker.instance_id not in attempted_worker_ids
+                ]
+                if not candidates:
+                    break
+                worker = self.select(
+                    candidates,
+                    routing_key=routing_key,
+                    count_affinity=attempt_index == 0,
+                )
                 worker_id = worker.instance_id
+                attempted_worker_ids.add(worker_id)
                 final_worker_id = worker_id
                 attempts += 1
                 self.metrics.attempts_total += 1

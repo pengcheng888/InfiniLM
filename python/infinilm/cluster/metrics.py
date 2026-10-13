@@ -149,6 +149,18 @@ class RouterMetrics:
     # 首个输出前因连接、超时或 5xx 触发的重试次数。
     # 输出为 `infinilm_router_retries_total`。
     retries_total: int = 0
+    # session-affinity 模式下带 affinity key 的请求数。
+    affinity_requests_total: int = 0
+    # affinity key 命中可用且未过载 worker 的次数。
+    affinity_hits_total: int = 0
+    # affinity key 未命中、worker 不可用或过载回退的次数。
+    affinity_misses_total: int = 0
+    # affinity 表过期条目数。
+    affinity_expired_total: int = 0
+    # affinity 表因容量被 LRU 淘汰的条目数。
+    affinity_evictions_total: int = 0
+    # session-affinity 模式下没有生成 affinity key 的请求数。
+    affinity_unkeyed_requests_total: int = 0
     # 返回给客户端的内部 token chunk 数；不是 tokenizer 精确 usage token 数。
     # 输出为 `infinilm_router_tokens_total`。
     tokens_total: int = 0
@@ -307,7 +319,12 @@ class RouterMetrics:
             lines.append(f"{name}_count {histogram.count}")
         return lines
 
-    def render(self, worker_count: int, workers: Iterable[object] = ()) -> str:
+    def render(
+        self,
+        worker_count: int,
+        workers: Iterable[object] = (),
+        affinity_entries: int = 0,
+    ) -> str:
         """渲染 Prometheus 文本格式指标。
 
         `worker_count` 是当前 discovery 可见 worker 数；`workers` 保留给调用方
@@ -354,6 +371,28 @@ class RouterMetrics:
             "# HELP infinilm_router_retries_total Total retry attempts after worker failure.",
             "# TYPE infinilm_router_retries_total counter",
             f"infinilm_router_retries_total {self.retries_total}",
+            # session-affinity 命中、回退和表规模。
+            "# HELP infinilm_router_affinity_requests_total Requests with an affinity routing key.",
+            "# TYPE infinilm_router_affinity_requests_total counter",
+            f"infinilm_router_affinity_requests_total {self.affinity_requests_total}",
+            "# HELP infinilm_router_affinity_hits_total Affinity selections that reused a ready worker.",
+            "# TYPE infinilm_router_affinity_hits_total counter",
+            f"infinilm_router_affinity_hits_total {self.affinity_hits_total}",
+            "# HELP infinilm_router_affinity_misses_total Affinity misses and load-aware fallbacks.",
+            "# TYPE infinilm_router_affinity_misses_total counter",
+            f"infinilm_router_affinity_misses_total {self.affinity_misses_total}",
+            "# HELP infinilm_router_affinity_expired_total Expired affinity entries.",
+            "# TYPE infinilm_router_affinity_expired_total counter",
+            f"infinilm_router_affinity_expired_total {self.affinity_expired_total}",
+            "# HELP infinilm_router_affinity_evictions_total Affinity entries evicted by capacity.",
+            "# TYPE infinilm_router_affinity_evictions_total counter",
+            f"infinilm_router_affinity_evictions_total {self.affinity_evictions_total}",
+            "# HELP infinilm_router_affinity_unkeyed_requests_total Requests without a derivable affinity key.",
+            "# TYPE infinilm_router_affinity_unkeyed_requests_total counter",
+            f"infinilm_router_affinity_unkeyed_requests_total {self.affinity_unkeyed_requests_total}",
+            "# HELP infinilm_router_affinity_entries Active affinity table entries.",
+            "# TYPE infinilm_router_affinity_entries gauge",
+            f"infinilm_router_affinity_entries {affinity_entries}",
             # 输出 token chunk 数，不表示精确 tokenizer token 用量。
             "# HELP infinilm_router_tokens_total Token chunks streamed to clients.",
             "# TYPE infinilm_router_tokens_total counter",
@@ -602,5 +641,10 @@ class FrontendMetrics:
 
     router: RouterMetrics = field(default_factory=RouterMetrics)
 
-    def render(self, worker_count: int, workers: Iterable[object] = ()) -> str:
-        return self.router.render(worker_count, workers)
+    def render(
+        self,
+        worker_count: int,
+        workers: Iterable[object] = (),
+        affinity_entries: int = 0,
+    ) -> str:
+        return self.router.render(worker_count, workers, affinity_entries)

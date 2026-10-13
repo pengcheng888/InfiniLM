@@ -19,6 +19,7 @@ from fastapi.responses import (
     StreamingResponse,
 )
 
+from .affinity import ROUTING_KEY_FIELD
 from .config import FrontendOptions, parse_frontend_args
 from .metrics import FrontendMetrics
 from .monitoring import MONITORING_HTML, monitoring_snapshot
@@ -45,6 +46,8 @@ class ClusterFrontend:
             request_timeout=options.request_timeout,
             request_plane=options.request_plane,
             router_mode=options.router_mode,
+            affinity_ttl_seconds=options.router_affinity_ttl_seconds,
+            affinity_capacity=options.router_affinity_capacity,
         )
         self.metrics = FrontendMetrics(router=self.router.metrics)
 
@@ -145,7 +148,11 @@ class ClusterFrontend:
             """输出 Prometheus 文本格式的路由和 worker 指标。"""
             self.router.update_worker_metrics(self.watcher.workers)
             return PlainTextResponse(
-                self.metrics.render(len(self.watcher.workers), self.watcher.workers),
+                self.metrics.render(
+                    len(self.watcher.workers),
+                    self.watcher.workers,
+                    len(self.router.affinity),
+                ),
                 media_type="text/plain; version=0.0.4",
             )
 
@@ -202,6 +209,11 @@ class ClusterFrontend:
                 )
             model_name, _ = resolved
             payload = {**payload, "model": model_name}
+            session_id = request.headers.get("x-infinilm-session-id") or request.headers.get(
+                "x-session-id"
+            )
+            if session_id:
+                payload = {**payload, ROUTING_KEY_FIELD: session_id}
             request_id = f"cmpl-{uuid.uuid4().hex}"
 
             if payload.get("stream", False):

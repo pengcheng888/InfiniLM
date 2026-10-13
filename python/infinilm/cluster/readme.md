@@ -91,7 +91,9 @@ frontend 专属参数：
 
 | 参数 | 默认值 | 说明 |
 |---|---:|---|
-| `--router-mode` | `least-loaded` | 支持 `least-loaded`、`round-robin` |
+| `--router-mode` | `round-robin` | 支持 `round-robin`、`least-loaded`、`session-affinity` |
+| `--router-affinity-ttl-secs` | `300` 秒 | session-affinity 条目生存时间 |
+| `--router-affinity-capacity` | `4096` | session-affinity LRU 表容量 |
 | `--router-min-initial-workers` | `1` | frontend 完成启动前需要的最小 worker 数 |
 | `--http-host` | `127.0.0.1` | frontend 监听地址 |
 | `--http-port` | `18000` | frontend 监听端口 |
@@ -318,6 +320,7 @@ GET /api/monitoring
 - namespace、router mode、ready 状态和 worker 数；
 - requests、successful requests、streaming/non-streaming requests、errors、
   retries、inflight、usage tokens 和 token chunks；
+- affinity requests、hits、misses、TTL/LRU 状态和活跃 affinity 条目；
 - worker 侧 received、active、success、failed、canceled 计数；
 - 直接访问 worker 造成的 direct / untracked 请求估计；
 - 全局 request duration、streaming TTFT 和 inter-token latency 的
@@ -659,6 +662,41 @@ A B C A B C
 
 该模式适合作为对照基线，或在负载数据不可信、希望请求计数严格均匀时使用。
 
+### 6.3 session-affinity
+
+`session-affinity` 用于尽量把相同会话或相同对话前缀路由到同一个 worker，以
+提高该 worker 本地 prefix cache 的复用机会。
+
+affinity key 的来源优先级：
+
+1. `X-InfiniLM-Session-ID` request header；
+2. `X-Session-ID` request header；
+3. OpenAI request 的 `user` 字段；
+4. `model + 首个 system message + 首个 user message` 的稳定前缀指纹。
+
+key 只保存 SHA-256 指纹，不在 frontend 内存或日志中保存原始 session ID。
+
+路由规则：
+
+```text
+affinity worker 存在且 ready
+  -> 若其 load score 不高于当前最小值 + 1.0，则复用该 worker
+
+affinity worker 不存在、已退出、DRAINING、或明显过载
+  -> 回退 least-loaded
+  -> 更新 affinity 表
+```
+
+affinity 表是每个 frontend 进程内的 LRU：
+
+```text
+TTL: --router-affinity-ttl-secs，默认 300 秒
+容量: --router-affinity-capacity，默认 4096 条
+```
+
+worker 从 discovery 中消失或进入 DRAINING 后，对应 affinity 条目会被清理。
+该模式不迁移 KV cache；它只通过稳定路由提高本地 prefix cache 命中概率。
+
 故障切换只发生在首个输出帧之前。对于 HTTP：
 
 - connect error 可重试；
@@ -693,7 +731,8 @@ POST /chat/completions
 ```
 
 单 worker 适合调试模型加载、chat template 和引擎输出。多副本统一入口、
-least-loaded / round-robin 路由、故障切换和集中指标仍然由 frontend 提供。
+round-robin / least-loaded / session-affinity 路由、故障切换和集中指标仍然由
+frontend 提供。
 
 ## 8. 启动示例
 
@@ -708,7 +747,9 @@ python -m infinilm.cluster.frontend \
   --discovery-backend file \
   --file-kv /tmp/infinilm-agg/discovery \
   --request-plane http \
-  --router-mode least-loaded \
+  --router-mode session-affinity \
+  --router-affinity-ttl-secs 300 \
+  --router-affinity-capacity 4096 \
   --router-min-initial-workers 3 \
   --http-host 127.0.0.1 \
   --http-port 18000
@@ -824,6 +865,13 @@ infinilm_router_usage_prompt_tokens_total
 infinilm_router_usage_completion_tokens_total
 infinilm_router_usage_total_tokens_total
 infinilm_router_inflight
+infinilm_router_affinity_requests_total
+infinilm_router_affinity_hits_total
+infinilm_router_affinity_misses_total
+infinilm_router_affinity_expired_total
+infinilm_router_affinity_evictions_total
+infinilm_router_affinity_unkeyed_requests_total
+infinilm_router_affinity_entries
 infinilm_router_request_duration_seconds
 infinilm_router_ttft_seconds
 infinilm_router_inter_token_latency_seconds
@@ -868,6 +916,8 @@ PYTHONPATH=python python -m pytest -q test/service/test_cluster.py
 - round-robin 三 worker 分配；
 - least-loaded 在并发在途请求下避开忙 worker；
 - least-loaded 使用 waiting / running / KV pressure 元数据选择轻载 worker；
+- session-affinity 的 key 派生、TTL 过期、LRU 淘汰、worker 退出回退和过载回退；
+- frontend 从 `X-Session-ID` 提取 affinity key，且不会把内部 routing key 转发给 worker；
 - `AsyncLLMEngine.get_load_stats()` 读取 scheduler 队列与 cache 状态；
 - `WorkerDiscoveryService` 注册、心跳和退出清理；
 - worker 侧请求计数、直接访问 worker 流量估算；

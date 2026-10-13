@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import httpx
+from infinilm.cluster.affinity import AffinityStore, affinity_key
 from infinilm.cluster.config import (
     FrontendOptions,
     parse_frontend_args,
@@ -137,6 +138,62 @@ class WorkerDrainingTest(unittest.TestCase):
         asyncio.run(run())
 
 
+class AffinityTest(unittest.TestCase):
+    def test_affinity_store_expires_and_evicts_lru_entries(self):
+        now = 100.0
+
+        def clock() -> float:
+            return now
+
+        store = AffinityStore(ttl_seconds=10, capacity=2, clock=clock)
+        store.assign("a", "worker-a")
+        now = 105.0
+        store.assign("b", "worker-b")
+        store.get("a", {"worker-a"})
+
+        now = 106.0
+        store.assign("c", "worker-c")
+        self.assertNotIn("b", store._entries)
+        self.assertIn("a", store._entries)
+
+        now = 116.0
+        lookup = store.get("a", {"worker-a"})
+        self.assertFalse(lookup.hit)
+        self.assertTrue(lookup.expired)
+        self.assertNotIn("a", store._entries)
+        self.assertIn("c", store._entries)
+
+    def test_affinity_key_uses_identity_and_stable_conversation_prefix(self):
+        identity = affinity_key(
+            {"user": "user-1"},
+            {"x-session-id": "session-1"},
+        )
+        self.assertEqual(
+            identity,
+            affinity_key({"user": "other-user"}, {"x-session-id": "session-1"}),
+        )
+        self.assertNotEqual(identity, affinity_key({"user": "user-2"}, {}))
+
+        first_turn = {
+            "model": "qwen",
+            "messages": [
+                {"role": "system", "content": "You are concise."},
+                {"role": "user", "content": "hello"},
+            ],
+        }
+        next_turn = {
+            "model": "qwen",
+            "messages": [
+                {"role": "system", "content": "You are concise."},
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": "hi"},
+                {"role": "user", "content": "continue"},
+            ],
+        }
+        self.assertEqual(affinity_key(first_turn), affinity_key(next_turn))
+        self.assertIsNotNone(affinity_key(first_turn))
+
+
 class FileRegistryTest(unittest.TestCase):
     def test_register_snapshot_and_lease_expiry(self):
         with TemporaryDirectory() as temporary:
@@ -193,8 +250,27 @@ class RouterModeTest(unittest.TestCase):
         options = parse_frontend_args(["--router-mode", "round-robin"])
         self.assertEqual(options.router_mode, "round-robin")
 
+        options = parse_frontend_args(["--router-mode", "session-affinity"])
+        self.assertEqual(options.router_mode, "session-affinity")
+
         with self.assertRaises(SystemExit):
             parse_frontend_args(["--router-mode", "least-inflight"])
+
+    def test_affinity_options_have_defaults_and_overrides(self):
+        options = parse_frontend_args([])
+        self.assertEqual(options.router_affinity_ttl_seconds, 300.0)
+        self.assertEqual(options.router_affinity_capacity, 4096)
+
+        options = parse_frontend_args(
+            [
+                "--router-affinity-ttl-secs",
+                "60",
+                "--router-affinity-capacity",
+                "128",
+            ]
+        )
+        self.assertEqual(options.router_affinity_ttl_seconds, 60.0)
+        self.assertEqual(options.router_affinity_capacity, 128)
 
     def test_frontend_startup_logs_monitoring_url(self):
         from unittest.mock import patch
@@ -215,6 +291,53 @@ class RouterModeTest(unittest.TestCase):
             "http://127.0.0.1:18000/monitoring",
             logs.output,
         )
+
+    def test_session_affinity_reuses_and_falls_back(self):
+        with TemporaryDirectory() as temporary:
+            registry = FileServiceRegistry(Path(temporary))
+            records = [
+                registry.new_record(
+                    namespace="test",
+                    component="infinilm",
+                    endpoint="generate",
+                    worker_type="aggregated",
+                    model="/models/qwen",
+                    served_model_name="qwen",
+                    host="127.0.0.1",
+                    port=18081 + index,
+                    transport="http",
+                )
+                for index in range(3)
+            ]
+            watcher = FileServiceWatcher(registry)
+            watcher._workers = records
+            router = ClusterRouter(
+                watcher,
+                connect_timeout=1.0,
+                request_timeout=2.0,
+                router_mode="session-affinity",
+            )
+            key = affinity_key({"user": "user-1"})
+
+            first = router.select(records, routing_key=key)
+            second = router.select(records, routing_key=key)
+            self.assertIs(first, second)
+            self.assertEqual(router.metrics.affinity_requests_total, 2)
+            self.assertEqual(router.metrics.affinity_hits_total, 1)
+            self.assertEqual(router.metrics.affinity_misses_total, 1)
+            self.assertEqual(len(router.affinity), 1)
+
+            watcher._workers = [
+                record for record in records if record.instance_id != first.instance_id
+            ]
+            fallback = router.select(watcher.workers, routing_key=key)
+            self.assertIsNot(fallback, first)
+            self.assertEqual(router.metrics.affinity_misses_total, 2)
+
+            router.worker_inflight[fallback.instance_id] = 5
+            rebalanced = router.select(watcher.workers, routing_key=key)
+            self.assertIsNot(rebalanced, fallback)
+            self.assertEqual(router.metrics.affinity_misses_total, 3)
 
     def test_round_robin_selects_each_worker_evenly(self):
         with TemporaryDirectory() as temporary:
@@ -655,6 +778,7 @@ class MonitoringDashboardTest(unittest.TestCase):
                     self.assertIn('id="refresh"', page.text)
                     self.assertIn("duration-p95", page.text)
                     self.assertIn("duration-p99", page.text)
+                    self.assertIn('id="affinity-hits"', page.text)
                     self.assertNotIn("https://cdn", page.text)
 
                     response = await client.get("/api/monitoring")
@@ -676,6 +800,10 @@ class MonitoringDashboardTest(unittest.TestCase):
                     self.assertEqual(
                         snapshot["global"]["untracked_requests_total"], 2
                     )
+                    self.assertEqual(snapshot["global"]["affinity_requests_total"], 0)
+                    self.assertEqual(snapshot["global"]["affinity_hits_total"], 0)
+                    self.assertEqual(snapshot["global"]["affinity_misses_total"], 0)
+                    self.assertEqual(snapshot["global"]["affinity_entries"], 0)
                     self.assertEqual(snapshot["global"]["streaming_requests_total"], 1)
                     self.assertEqual(
                         snapshot["global"]["non_streaming_requests_total"], 2
@@ -715,6 +843,10 @@ class MonitoringDashboardTest(unittest.TestCase):
                     self.assertIn("infinilm_worker_received_requests_total", metrics_response.text)
                     self.assertIn("infinilm_worker_untracked_requests_total", metrics_response.text)
                     self.assertIn('infinilm_worker_state{', metrics_response.text)
+                    self.assertIn(
+                        "infinilm_router_affinity_entries 0",
+                        metrics_response.text,
+                    )
 
         asyncio.run(run())
 
@@ -944,6 +1076,112 @@ class HttpRequestPlaneTest(unittest.TestCase):
                     )
                 finally:
                     await transport_http.aclose()
+
+        asyncio.run(run())
+
+    def test_session_affinity_uses_frontend_header_and_hides_internal_key(self):
+        visited_ports: list[int] = []
+
+        def worker_transport(request: httpx.Request) -> httpx.Response:
+            payload = json.loads(request.content)
+            self.assertNotIn("__infinilm_routing_key", payload)
+            visited_ports.append(request.url.port)
+            return httpx.Response(
+                200,
+                json={
+                    "id": "worker-completion",
+                    "object": "chat.completion",
+                    "created": 1,
+                    "model": "qwen",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {"role": "assistant", "content": "Ready."},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "usage": {
+                        "prompt_tokens": 3,
+                        "completion_tokens": 2,
+                        "total_tokens": 5,
+                    },
+                },
+            )
+
+        async def run():
+            with TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                registry = FileServiceRegistry(root)
+                records = [
+                    registry.new_record(
+                        namespace="test",
+                        component="infinilm",
+                        endpoint="generate",
+                        worker_type="aggregated",
+                        model="/models/qwen",
+                        served_model_name="qwen",
+                        host="127.0.0.1",
+                        port=port,
+                        transport="http",
+                    )
+                    for port in (18091, 18092)
+                ]
+                for record in records:
+                    await registry.register(record)
+
+                frontend = ClusterFrontend(
+                    FrontendOptions(
+                        namespace="test",
+                        file_kv=root,
+                        router_mode="session-affinity",
+                        router_min_initial_workers=1,
+                        http_host="127.0.0.1",
+                        http_port=18000,
+                        connect_timeout=1.0,
+                        request_timeout=2.0,
+                        health_interval=0.1,
+                        registry_ttl=10.0,
+                        heartbeat_interval=2.0,
+                    )
+                )
+                await frontend.router.aclose()
+                worker_http = httpx.AsyncClient(
+                    transport=httpx.MockTransport(worker_transport)
+                )
+                frontend.router.worker_client_factory = HttpWorkerClientFactory(
+                    connect_timeout=1.0,
+                    request_timeout=2.0,
+                    http_client=worker_http,
+                )
+                await frontend.watcher.refresh("test")
+                app = frontend.create_app()
+
+                try:
+                    async with httpx.AsyncClient(
+                        transport=httpx.ASGITransport(app=app),
+                        base_url="http://frontend",
+                    ) as client:
+                        headers = {"X-Session-ID": "session-1"}
+                        for _ in range(2):
+                            response = await client.post(
+                                "/v1/chat/completions",
+                                headers=headers,
+                                json={
+                                    "model": "qwen",
+                                    "messages": [
+                                        {"role": "user", "content": "hi"}
+                                    ],
+                                },
+                            )
+                            self.assertEqual(response.status_code, 200)
+
+                    self.assertEqual(len(visited_ports), 2)
+                    self.assertEqual(visited_ports[0], visited_ports[1])
+                    self.assertEqual(frontend.router.metrics.affinity_requests_total, 2)
+                    self.assertEqual(frontend.router.metrics.affinity_hits_total, 1)
+                    self.assertEqual(frontend.router.metrics.affinity_misses_total, 1)
+                finally:
+                    await worker_http.aclose()
 
         asyncio.run(run())
 

@@ -23,6 +23,7 @@ _STANDARD_FIELDS = {
     "top_p",
     "max_tokens",
     "stop",
+    "__infinilm_routing_key",
 }
 
 
