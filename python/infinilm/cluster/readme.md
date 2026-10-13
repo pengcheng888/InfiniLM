@@ -6,7 +6,7 @@
 1. **file discovery 控制面**：worker 把自己的 HTTP 地址、模型名和健康状态写入
    本机 JSON 文件，frontend 周期性读取这些文件。
 2. **HTTP 数据面**：frontend 对外提供统一 OpenAI API，并在多个 worker 之间
-   做 round-robin 路由、超时控制、失败切换和流式转发。
+   做 least-loaded / round-robin 路由、超时控制、失败切换和流式转发。
 
 当前运行时只支持：
 
@@ -28,7 +28,7 @@
                           | OpenAI-compatible HTTP/SSE
                           v
                 +---------------------------+
-                | RoundRobinRouter          |
+                | ClusterRouter          |
                 | - worker 选择             |
                 | - request timeout         |
                 | - 首 token 前故障切换     |
@@ -91,7 +91,7 @@ frontend 专属参数：
 
 | 参数 | 默认值 | 说明 |
 |---|---:|---|
-| `--router-mode` | `round-robin` | 当前仅支持 round-robin |
+| `--router-mode` | `least-loaded` | 支持 `least-loaded`、`round-robin` |
 | `--router-min-initial-workers` | `1` | frontend 完成启动前需要的最小 worker 数 |
 | `--http-host` | `127.0.0.1` | frontend 监听地址 |
 | `--http-port` | `18000` | frontend 监听端口 |
@@ -200,17 +200,17 @@ OpenAI SDK 设置：
 max_retries=0
 ```
 
-原因是 worker 级重试由 `RoundRobinRouter` 统一处理，避免 SDK 和 router 双层重试。
+原因是 worker 级重试由 `ClusterRouter` 统一处理，避免 SDK 和 router 双层重试。
 
 ### `router.py`
 
-`RoundRobinRouter` 是 frontend 的数据面路由核心。
+`ClusterRouter` 是 frontend 的数据面路由核心。
 
 职责：
 
 1. 从 `FileServiceWatcher` 获取当前可用 worker；
 2. 过滤 `transport=http`、模型名匹配、engine 健康且租约未过期的 worker；
-3. round-robin 选择 worker；
+3. 按 `least-loaded` 综合评分或 `round-robin` 顺序选择 worker；
 4. 为本次请求创建 `HttpWorkerClient`；
 5. 对内部帧流施加整体 deadline；
 6. 记录请求数、token chunk 数、错误数和 inflight；
@@ -241,6 +241,8 @@ API：
 | GET | `/v1/models` | OpenAI models 格式的模型列表 |
 | GET | `/v1/models/{model}/ready` | 指定模型是否满足最小副本数 |
 | GET | `/metrics` | Prometheus 文本格式指标 |
+| GET | `/monitoring` | 内置 worker 监控网页 |
+| GET | `/api/monitoring` | 监控网页使用的 JSON 状态快照 |
 | POST | `/v1/chat/completions` | OpenAI-compatible chat API |
 | POST | `/chat/completions` | 兼容旧路径 |
 
@@ -252,7 +254,7 @@ parse_frontend_args()
   -> ClusterFrontend(options)
      -> FileServiceRegistry
      -> FileServiceWatcher
-     -> RoundRobinRouter
+     -> ClusterRouter
      -> HttpWorkerClientFactory
      -> FrontendMetrics
   -> uvicorn.run(frontend.create_app())
@@ -268,7 +270,7 @@ refresh file discovery
   -> serve app
   -> shutdown:
        FileServiceWatcher.stop()
-       RoundRobinRouter.aclose()
+       ClusterRouter.aclose()
 ```
 
 ### `metrics.py`
@@ -289,6 +291,58 @@ infinilm_router_worker_errors_total{worker_id=...}
 `tokens_total` 统计的是 router 输出的内部 token chunk 数，不是 tokenizer 的
 严格 usage token 数。非流式响应中的 usage 来自 worker 返回的 OpenAI usage。
 
+### `monitoring/`
+
+监控能力集中在本机 `infinilm.cluster.monitoring` 包中：
+
+```text
+monitoring/
+  __init__.py
+  snapshot.py
+  page.py
+```
+
+`ClusterFrontend.create_app()` 会同时注册：
+
+```text
+GET /monitoring
+GET /api/monitoring
+```
+
+监控页面没有独立进程和独立端口，随 frontend 的 FastAPI/Uvicorn 生命周期一起
+启动和退出。页面使用原生 HTML/CSS/JS，不依赖 CDN、npm 包或前端构建工具，
+每 2 秒请求一次 `/api/monitoring`。
+
+页面展示：
+
+- namespace、router mode、ready 状态和 worker 数；
+- requests、successful requests、streaming/non-streaming requests、errors、
+  retries、inflight、usage tokens 和 token chunks；
+- 全局 request duration、streaming TTFT 和 inter-token latency 的
+  avg/p50/p95/p99；
+- 每个 worker 的 endpoint、GPU、TP、heartbeat 年龄、load score、inflight、
+  lease 剩余时间、waiting/running、KV usage、请求数、usage tokens、
+  错误数和最近成功时间。
+
+页面提供“自动刷新”和“刷新”控制。自动刷新默认开启，页面隐藏时暂停，
+恢复可见后继续；接口失败时逐步退避，且旧响应不会覆盖新响应。
+
+指标语义：
+
+- 请求数、错误数、重试数和 usage tokens 只统计经过 frontend router 的请求；
+  直接访问 worker 的请求不会出现在该页面中。
+- `token chunks`、TTFT 和 inter-token latency 只统计流式请求。
+- 非流式请求会更新请求数、request duration 和 worker 返回的 usage tokens。
+
+访问地址：
+
+```text
+http://127.0.0.1:18000/monitoring
+```
+
+如果 frontend 监听 `0.0.0.0`，监控页面也会暴露到对应网络。生产环境需要在
+frontend 前增加访问控制，或仅监听本机地址。
+
 ### `TCP_REQUEST_PLANE_DESIGN.md`
 
 这是历史设计存档，记录早期 raw TCP JSON-lines 请求面的协议、握手、取消、
@@ -297,17 +351,32 @@ infinilm_router_worker_errors_total{worker_id=...}
 
 ### `run_cluster.sh`
 
-这是一个本机三副本启动示例，默认：
+这是一个本机启动示例，当前默认启动 1 个 worker：
 
 ```text
 frontend: 18000
-worker:   18081, 18082, 18083
-GPU:      0, 1, 2
+worker:   18081
+GPU:      0
+model:    Qwen3-0.6B
+router:   round-robin
 ```
 
-注意：当前工作区版本的 `run_cluster.sh` 中 worker 启动循环处于注释状态，
-执行该脚本只会启动 frontend。如果要用它启动三副本集群，需要恢复该循环，
-或按本文的“手动启动”示例分别启动 worker。
+默认路由模式为 `round-robin`。`ROUTER_MODE` 环境变量可以覆盖为
+`least-loaded`，例如：
+
+```bash
+ROUTER_MODE=least-loaded bash python/infinilm/cluster/run_cluster.sh
+```
+
+脚本会同时打印 OpenAI API 地址和监控网页地址。frontend 自身启动时也会
+在日志中输出：
+
+```text
+Monitoring page: http://127.0.0.1:18000/monitoring
+```
+
+如需三副本，可将脚本中的 `GPUS` 默认值恢复为 `0 1 2`，或通过环境变量
+`GPUS="0 1 2"` 覆盖。
 
 `*.pyc` 和 `__pycache__` 是 Python 生成产物，不属于源码模块。
 
@@ -331,7 +400,7 @@ GPU:      0, 1, 2
 | `lease_expires_at` | 当前租约截止时间 |
 | `engine_healthy` | `AsyncLLMEngine.is_healthy()` 的结果 |
 | `transport` | 当前固定为 `http` |
-| `metadata` | GPU、TP、端口、batch size 等补充信息 |
+| `metadata` | GPU、TP、端口、batch size、`load` 负载快照等补充信息 |
 
 时间语义：
 
@@ -345,6 +414,7 @@ worker 正常心跳时会持续刷新：
 heartbeat_at
 lease_expires_at
 engine_healthy
+metadata.load
 ```
 
 `registered_at` 不会随 heartbeat 更新。
@@ -412,7 +482,7 @@ client
     -> validate JSON and messages
     -> resolve model
     -> generate request_id
-    -> RoundRobinRouter.stream_chat()
+    -> ClusterRouter.stream_chat()
     -> HttpWorkerClient.stream_chat()
     -> AsyncOpenAI.chat.completions.create(stream=False)
     -> worker /v1/chat/completions
@@ -445,7 +515,7 @@ client
   POST /v1/chat/completions with stream=true
     -> ClusterFrontend
     -> StreamingResponse(_stream_response)
-    -> RoundRobinRouter.stream_chat()
+    -> ClusterRouter.stream_chat()
     -> HttpWorkerClient.stream_chat()
     -> AsyncOpenAI.chat.completions.create(stream=True)
     -> worker SSE
@@ -500,7 +570,40 @@ lease not expired
 worker_type == aggregated
 ```
 
-round-robin 逻辑：
+### 6.1 least-loaded
+
+`least-loaded` 是可显式选择的负载感知路由模式。frontend 为每个 worker
+维护当前在本
+frontend 上的在途请求数；worker heartbeat 会调用
+`AsyncLLMEngine.get_load_stats()`，把近似负载快照写入 discovery：
+
+```json
+{
+  "waiting_requests": 2,
+  "running_requests": 3,
+  "max_batch_size": 32,
+  "kv_capacity": 500,
+  "kv_used": 120,
+  "kv_usage_ratio": 0.24
+}
+```
+
+frontend 综合评分：
+
+```text
+score =
+  0.90 * frontend inflight
++ 0.05 * waiting_requests
++ 0.03 * running_requests / max_batch_size
++ 0.02 * kv_usage_ratio
+```
+
+同样选择 score 最小者，平局时轮询。队列和 cache 数值来自 scheduler 的周期性
+近似快照，用于路由倾向控制，不作为精确计费或强一致性状态。
+
+### 6.2 round-robin
+
+`round-robin` 不使用负载评分，按当前可用 worker 的稳定顺序轮询：
 
 ```python
 index = cursor % len(workers)
@@ -512,6 +615,8 @@ cursor += 1
 ```text
 A B C A B C
 ```
+
+该模式适合作为对照基线，或在负载数据不可信、希望请求计数严格均匀时使用。
 
 故障切换只发生在首个输出帧之前。对于 HTTP：
 
@@ -547,7 +652,7 @@ POST /chat/completions
 ```
 
 单 worker 适合调试模型加载、chat template 和引擎输出。多副本统一入口、
-round-robin、故障切换和集中指标仍然由 frontend 提供。
+least-loaded / round-robin 路由、故障切换和集中指标仍然由 frontend 提供。
 
 ## 8. 启动示例
 
@@ -562,7 +667,7 @@ python -m infinilm.cluster.frontend \
   --discovery-backend file \
   --file-kv /tmp/infinilm-agg/discovery \
   --request-plane http \
-  --router-mode round-robin \
+  --router-mode least-loaded \
   --router-min-initial-workers 3 \
   --http-host 127.0.0.1 \
   --http-port 18000
@@ -655,6 +760,48 @@ curl http://127.0.0.1:18000/v1/models/Qwen3-0.6B/ready
 curl http://127.0.0.1:18000/metrics
 ```
 
+监控网页：
+
+```text
+http://127.0.0.1:18000/monitoring
+```
+
+主要指标包括：
+
+```text
+infinilm_router_mode
+infinilm_router_metrics_source
+infinilm_router_requests_total
+infinilm_router_attempts_total
+infinilm_router_successful_requests_total
+infinilm_router_streaming_requests_total
+infinilm_router_non_streaming_requests_total
+infinilm_router_errors_total
+infinilm_router_retries_total
+infinilm_router_tokens_total
+infinilm_router_usage_prompt_tokens_total
+infinilm_router_usage_completion_tokens_total
+infinilm_router_usage_total_tokens_total
+infinilm_router_inflight
+infinilm_router_request_duration_seconds
+infinilm_router_ttft_seconds
+infinilm_router_inter_token_latency_seconds
+infinilm_router_worker_requests_total
+infinilm_router_worker_usage_prompt_tokens_total
+infinilm_router_worker_usage_completion_tokens_total
+infinilm_router_worker_usage_total_tokens_total
+infinilm_router_worker_errors_total
+infinilm_router_worker_retries_total
+infinilm_router_worker_inflight
+infinilm_router_worker_load_score
+infinilm_router_worker_waiting_requests
+infinilm_router_worker_running_requests
+infinilm_router_worker_kv_usage_ratio
+infinilm_router_worker_last_success_timestamp
+infinilm_router_worker_ttft_seconds
+infinilm_router_worker_request_duration_seconds
+```
+
 ## 9. 测试
 
 运行 cluster 单元测试：
@@ -667,11 +814,17 @@ PYTHONPATH=python python -m pytest -q test/service/test_cluster.py
 测试覆盖：
 
 - file registry 注册、snapshot、租约过期和文件删除；
+- 默认接受 `round-robin`，显式接受 `least-loaded`，拒绝 `least-inflight`；
 - round-robin 三 worker 分配；
+- least-loaded 在并发在途请求下避开忙 worker；
+- least-loaded 使用 waiting / running / KV pressure 元数据选择轻载 worker；
+- `AsyncLLMEngine.get_load_stats()` 读取 scheduler 队列与 cache 状态；
 - `WorkerDiscoveryService` 注册、心跳和退出清理；
 - frontend 到 HTTP worker 的非流式请求；
 - OpenAI SSE 到内部 `delta/finish` 帧的转换；
 - worker 5xx 后切换下一个 worker。
+- TTFT、token 间隔、请求耗时和 retry 指标。
+- `/monitoring` 页面和 `/api/monitoring` JSON 快照。
 
 单元测试使用 `httpx.MockTransport` 模拟 worker 网络层，不加载模型、不占用 GPU。
 真实三副本部署需要另行启动 frontend 和 worker 进行集成验证。
@@ -697,7 +850,7 @@ FrontendOptions
   -> ClusterFrontend
        -> FileServiceRegistry
        -> FileServiceWatcher
-       -> RoundRobinRouter
+       -> ClusterRouter
             -> HttpWorkerClientFactory
                  -> HttpWorkerClient
                       -> AsyncOpenAI
@@ -717,7 +870,7 @@ WorkerOptions
 FileServiceRegistry
   -> WorkerRecord list
   -> FileServiceWatcher.workers
-  -> RoundRobinRouter.available_workers()
+  -> ClusterRouter.available_workers()
   -> HttpWorkerClientFactory.create(worker)
   -> HttpWorkerClient
 ```

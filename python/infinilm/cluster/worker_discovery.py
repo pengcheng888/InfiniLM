@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import replace
 
 from infinilm.llm import AsyncLLMEngine
 
@@ -32,7 +33,8 @@ class WorkerDiscoveryService:
     async def start(self) -> None:
         if self._heartbeat_task is not None:
             return
-        
+
+        self.record = self._with_engine_load()
         await self.registry.register(self.record)
 
         self._heartbeat_task = asyncio.create_task(
@@ -62,7 +64,24 @@ class WorkerDiscoveryService:
         )
         while True:
             await asyncio.sleep(interval)
+            self.record = self._with_engine_load()
             self.record = await self.registry.heartbeat(
                 self.record,
                 engine_healthy=self.engine.is_healthy(),
             )
+
+    def _with_engine_load(self) -> WorkerRecord:
+        get_load_stats = getattr(self.engine, "get_load_stats", None)
+        if not callable(get_load_stats):
+            return self.record
+        try:
+            load = get_load_stats()
+        except Exception as exc:
+            logger.warning("Could not read worker load stats: %s", exc)
+            return self.record
+        if not isinstance(load, dict):
+            return self.record
+        return replace(
+            self.record,
+            metadata={**self.record.metadata, "load": load},
+        )

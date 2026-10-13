@@ -675,6 +675,52 @@ class AsyncLLMEngine:
     def is_healthy(self) -> bool:
         return bool(self._healthy)
 
+    def get_load_stats(self) -> dict:
+        """Return a best-effort snapshot for cluster load-aware routing.
+
+        Queue sizes and cache counters are read from the scheduler while the
+        engine step thread may be mutating them.  This is intentional: the
+        values are periodic routing hints, not exact accounting snapshots.
+        """
+        scheduler = self.engine.scheduler
+        stats: dict[str, Union[int, float]] = {
+            "waiting_requests": 0,
+            "running_requests": 0,
+            "max_batch_size": self.config.max_batch_size,
+        }
+
+        waiting_queue = getattr(scheduler, "waiting_queue", None)
+        if waiting_queue is not None:
+            stats["waiting_requests"] = waiting_queue.sync_q.qsize()
+
+        running_queue = getattr(scheduler, "running_queue", None)
+        if running_queue is not None:
+            stats["running_requests"] = running_queue.sync_q.qsize()
+        elif getattr(scheduler, "running_request", None) is not None:
+            stats["running_requests"] = 1
+
+        try:
+            cache_stats = scheduler.get_cache_stats()
+            if "usable_blocks" in cache_stats:
+                capacity = max(1, int(cache_stats["usable_blocks"]))
+                used = max(0, int(cache_stats.get("num_used_blocks", 0)))
+                stats["kv_capacity"] = capacity
+                stats["kv_used"] = used
+                stats["num_free_blocks"] = max(
+                    0, int(cache_stats.get("num_free_blocks", capacity - used))
+                )
+                stats["kv_usage_ratio"] = min(1.0, used / capacity)
+            elif "max_cache_len" in cache_stats:
+                capacity = max(1, int(cache_stats["max_cache_len"]))
+                used = max(0, int(cache_stats.get("cached_tokens", 0)))
+                stats["kv_capacity"] = capacity
+                stats["kv_used"] = used
+                stats["kv_usage_ratio"] = min(1.0, used / capacity)
+        except Exception as exc:
+            logger.debug("Could not read scheduler cache stats: %s", exc)
+
+        return stats
+
     def start(self):
         """Start the background inference loop."""
         if self._running:

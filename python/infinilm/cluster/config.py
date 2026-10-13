@@ -67,7 +67,7 @@ class FrontendOptions:
     namespace: str
     # file discovery 根目录，frontend 从这里周期性读取 worker JSON 记录。
     file_kv: Path
-    # 路由策略名；当前支持 round-robin。
+    # 路由策略名；默认 round-robin，也支持 least-loaded。
     router_mode: str
     # frontend 完成启动前需要发现的最小健康 worker 数量。
     router_min_initial_workers: int
@@ -119,7 +119,11 @@ def remove_cluster_worker_args(argv: list[str]) -> list[str]:
 def parse_frontend_args(argv: list[str] | None = None) -> FrontendOptions:
     parser = argparse.ArgumentParser(description="Start the InfiniLM cluster frontend")
     _add_cluster_arguments(parser)
-    parser.add_argument("--router-mode", choices=["round-robin"], default="round-robin")
+    parser.add_argument(
+        "--router-mode",
+        choices=["least-loaded", "round-robin"],
+        default="round-robin",
+    )
     parser.add_argument("--router-min-initial-workers", type=int, default=1)
     parser.add_argument("--http-host", default="127.0.0.1")
     parser.add_argument("--http-port", type=int, default=18000)

@@ -12,12 +12,18 @@ from typing import Any, AsyncIterator
 
 import uvicorn
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
+from fastapi.responses import (
+    HTMLResponse,
+    JSONResponse,
+    PlainTextResponse,
+    StreamingResponse,
+)
 
 from .config import FrontendOptions, parse_frontend_args
 from .metrics import FrontendMetrics
+from .monitoring import MONITORING_HTML, monitoring_snapshot
 from .registry import FileServiceRegistry, FileServiceWatcher
-from .router import NoWorkersAvailable, RoundRobinRouter
+from .router import ClusterRouter, NoWorkersAvailable
 
 logger = logging.getLogger(__name__)
 
@@ -33,11 +39,12 @@ class ClusterFrontend:
             lease_seconds=options.registry_ttl,
         )
         self.watcher = FileServiceWatcher(self.registry)
-        self.router = RoundRobinRouter(
+        self.router = ClusterRouter(
             self.watcher,
             connect_timeout=options.connect_timeout,
             request_timeout=options.request_timeout,
             request_plane=options.request_plane,
+            router_mode=options.router_mode,
         )
         self.metrics = FrontendMetrics(router=self.router.metrics)
 
@@ -132,9 +139,27 @@ class ClusterFrontend:
         @app.get("/metrics")
         async def metrics():
             """输出 Prometheus 文本格式的路由和 worker 指标。"""
+            self.router.update_worker_metrics(self.watcher.workers)
             return PlainTextResponse(
-                self.metrics.render(len(self.watcher.workers)),
+                self.metrics.render(len(self.watcher.workers), self.watcher.workers),
                 media_type="text/plain; version=0.0.4",
+            )
+
+        @app.get("/monitoring", response_class=HTMLResponse)
+        async def monitoring_page():
+            """返回内置 worker 监控页面。"""
+            return HTMLResponse(
+                MONITORING_HTML,
+                headers={"Cache-Control": "no-store"},
+            )
+
+        @app.get("/api/monitoring")
+        async def monitoring_api():
+            """返回监控页面使用的集群状态 JSON 快照。"""
+            return monitoring_snapshot(
+                options=self.options,
+                watcher=self.watcher,
+                router=self.router,
             )
 
         @app.post("/v1/chat/completions")
@@ -311,13 +336,20 @@ def main(argv: list[str] | None = None) -> None:
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
     frontend = ClusterFrontend(options)
+    display_host = "127.0.0.1" if options.http_host == "0.0.0.0" else options.http_host
     logger.info(
-        "Starting InfiniLM cluster frontend at %s:%s namespace=%s file_kv=%s request_plane=%s",
+        "Starting InfiniLM cluster frontend at %s:%s namespace=%s file_kv=%s request_plane=%s router_mode=%s",
         options.http_host,
         options.http_port,
         options.namespace,
         options.file_kv,
         options.request_plane,
+        options.router_mode,
+    )
+    logger.info(
+        "Monitoring page: http://%s:%s/monitoring",
+        display_host,
+        options.http_port,
     )
     
     uvicorn.run(
@@ -335,7 +367,7 @@ if __name__ == "__main__":
      -> ClusterFrontend(options)
         -> FileServiceRegistry
         -> FileServiceWatcher
-        -> RoundRobinRouter
+        -> ClusterRouter
         -> HttpWorkerClientFactory
         -> FrontendMetrics
      -> logger.info()
@@ -347,7 +379,7 @@ if __name__ == "__main__":
            -> 注册 API 路由
            -> 对外提供 OpenAI API
         -> 请求 /v1/chat/completions
-           -> RoundRobinRouter
+           -> ClusterRouter
            -> HttpWorkerClient
            -> worker HTTP API
            -> AsyncLLMEngine
