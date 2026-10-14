@@ -71,7 +71,9 @@ class ClusterFrontend:
         if workers:
             return requested or workers[0].served_model_name, workers
         if not requested and self.watcher.workers:
-            ready_workers = [worker for worker in self.watcher.workers if worker.state == "ready"]
+            ready_workers = [
+                worker for worker in self.watcher.workers if worker.state == "ready"
+            ]
             if ready_workers:
                 return ready_workers[0].served_model_name, ready_workers
         return None
@@ -83,18 +85,13 @@ class ClusterFrontend:
         async def lifespan(app: FastAPI):
             """管理 frontend 生命周期：等待初始 worker、启动 watcher、退出清理。"""
             await self.watcher.refresh(self.options.namespace)
-            while (
-                len(self.watcher.workers)
-                < self.options.router_min_initial_workers
-            ):
+            while len(self.watcher.workers) < self.options.router_min_initial_workers:
                 logger.info(
                     "Waiting for %d workers; currently %d",
                     self.options.router_min_initial_workers,
                     len(self.watcher.workers),
                 )
-                await asyncio.sleep(
-                    max(0.1, self.options.health_interval)
-                )
+                await asyncio.sleep(max(0.1, self.options.health_interval))
                 await self.watcher.refresh(self.options.namespace)
 
             self.watcher.start(
@@ -126,7 +123,9 @@ class ClusterFrontend:
         @app.get("/v1/models")
         async def models():
             """以 OpenAI models API 格式返回当前可用模型名列表。"""
-            names = sorted({worker.served_model_name for worker in self.watcher.workers})
+            names = sorted(
+                {worker.served_model_name for worker in self.watcher.workers}
+            )
             return {
                 "object": "list",
                 "data": [
@@ -193,7 +192,12 @@ class ClusterFrontend:
             except Exception:
                 return JSONResponse(
                     status_code=400,
-                    content={"error": {"message": "Invalid JSON", "type": "invalid_request_error"}},
+                    content={
+                        "error": {
+                            "message": "Invalid JSON",
+                            "type": "invalid_request_error",
+                        }
+                    },
                 )
             if not isinstance(payload, dict) or not payload.get("messages"):
                 return JSONResponse(
@@ -214,7 +218,9 @@ class ClusterFrontend:
                     content={
                         "error": {
                             "message": f"model is not ready: {requested_model or '<default>'}",
-                            "type": "service_unavailable" if not requested_model else "invalid_request_error",
+                            "type": "service_unavailable"
+                            if not requested_model
+                            else "invalid_request_error",
                         }
                     },
                 )
@@ -240,9 +246,9 @@ class ClusterFrontend:
                         **payload,
                         "__infinilm_kv_prefix__": kv_prefix,
                     }
-            session_id = request.headers.get("x-infinilm-session-id") or request.headers.get(
-                "x-session-id"
-            )
+            session_id = request.headers.get(
+                "x-infinilm-session-id"
+            ) or request.headers.get("x-session-id")
             if session_id:
                 payload = {**payload, ROUTING_KEY_FIELD: session_id}
             request_id = f"cmpl-{uuid.uuid4().hex}"
@@ -254,11 +260,15 @@ class ClusterFrontend:
                 )
 
             try:
-                response = await self._non_stream_response(request_id, model_name, payload)
+                response = await self._non_stream_response(
+                    request_id, model_name, payload
+                )
             except NoWorkersAvailable as exc:
                 return JSONResponse(
                     status_code=503,
-                    content={"error": {"message": str(exc), "type": "service_unavailable"}},
+                    content={
+                        "error": {"message": str(exc), "type": "service_unavailable"}
+                    },
                 )
             except Exception as exc:
                 logger.exception("Chat request %s failed", request_id)
@@ -287,7 +297,9 @@ class ClusterFrontend:
             "object": "chat.completion.chunk",
             "created": int(time.time()),
             "model": model_name,
-            "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
+            "choices": [
+                {"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}
+            ],
         }
         try:
             yield sse(first)
@@ -345,7 +357,11 @@ class ClusterFrontend:
         """聚合内部 delta/finish 帧，生成 OpenAI 非流式 chat completion。"""
         content_parts: list[str] = []
         finish_content: str | None = None
-        usage: dict[str, int] = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        usage: dict[str, int] = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+        }
         finish_reason = "stop"
         async for frame in self.router.stream_chat(payload, model_name=model_name):
             if frame.get("type") == "delta":
@@ -356,7 +372,9 @@ class ClusterFrontend:
                 finish_reason = frame.get("finish_reason") or "stop"
                 if frame.get("content") is not None:
                     finish_content = str(frame["content"])
-        content = finish_content if finish_content is not None else "".join(content_parts)
+        content = (
+            finish_content if finish_content is not None else "".join(content_parts)
+        )
 
         return {
             "id": request_id,
@@ -398,7 +416,7 @@ def main(argv: list[str] | None = None) -> None:
         display_host,
         options.http_port,
     )
-    
+
     uvicorn.run(
         frontend.create_app(),
         host=options.http_host,
@@ -407,7 +425,7 @@ def main(argv: list[str] | None = None) -> None:
 
 
 if __name__ == "__main__":
-    '''
+    """
      -> main()
      -> parse_frontend_args()
      -> logging.basicConfig()
@@ -431,5 +449,5 @@ if __name__ == "__main__":
            -> worker HTTP API
            -> AsyncLLMEngine
         -> 退出时清理 watcher 和 httpx 连接池
-    '''
+    """
     main()

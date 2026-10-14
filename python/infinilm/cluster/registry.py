@@ -227,7 +227,9 @@ class FileServiceRegistry:
                 continue
             if served_model_name and record.served_model_name != served_model_name:
                 continue
-            allowed_worker_types = {"aggregated"} if worker_types is None else set(worker_types)
+            allowed_worker_types = (
+                {"aggregated"} if worker_types is None else set(worker_types)
+            )
             if record.worker_type not in allowed_worker_types:
                 continue
             if not record.engine_healthy:
@@ -273,7 +275,9 @@ class FileServiceWatcher:
         worker_types: Iterable[str] | None = None,
     ) -> None:
         self.registry = registry
-        self.worker_types = tuple(worker_types) if worker_types is not None else ("aggregated",)
+        self.worker_types = (
+            tuple(worker_types) if worker_types is not None else ("aggregated",)
+        )
         self._task: asyncio.Task[None] | None = None
         self._workers: list[WorkerRecord] = []
         self._changed = asyncio.Event()
@@ -288,7 +292,9 @@ class FileServiceWatcher:
         return self._changed
 
     async def refresh(self, namespace: str) -> list[WorkerRecord]:
-        workers = await self.registry.snapshot(namespace, worker_types=self.worker_types)
+        workers = await self.registry.snapshot(
+            namespace, worker_types=self.worker_types
+        )
         old_ids = {worker.instance_id for worker in self._workers}
         new_ids = {worker.instance_id for worker in workers}
         self._workers = workers

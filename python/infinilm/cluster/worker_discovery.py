@@ -49,7 +49,7 @@ class WorkerDiscoveryService:
             self._heartbeat(),
             name=f"infinilm-worker-discovery-heartbeat-{self.record.instance_id}",
         )
-        
+
         logger.info(
             "Registered HTTP request-plane worker at http://%s:%s/v1",
             self.record.host,

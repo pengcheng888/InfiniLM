@@ -39,10 +39,17 @@ class FakeEtcdClient:
         return lease
 
     def put(self, key, value, lease=None):
-        self.items[key] = (value.encode(), {"key": key.encode(), "lease_id": lease.id if lease else 0})
+        self.items[key] = (
+            value.encode(),
+            {"key": key.encode(), "lease_id": lease.id if lease else 0},
+        )
 
     def get_prefix(self, prefix):
-        return [(value, metadata) for key, (value, metadata) in self.items.items() if key.startswith(prefix)]
+        return [
+            (value, metadata)
+            for key, (value, metadata) in self.items.items()
+            if key.startswith(prefix)
+        ]
 
     def delete(self, key):
         return self.items.pop(key, None) is not None
@@ -122,7 +129,9 @@ class EtcdRegistryTest(unittest.TestCase):
                 await registry.snapshot("pd", worker_types=("prefill", "decode")),
                 [registered],
             )
-            self.assertEqual(await registry.snapshot("pd", worker_types=("decode",)), [])
+            self.assertEqual(
+                await registry.snapshot("pd", worker_types=("decode",)), []
+            )
             self.assertEqual(await registry.snapshot("other"), [])
 
             heartbeat = await registry.heartbeat(
@@ -183,7 +192,10 @@ class EtcdRegistryTest(unittest.TestCase):
             )
 
             payload = json.dumps({"not": "a-worker-record"}).encode()
-            client.items["/infinilm-test/discovery/invalid"] = (payload, {"lease_id": 0})
+            client.items["/infinilm-test/discovery/invalid"] = (
+                payload,
+                {"lease_id": 0},
+            )
             self.assertEqual(
                 await registry.snapshot("pd", worker_types=("prefill", "decode")),
                 [],

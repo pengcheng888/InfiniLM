@@ -132,9 +132,8 @@ class ClusterInferenceServer(InferenceServer):
         failed = False
         try:
             async for chunk in super()._stream_chat(request_id, data, http_request):
-                if (
-                    "finish_reason" in chunk
-                    and ('"error"' in chunk or '"timeout"' in chunk)
+                if "finish_reason" in chunk and (
+                    '"error"' in chunk or '"timeout"' in chunk
                 ):
                     failed = True
                 if "finish_reason" in chunk:

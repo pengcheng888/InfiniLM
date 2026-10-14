@@ -105,7 +105,12 @@ class EtcdServiceRegistry:
     def _key(self, record: WorkerRecord) -> str:
         from urllib.parse import quote
 
-        parts = (record.namespace, record.component, record.endpoint, record.instance_id)
+        parts = (
+            record.namespace,
+            record.component,
+            record.endpoint,
+            record.instance_id,
+        )
         encoded = "/".join(quote(str(part), safe="") for part in parts)
         return f"{self.prefix}/discovery/{encoded}"
 

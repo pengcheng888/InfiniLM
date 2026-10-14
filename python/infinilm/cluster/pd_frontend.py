@@ -148,8 +148,7 @@ class PdClusterFrontend:
             and (model_name is None or worker.served_model_name == model_name)
             and (
                 required_capability is None
-                or required_capability
-                in (worker.metadata.get("capabilities") or [])
+                or required_capability in (worker.metadata.get("capabilities") or [])
             )
         ]
         return sorted(result, key=lambda worker: worker.instance_id)
@@ -161,8 +160,7 @@ class PdClusterFrontend:
             for worker in self._role_workers(workers, "prefill")
         }
         decode_models = {
-            worker.served_model_name
-            for worker in self._role_workers(workers, "decode")
+            worker.served_model_name for worker in self._role_workers(workers, "decode")
         }
         return sorted(prefill_models & decode_models)
 
@@ -213,7 +211,9 @@ class PdClusterFrontend:
             pd_metadata = record.metadata.get("pd")
             if not isinstance(pd_metadata, dict):
                 await client.aclose()
-                raise ValueError(f"prefill worker {record.instance_id} has no PD metadata")
+                raise ValueError(
+                    f"prefill worker {record.instance_id} has no PD metadata"
+                )
             bootstrap_host = str(pd_metadata.get("bootstrap_host") or record.host)
             bootstrap_port = int(pd_metadata.get("bootstrap_port", 0))
             info["bootstrap_addr"] = self._http_url(bootstrap_host, bootstrap_port)
@@ -276,6 +276,7 @@ class PdClusterFrontend:
 
     def _select_record(self, records: list[WorkerRecord]) -> WorkerRecord:
         if self.options.router_mode == "least-loaded":
+
             def score(record: WorkerRecord) -> tuple[float, str]:
                 load = worker_load(record)
                 return (
@@ -288,7 +289,9 @@ class PdClusterFrontend:
 
             return min(records, key=score)
 
-        cursor = self.cursors["prefill" if records[0].worker_type == "prefill" else "decode"]
+        cursor = self.cursors[
+            "prefill" if records[0].worker_type == "prefill" else "decode"
+        ]
         selected = records[cursor % len(records)]
         role = selected.worker_type
         self.cursors[role] = (self.cursors[role] + 1) % max(1, len(records))
@@ -426,7 +429,7 @@ class PdClusterFrontend:
             for role in ("prefill", "decode"):
                 lines.append(
                     f'infinilm_pd_workers{{role="{role}"}} '
-                    f'{len(self._role_workers(self.watcher.workers, role))}'
+                    f"{len(self._role_workers(self.watcher.workers, role))}"
                 )
             lines.extend(
                 [
@@ -435,7 +438,9 @@ class PdClusterFrontend:
                 ]
             )
             for role, count in self.request_counters.items():
-                lines.append(f'infinilm_pd_frontend_requests_total{{role="{role}"}} {count}')
+                lines.append(
+                    f'infinilm_pd_frontend_requests_total{{role="{role}"}} {count}'
+                )
             lines.extend(
                 [
                     "# HELP infinilm_pd_frontend_inflight_requests Active requests by worker.",
@@ -447,7 +452,7 @@ class PdClusterFrontend:
                     lines.append(
                         f'infinilm_pd_frontend_inflight_requests{{role="{role}",'
                         f'worker_id="{worker.instance_id}"}} '
-                        f'{self.inflight[worker.instance_id]}'
+                        f"{self.inflight[worker.instance_id]}"
                     )
             return PlainTextResponse(
                 "\n".join(lines) + "\n",
@@ -485,15 +490,21 @@ class PdClusterFrontend:
             try:
                 payload = await request.json()
             except Exception as exc:
-                raise HTTPException(status_code=400, detail=f"Invalid JSON: {exc}") from exc
+                raise HTTPException(
+                    status_code=400, detail=f"Invalid JSON: {exc}"
+                ) from exc
             if not isinstance(payload, dict):
-                raise HTTPException(status_code=400, detail="Request body must be an object")
+                raise HTTPException(
+                    status_code=400, detail="Request body must be an object"
+                )
 
             requested_model = payload.get("model")
             if requested_model:
                 model_name = requested_model
                 if model_name not in self._ready_models():
-                    raise HTTPException(status_code=404, detail=f"model not found: {model_name}")
+                    raise HTTPException(
+                        status_code=404, detail=f"model not found: {model_name}"
+                    )
             else:
                 ready_models = await self._ready_model_names()
                 if not ready_models:
@@ -502,9 +513,13 @@ class PdClusterFrontend:
             payload = {**payload, "model": model_name}
 
             decode_capability = (
-                "openai-chat" if api.endswith("chat/completions") else "openai-completions"
+                "openai-chat"
+                if api.endswith("chat/completions")
+                else "openai-completions"
             )
-            prefill_info, prefill_rank = await self._choose_client("prefill", model_name)
+            prefill_info, prefill_rank = await self._choose_client(
+                "prefill", model_name
+            )
             decode_info, _ = await self._choose_client(
                 "decode",
                 model_name,
