@@ -109,6 +109,10 @@ worker 专属参数：
 |---|---:|---|
 | `--served-model-name` | 模型目录名 | OpenAI API 中展示的模型名 |
 | `--advertise-host` | `127.0.0.1` | 写入 discovery 的 worker 地址 |
+| `--disaggregation-mode` | `aggregated` | worker 身份的权威来源：`aggregated`、`prefill` 或 `decode` |
+| `--worker-type` | `aggregated` | 兼容别名；与 `--disaggregation-mode` 同时显式传入时必须一致 |
+| `--mooncake-bootstrap-host` | `127.0.0.1` | PD worker 写入 discovery 的 bootstrap 地址 |
+| `--mooncake-bootstrap-port` | `8998` | PD worker 写入 discovery 的 bootstrap 端口 |
 | `--host` | `BaseConfig` 默认值 | worker HTTP 服务监听地址 |
 | `--port` | `BaseConfig` 默认值 | worker HTTP 服务监听端口 |
 
@@ -208,6 +212,32 @@ Uvicorn shutdown
 
 这样可以保证 worker 只有在 engine ready 后才被 frontend 发现。
 
+`--disaggregation-mode` 是 worker 身份的单一来源：
+
+```text
+prefill -> worker_type=prefill -> kv_role=kv_producer -> component=prefill
+decode  -> worker_type=decode  -> kv_role=kv_consumer -> component=backend
+```
+
+`--kv-transfer-config` 不需要重复填写 `kv_role`；如果显式填写，则必须与
+`--disaggregation-mode` 推导结果一致。当前 PD worker 只支持 `--tp 1`、
+`--pp 1`。PD 注册记录的 `metadata.pd` 包含 `engine_id`、`kv_role`、bootstrap
+host 和 bootstrap port。
+
+角色能力也会写入 discovery：
+
+```json
+{
+  "capabilities": ["internal-prefill"],
+  "needs": ["decode"]
+}
+```
+
+decode worker 声明 `openai-chat` 和 `internal-decode`，
+并声明 `needs=["prefill"]`。PD frontend 只选择具备对应 capability 的 worker。
+producer-only prefill worker 的 OpenAI API 会要求
+`X-InfiniLM-Internal: true`，避免绕过 frontend 直接调用。
+
 ### `http_worker_client_factory.py`
 
 包含两层对象。
@@ -279,6 +309,42 @@ API：
 | POST | `/v1/chat/completions` | OpenAI-compatible chat API |
 | POST | `/chat/completions` | 兼容旧路径 |
 
+### `pd_frontend.py`
+
+`PdClusterFrontend` 是 PD 分离集群的 discovery-aware frontend。它与
+`ClusterFrontend` 的区别是：每次请求需要分别选择 1 个 `prefill` worker 和
+1 个 `decode` worker，不能把请求直接发给任意 worker。
+
+启动流程：
+
+```text
+file discovery
+  -> FileServiceWatcher(worker_types=(prefill, decode))
+  -> 等待同一 served_model_name 同时有 P/D
+  -> 查询 prefill bootstrap /query 获取 engine_id
+  -> 启动 OpenAI API
+```
+
+请求流程：
+
+```text
+client
+  -> PdClusterFrontend
+  -> 选择 prefill worker
+  -> 异步发送 do_remote_decode=true 且 max_tokens=1
+  -> 选择 decode worker
+  -> 发送 do_remote_prefill=true 和 remote_engine_id
+  -> decode 通过 Mooncake 拉 KV
+  -> 返回 JSON 或原始 SSE
+```
+
+它支持 `round-robin` 和 `least-loaded`。`least-loaded` 会按角色独立比较
+frontend inflight、waiting requests 和 running ratio。`/metrics` 输出 P/D
+ready worker 数、按角色的选择次数和每个 worker 的 inflight。
+`/monitoring` 提供基础 PD 监控页，`/api/monitoring` 输出页面使用的 JSON
+快照，包含每个 worker 的角色、GPU、endpoint、engine_id、心跳、lease、load
+和 frontend inflight。
+
 `main()` 的启动流程：
 
 ```text
@@ -339,6 +405,7 @@ monitoring/
   __init__.py
   snapshot.py
   page.py
+  pd_page.py
 ```
 
 `ClusterFrontend.create_app()` 会同时注册：
@@ -351,6 +418,10 @@ GET /api/monitoring
 监控页面没有独立进程和独立端口，随 frontend 的 FastAPI/Uvicorn 生命周期一起
 启动和退出。页面使用原生 HTML/CSS/JS，不依赖 CDN、npm 包或前端构建工具，
 每 2 秒请求一次 `/api/monitoring`。
+
+`PdClusterFrontend` 使用同目录下的 `pd_page.py`，提供 PD 版本的同名接口。
+PD 页面按 prefill/decode 两组展示 worker，不展示聚合式 router 的 affinity 和
+KV-aware 指标。
 
 页面展示：
 
@@ -427,6 +498,155 @@ Monitoring page: http://127.0.0.1:18000/monitoring
 如需三副本，可将脚本中的 `GPUS` 默认值恢复为 `0 1 2`，或通过环境变量
 `GPUS="0 1 2"` 覆盖。
 
+### `run_pd_cluster.sh`
+
+这是本机 1P+1D PD 分离启动示例。它不走 `ClusterFrontend` 和
+`ClusterRouter`，而是复用现有 Mooncake 路径：
+
+```text
+client -> mooncake_proxy_server -> kv_producer(prefill)
+                              \-> kv_consumer(decode)
+prefill -> Mooncake TCP/RDMA KV transfer -> decode
+```
+
+脚本默认使用 Qwen3-0.6B、TCP 传输、GPU 4/5 和端口 18500/18501/18502，
+bootstrap 端口为 18508：
+
+```bash
+bash python/infinilm/cluster/run_pd_cluster.sh
+```
+
+常用覆盖项：
+
+| 环境变量 | 默认值 | 说明 |
+|---|---:|---|
+| `MODEL` | Qwen3-0.6B 路径 | P 和 D 共用的本地模型目录 |
+| `PREFILL_GPU` / `DECODE_GPU` | `4` / `5` | 两个引擎使用的 CUDA 设备 |
+| `PROXY_PORT` / `PREFILL_PORT` / `DECODE_PORT` | `18500` / `18501` / `18502` | HTTP 服务端口 |
+| `BOOTSTRAP_PORT` | `18508` | Mooncake bootstrap 端口 |
+| `MOONCAKE_PROTOCOL` | `tcp` | `tcp` 或 `rdma` |
+| `MOONCAKE_WORKERS` | `4` | Mooncake transfer worker 数 |
+| `MAX_NEW_TOKENS` | `32` | 引擎允许的最大生成 token 数 |
+| `ENABLE_GRAPH` | `1` | 设置为 `0` 可关闭 CUDA Graph |
+
+脚本会先启动 P/D，等待两者 `/health` 和 bootstrap `/query` 可用后再启动
+proxy；退出或收到 `Ctrl+C` 时会清理所有子进程。Mooncake 0.3.x 需要 CUDA 12
+runtime；如果安装了 `nvidia-cuda-runtime-cu12`，脚本会自动把对应库目录追加
+到 `LD_LIBRARY_PATH`，不会覆盖原有 Torch/InfiniCore 路径。
+
+当前入口保持 1 个 prefill、1 个 decode 和 TP=1。它适合作为最小兼容路径和
+对照基线。
+
+### `run_pd_discovery_cluster.sh`
+
+这是推荐的本机 PD 分离启动入口。它启动 1 个 `PdClusterFrontend`，默认启动
+1 个 `prefill` cluster worker 和 1 个 `decode` cluster worker：
+
+```text
+client -> PdClusterFrontend
+       -> prefill worker -> Mooncake KV -> decode worker
+
+control plane:
+  P/D worker -> discovery JSON -> PdClusterFrontend watcher
+```
+
+默认端口为 frontend `18520`、prefill `18521+`、decode `18531+`、bootstrap
+`18528+`，GPU 为 prefill `4`、decode `5`，模型为 Qwen3-0.6B，Mooncake 使用
+TCP。prefill 与 decode 端口段默认相隔 10，避免多副本时相互占用：
+
+```bash
+bash python/infinilm/cluster/run_pd_discovery_cluster.sh
+
+# 可切换角色内负载感知选择
+ROUTER_MODE=least-loaded bash python/infinilm/cluster/run_pd_discovery_cluster.sh
+
+# 启动 2P+2D；每个 prefill 使用独立 bootstrap 端口
+PREFILL_GPUS="2 3" DECODE_GPUS="4 5" \
+  bash python/infinilm/cluster/run_pd_discovery_cluster.sh
+```
+
+除 `run_pd_cluster.sh` 的常见环境变量外，还支持：
+
+| 环境变量 | 默认值 | 说明 |
+|---|---:|---|
+| `NAMESPACE` | `infinilm-pd` | PD discovery namespace |
+| `FILE_KV` | `/tmp/infinilm-pd/discovery` | file registry 根目录 |
+| `SERVED_MODEL_NAME` | `Qwen3-0.6B` | OpenAI API model id |
+| `ROUTER_MODE` | `round-robin` | `round-robin` 或 `least-loaded` |
+| `PD_FRONTEND_PORT` | `18520` | 统一 OpenAI API 端口 |
+| `PREFILL_GPUS` / `DECODE_GPUS` | `4` / `5` | 空格分隔的 GPU 列表 |
+| `PREFILL_PORT_BASE` | `18521` | prefill HTTP 起始端口，按副本递增 |
+| `DECODE_PORT_BASE` | `18531` | decode HTTP 起始端口，按副本递增 |
+| `BOOTSTRAP_PORT_BASE` | `18528` | prefill bootstrap 起始端口，按副本递增 |
+| `PLAN_ONLY` | `0` | 设置为 `1` 时只校验依赖、模型路径、端口占用和启动计划 |
+
+frontend 会立即监听；只有同一 model id 同时发现 P 和 D，且 prefill bootstrap
+查询成功后，`/health` 才显示 `ready=true`。`/metrics` 返回 PD frontend 指标，
+`/monitoring` 返回监控页。一体化脚本会清理当前 namespace 的历史 discovery
+JSON，并在退出时停止 frontend 和所有 worker。
+
+多 prefill 会分别注册到 `BOOTSTRAP_PORT_BASE + index`，frontend 根据 discovery
+中的 bootstrap metadata 查询对应 engine；多 decode 共享这些 prefill 候选。当前
+仍要求 TP=1、PP=1，同机部署时 GPU、HTTP 端口和 bootstrap 端口都不能冲突。
+
+### `run_pd_frontend.sh` 与 `run_pd_worker.sh`
+
+`run_pd_discovery_cluster.sh` 是一体化功能测试入口，frontend 和 worker 共享
+同一个进程组。需要 P/D 独立注册、退出和扩缩容时，使用独立入口。
+
+frontend 单独启动：
+
+```bash
+NAMESPACE=infinilm-pd \
+RUN_DIR=/tmp/infinilm-pd \
+PD_FRONTEND_PORT=18520 \
+bash python/infinilm/cluster/run_pd_frontend.sh
+```
+
+frontend 不等待 worker，先立即监听。没有可用 P/D model 时：
+
+```json
+{
+  "status": "healthy",
+  "ready": false,
+  "prefill_workers": 0,
+  "decode_workers": 0
+}
+```
+
+默认 OpenAI 请求返回 503，frontend 进程持续运行。后续 P/D 通过同一 namespace
+和 file registry 动态加入即可。
+
+启动 prefill：
+
+```bash
+NAMESPACE=infinilm-pd \
+RUN_DIR=/tmp/infinilm-pd \
+GPU=4 PORT=18541 BOOTSTRAP_PORT=18548 \
+ENGINE_ID=infinilm-pd-prefill-0 \
+bash python/infinilm/cluster/run_pd_worker.sh prefill
+```
+
+启动 decode：
+
+```bash
+NAMESPACE=infinilm-pd \
+RUN_DIR=/tmp/infinilm-pd \
+GPU=5 PORT=18551 \
+ENGINE_ID=infinilm-pd-decode-0 \
+bash python/infinilm/cluster/run_pd_worker.sh decode
+```
+
+扩容时再次运行 worker 入口，并保证同角色副本使用不同 GPU、HTTP 端口、
+bootstrap 端口和 engine id。prefill 的 bootstrap 端口会写入 discovery，
+frontend 发现新 worker 后查询对应 `/query` 并纳入路由候选。
+
+缩容时向 worker 发送 `SIGTERM` 或 `Ctrl+C`。worker 先把 discovery state 更新
+为 `draining`，独立入口默认等待 3 秒再退出；frontend watcher 观察到后不再为
+新请求选择该 worker。若所有 P/D 都退出，frontend 仍保持 `status=healthy`、
+`ready=false`，新请求返回 503。强杀 worker 需要等待 discovery lease 过期，
+存在短暂误选窗口，运维缩容应优先使用优雅退出。
+
 `*.pyc` 和 `__pycache__` 是 Python 生成产物，不属于源码模块。
 
 ## 3. Discovery 数据模型
@@ -439,7 +659,7 @@ Monitoring page: http://127.0.0.1:18000/monitoring
 | `component` | 固定为 `infinilm` |
 | `endpoint` | 固定为 `generate` |
 | `instance_id` | worker 实例唯一 ID |
-| `worker_type` | 当前为 `aggregated` |
+| `worker_type` | `aggregated`、`prefill` 或 `decode` |
 | `model` | 本地模型路径 |
 | `served_model_name` | OpenAI API 中的模型名 |
 | `host` | worker 对外 advertised 地址 |
@@ -450,7 +670,7 @@ Monitoring page: http://127.0.0.1:18000/monitoring
 | `engine_healthy` | `AsyncLLMEngine.is_healthy()` 的结果 |
 | `transport` | 当前固定为 `http` |
 | `state` | `ready` 或 `draining`；router 只选择 `ready` |
-| `metadata` | GPU、TP、端口、batch size、`load` 负载快照等补充信息 |
+| `metadata` | GPU、TP、端口、batch size、`load`、capabilities、needs、PD bootstrap 等补充信息 |
 
 时间语义：
 
@@ -555,6 +775,10 @@ snapshot 时会：
 4. 如果 `lease_expires_at < now`，删除过期 JSON；
 5. 按 `instance_id` 排序返回 worker 列表。
 
+默认 `registry.snapshot(namespace)` 只返回 `aggregated`，因此聚合式
+frontend 不会误把 PD worker 当成完整推理 worker。`PdClusterFrontend` 创建
+watcher 时显式传入 `worker_types=("prefill", "decode")`。
+
 如果 worker 被 `kill -9`，没有机会 unregister，注册文件会暂时残留。
 frontend 后续 snapshot 到租约过期时会删除它。
 
@@ -645,6 +869,29 @@ client disconnect
 
 因此 HTTP/SSE 断开就是数据面的取消信号。
 
+### 5.4 PD 请求流程
+
+`PdClusterFrontend` 不使用 `ClusterRouter`，因为一次请求需要两个角色：
+
+```text
+prefill worker
+  -> do_remote_prefill=false
+  -> do_remote_decode=true
+  -> stream=false / max_tokens=1
+  -> 发布 KV
+
+decode worker
+  -> do_remote_prefill=true
+  -> do_remote_decode=false
+  -> remote_engine_id=<selected prefill engine>
+  -> 从 bootstrap 查询 prefill transfer address
+  -> Mooncake 拉 KV
+  -> 增量 decode 并返回输出
+```
+
+prefill 调用由 frontend 异步发出；decode 请求则持有本次对客户端的 streaming
+response。这个阶段不跨 P 重试 decode 请求，避免同一 transfer_id 被重复消费。
+
 ## 6. Worker 选择与故障切换
 
 router 每次请求都会从 watcher 获取可用 worker：
@@ -656,6 +903,9 @@ engine_healthy == true
 lease not expired
 worker_type == aggregated
 ```
+
+以上是 `ClusterRouter` 的聚合式候选条件。PD frontend 使用独立的角色候选集，
+并要求 prefill 和 decode 的 `served_model_name` 一致。
 
 ### 6.1 least-loaded
 

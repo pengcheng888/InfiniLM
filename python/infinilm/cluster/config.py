@@ -55,9 +55,12 @@ class WorkerOptions:
     advertise_host: str
     component: str = "infinilm"
     endpoint: str = "generate"
+    disaggregation_mode: str = "aggregated"
     worker_type: str = "aggregated"
     request_plane: str = "http"
     drain_grace_seconds: float = 1.0
+    mooncake_bootstrap_host: str = "127.0.0.1"
+    mooncake_bootstrap_port: int = 8998
 
 
 @dataclass(frozen=True)
@@ -102,12 +105,45 @@ def parse_worker_cluster_args(argv: list[str] | None = None) -> WorkerOptions:
     parser.add_argument("--served-model-name", default=None)
     parser.add_argument("--advertise-host", default="127.0.0.1")
     parser.add_argument(
+        "--disaggregation-mode",
+        choices=["aggregated", "prefill", "decode"],
+        default=None,
+        help="authoritative worker role; derives worker type and KV role",
+    )
+    parser.add_argument(
+        "--worker-type",
+        choices=["aggregated", "prefill", "decode"],
+        default=None,
+        help="deprecated compatibility alias for --disaggregation-mode",
+    )
+    parser.add_argument(
+        "--mooncake-bootstrap-host",
+        default=os.getenv("INFINILM_MOONCAKE_BOOTSTRAP_HOST", "127.0.0.1"),
+    )
+    parser.add_argument(
+        "--mooncake-bootstrap-port",
+        type=int,
+        default=int(os.getenv("INFINILM_MOONCAKE_BOOTSTRAP_PORT", "8998")),
+    )
+    parser.add_argument(
         "--drain-grace-seconds",
         type=float,
         default=1.0,
         help="seconds to advertise DRAINING before worker shutdown",
     )
     args, _ = parser.parse_known_args(argv)
+    explicit_mode = _has_option(argv or [], "--disaggregation-mode")
+    explicit_worker_type = _has_option(argv or [], "--worker-type")
+    if (
+        explicit_mode
+        and explicit_worker_type
+        and args.disaggregation_mode != args.worker_type
+    ):
+        raise ValueError(
+            "--disaggregation-mode and --worker-type must match when both are set"
+        )
+    mode = args.disaggregation_mode or args.worker_type or "aggregated"
+
     return WorkerOptions(
         namespace=args.namespace,
         file_kv=Path(args.file_kv),
@@ -115,8 +151,17 @@ def parse_worker_cluster_args(argv: list[str] | None = None) -> WorkerOptions:
         heartbeat_interval=args.heartbeat_interval,
         served_model_name=args.served_model_name,
         advertise_host=args.advertise_host,
+        component={
+            "aggregated": "infinilm",
+            "prefill": "prefill",
+            "decode": "backend",
+        }[mode],
+        disaggregation_mode=mode,
+        worker_type=mode,
         request_plane=args.request_plane,
         drain_grace_seconds=args.drain_grace_seconds,
+        mooncake_bootstrap_host=args.mooncake_bootstrap_host,
+        mooncake_bootstrap_port=args.mooncake_bootstrap_port,
     )
 
 
@@ -126,9 +171,17 @@ def remove_cluster_worker_args(argv: list[str]) -> list[str]:
     _add_cluster_arguments(parser)
     parser.add_argument("--served-model-name")
     parser.add_argument("--advertise-host")
+    parser.add_argument("--disaggregation-mode")
+    parser.add_argument("--worker-type")
+    parser.add_argument("--mooncake-bootstrap-host")
+    parser.add_argument("--mooncake-bootstrap-port", type=int)
     parser.add_argument("--drain-grace-seconds", type=float)
     _, remaining = parser.parse_known_args(argv)
     return remaining
+
+
+def _has_option(argv: list[str], option: str) -> bool:
+    return any(arg == option or arg.startswith(f"{option}=") for arg in argv)
 
 
 def parse_frontend_args(argv: list[str] | None = None) -> FrontendOptions:

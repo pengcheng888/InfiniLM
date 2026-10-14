@@ -10,6 +10,10 @@ python/infinilm/lib/*.so
 .vscode/
 
 *.sh
+!python/infinilm/cluster/run_pd_cluster.sh
+!python/infinilm/cluster/run_pd_discovery_cluster.sh
+!python/infinilm/cluster/run_pd_frontend.sh
+!python/infinilm/cluster/run_pd_worker.sh
 model_weight/
 
 # Python

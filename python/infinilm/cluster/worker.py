@@ -30,6 +30,21 @@ from .worker_traffic import WorkerTrafficMetrics
 
 logger = logging.getLogger(__name__)
 
+WORKER_CAPABILITIES = {
+    "aggregated": ("openai-chat",),
+    "prefill": ("internal-prefill",),
+    "decode": ("openai-chat", "internal-decode"),
+}
+WORKER_NEEDS = {
+    "aggregated": (),
+    "prefill": ("decode",),
+    "decode": ("prefill",),
+}
+PD_KV_ROLES = {
+    "prefill": "kv_producer",
+    "decode": "kv_consumer",
+}
+
 
 class DrainingUvicornServer(uvicorn.Server):
     """Uvicorn server that advertises DRAINING before it stops accepting."""
@@ -150,6 +165,24 @@ class ClusterInferenceServer(InferenceServer):
             or os.path.basename(os.path.normpath(self.model_path))
             or "model"
         )
+        kv_config = self.kv_transfer_config
+        metadata = {
+            "request_plane": self.cluster_options.request_plane,
+            "http_host": self.host,
+            "http_port": self.port,
+            "cuda_visible_devices": os.getenv("CUDA_VISIBLE_DEVICES"),
+            "tp": self.tensor_parallel_size,
+            "max_batch_size": self.max_batch_size,
+            "capabilities": list(WORKER_CAPABILITIES[self.cluster_options.worker_type]),
+            "needs": list(WORKER_NEEDS[self.cluster_options.worker_type]),
+        }
+        if kv_config is not None:
+            metadata["pd"] = {
+                "engine_id": kv_config.engine_id,
+                "kv_role": kv_config.kv_role,
+                "bootstrap_host": self.cluster_options.mooncake_bootstrap_host,
+                "bootstrap_port": self.cluster_options.mooncake_bootstrap_port,
+            }
         record = self.registry.new_record(
             namespace=self.cluster_options.namespace,
             component=self.cluster_options.component,
@@ -161,14 +194,7 @@ class ClusterInferenceServer(InferenceServer):
             port=self.port,
             engine_healthy=True,
             transport=self.cluster_options.request_plane,
-            metadata={
-                "request_plane": self.cluster_options.request_plane,
-                "http_host": self.host,
-                "http_port": self.port,
-                "cuda_visible_devices": os.getenv("CUDA_VISIBLE_DEVICES"),
-                "tp": self.tensor_parallel_size,
-                "max_batch_size": self.max_batch_size,
-            },
+            metadata=metadata,
         )
         cache_exporter = self._create_cache_index_exporter(engine, record.instance_id)
         return WorkerDiscoveryService(
@@ -186,6 +212,13 @@ class ClusterInferenceServer(InferenceServer):
         instance_id: str,
     ) -> WorkerCacheIndexExporter | None:
         """Export paged-cache prefix hashes when prefix caching is enabled."""
+        worker_type = getattr(
+            getattr(self, "cluster_options", None),
+            "worker_type",
+            "aggregated",
+        )
+        if worker_type != "aggregated":
+            return None
         scheduler = getattr(getattr(engine, "engine", None), "scheduler", None)
         block_manager = getattr(scheduler, "cache_manager", None)
         block_size = int(getattr(engine, "config", None).block_size or self.block_size)
@@ -226,13 +259,45 @@ class ClusterInferenceServer(InferenceServer):
         return app
 
 
+def _resolve_kv_transfer_config(
+    kv_transfer_config_str: str,
+    disaggregation_mode: str,
+) -> KVTransferConfig:
+    raw_config = json.loads(kv_transfer_config_str)
+    if not isinstance(raw_config, dict):
+        raise ValueError("--kv-transfer-config must be a JSON object")
+
+    expected_kv_role = PD_KV_ROLES.get(disaggregation_mode)
+    if expected_kv_role is not None:
+        configured_role = raw_config.get("kv_role")
+        if configured_role is not None and configured_role != expected_kv_role:
+            raise ValueError(
+                f"--disaggregation-mode {disaggregation_mode} requires "
+                f"kv_role={expected_kv_role!r}, got {configured_role!r}"
+            )
+        raw_config["kv_role"] = expected_kv_role
+
+    return parse_kv_transfer_config(json.dumps(raw_config))
+
+
 def _build_server(argv: list[str]) -> ClusterInferenceServer:
     cluster_options = parse_worker_cluster_args(argv)
     inference_argv = remove_cluster_worker_args(argv)
     cfg = BaseConfig(inference_argv)
 
     if cfg.pp > 1:
-        raise ValueError("the aggregated cluster worker currently requires --pp 1")
+        raise ValueError("the cluster worker currently requires --pp 1")
+
+    if cluster_options.worker_type == "prefill":
+        os.environ["INFINILM_HOST_IP"] = cluster_options.advertise_host
+        os.environ["INFINILM_MOONCAKE_BOOTSTRAP_HOST"] = (
+            cluster_options.mooncake_bootstrap_host
+        )
+        os.environ["INFINILM_MOONCAKE_BOOTSTRAP_PORT"] = str(
+            cluster_options.mooncake_bootstrap_port
+        )
+    elif cluster_options.worker_type == "decode":
+        os.environ["INFINILM_HOST_IP"] = cluster_options.advertise_host
 
     if cfg.use_legacy_moe:
         moe_ep_backend, expert_parallel_size = "disabled", 1
@@ -247,7 +312,18 @@ def _build_server(argv: list[str]) -> ClusterInferenceServer:
 
     kv_transfer_config: KVTransferConfig | None = None
     if cfg.kv_transfer_config:
-        kv_transfer_config = parse_kv_transfer_config(cfg.kv_transfer_config)
+        kv_transfer_config = _resolve_kv_transfer_config(
+            cfg.kv_transfer_config,
+            cluster_options.disaggregation_mode,
+        )
+    elif cluster_options.worker_type in PD_KV_ROLES:
+        raise ValueError(
+            f"--disaggregation-mode {cluster_options.disaggregation_mode} requires "
+            "--kv-transfer-config"
+        )
+
+    if cluster_options.worker_type in PD_KV_ROLES and cfg.tp != 1:
+        raise ValueError("PD cluster workers currently require --tp 1")
 
     registry = FileServiceRegistry(
         cluster_options.file_kv,
@@ -313,11 +389,13 @@ def main(argv: list[str] | None = None) -> None:
     server = _build_server(args)
     setup_logging(server.log_level)
     logger.info(
-        "Starting aggregated InfiniLM worker: namespace=%s request_plane=%s endpoint=%s:%s",
+        "Starting InfiniLM %s worker: namespace=%s request_plane=%s endpoint=%s:%s mode=%s",
+        server.cluster_options.worker_type,
         server.cluster_options.namespace,
         server.cluster_options.request_plane,
         server.cluster_options.advertise_host,
         server.port,
+        server.cluster_options.disaggregation_mode,
     )
     _run_server(server)
 

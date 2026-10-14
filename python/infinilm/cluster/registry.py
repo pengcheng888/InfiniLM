@@ -11,7 +11,7 @@ import time
 import uuid
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 logger = logging.getLogger(__name__)
 
@@ -176,6 +176,7 @@ class FileServiceRegistry:
         namespace: str,
         endpoint: str | None = None,
         served_model_name: str | None = None,
+        worker_types: Iterable[str] | None = None,
     ) -> list[WorkerRecord]:
         if not self.root.exists():
             return []
@@ -197,7 +198,8 @@ class FileServiceRegistry:
                 continue
             if served_model_name and record.served_model_name != served_model_name:
                 continue
-            if record.worker_type != "aggregated":
+            allowed_worker_types = {"aggregated"} if worker_types is None else set(worker_types)
+            if record.worker_type not in allowed_worker_types:
                 continue
             if not record.engine_healthy:
                 continue
@@ -218,20 +220,28 @@ class FileServiceRegistry:
         namespace: str,
         endpoint: str | None = None,
         served_model_name: str | None = None,
+        worker_types: Iterable[str] | None = None,
     ) -> list[WorkerRecord]:
         return await asyncio.to_thread(
             self._snapshot,
             namespace,
             endpoint,
             served_model_name,
+            worker_types,
         )
 
 
 class FileServiceWatcher:
     """Polls the file registry and publishes the current worker set."""
 
-    def __init__(self, registry: FileServiceRegistry) -> None:
+    def __init__(
+        self,
+        registry: FileServiceRegistry,
+        *,
+        worker_types: Iterable[str] | None = None,
+    ) -> None:
         self.registry = registry
+        self.worker_types = tuple(worker_types) if worker_types is not None else ("aggregated",)
         self._task: asyncio.Task[None] | None = None
         self._workers: list[WorkerRecord] = []
         self._changed = asyncio.Event()
@@ -246,7 +256,7 @@ class FileServiceWatcher:
         return self._changed
 
     async def refresh(self, namespace: str) -> list[WorkerRecord]:
-        workers = await self.registry.snapshot(namespace)
+        workers = await self.registry.snapshot(namespace, worker_types=self.worker_types)
         old_ids = {worker.instance_id for worker in self._workers}
         new_ids = {worker.instance_id for worker in workers}
         self._workers = workers

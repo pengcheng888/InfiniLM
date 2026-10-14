@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_STREAM_TIMEOUT = 100.0
 DEFAULT_REQUEST_TIMEOUT = 1000.0
+INTERNAL_REQUEST_HEADER = "X-InfiniLM-Internal"
 
 
 def chunk_json(
@@ -262,7 +263,32 @@ class InferenceServer:
 
         app = FastAPI(lifespan=lifespan)
         self._register_routes(app)
+        self._register_prefill_api_guard(app)
         return app
+
+    def _register_prefill_api_guard(self, app: FastAPI) -> None:
+        """Keep producer-only workers off the public OpenAI surface."""
+        if self.kv_transfer_config is None or self.kv_transfer_config.kv_role != "kv_producer":
+            return
+
+        @app.middleware("http")
+        async def protect_prefill_openai_api(request: Request, call_next):
+            internal_surface = request.url.path.startswith("/v1/") or (
+                request.url.path in {"/chat/completions", "/completions"}
+            )
+            if internal_surface and request.headers.get(
+                INTERNAL_REQUEST_HEADER, ""
+            ).lower() not in {"true", "1"}:
+                return JSONResponse(
+                    status_code=403,
+                    content={
+                        "error": {
+                            "message": "prefill worker only accepts internal requests",
+                            "type": "permission_error",
+                        }
+                    },
+                )
+            return await call_next(request)
 
     def _register_routes(self, app: FastAPI):
         """Register API routes."""

@@ -1,20 +1,21 @@
 import argparse
 import asyncio
-import httpx
 import ipaddress
 import itertools
 import json
+import logging
 import os
 import urllib
 import uuid
-import uvicorn
-import logging
-
 from contextlib import asynccontextmanager
+
+import httpx
+import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 logger = logging.getLogger(__name__)
+INTERNAL_REQUEST_HEADER = "X-InfiniLM-Internal"
 
 
 def maybe_wrap_ipv6_address(hostname):
@@ -35,7 +36,7 @@ async def wait_for_cluster_ready(prefill_clients, decode_clients, ready_event):
             try:
                 response = await prefill_client["client"].get("/health")
                 response.raise_for_status()
-            except Exception as e:
+            except Exception:
                 await asyncio.sleep(1)  # Wait before retrying
                 logger.warning(
                     "waiting for handshake with prefill server: %s",
@@ -63,7 +64,7 @@ async def wait_for_cluster_ready(prefill_clients, decode_clients, ready_event):
                 response.raise_for_status()
                 logger.warning("successfully handshake with decode server!")
                 break
-            except Exception as e:
+            except Exception:
                 await asyncio.sleep(1)  # Wait before retrying
                 logger.warning(
                     "waiting for handshake with decode server: %s",
@@ -309,6 +310,7 @@ async def send_request(
         "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
         "X-Request-Id": request_id,
         "X-data-parallel-rank": str(dp_rank),
+        INTERNAL_REQUEST_HEADER: "true",
         # Uncomment in high-concurrency or long-context scenarios (minor performance overhead):
         "Connection": "close",
     }
@@ -328,6 +330,7 @@ async def stream_response(
     headers = {
         "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
         "X-Request-Id": request_id,
+        INTERNAL_REQUEST_HEADER: "true",
         # Uncomment in high-concurrency or long-context scenarios (minor performance overhead):
         "Connection": "close",
     }
