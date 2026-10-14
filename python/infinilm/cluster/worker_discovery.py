@@ -8,6 +8,7 @@ from dataclasses import replace
 
 from infinilm.llm import AsyncLLMEngine
 
+from .cache_index import WorkerCacheIndexExporter
 from .registry import FileServiceRegistry, WorkerRecord
 from .worker_traffic import WorkerTrafficMetrics
 
@@ -25,12 +26,14 @@ class WorkerDiscoveryService:
         record: WorkerRecord,
         heartbeat_interval: float | None = None,
         traffic_metrics: WorkerTrafficMetrics | None = None,
+        cache_index_exporter: WorkerCacheIndexExporter | None = None,
     ) -> None:
         self.engine = engine
         self.registry = registry
         self.record = record
         self.heartbeat_interval = heartbeat_interval
         self.traffic_metrics = traffic_metrics
+        self.cache_index_exporter = cache_index_exporter
         self._heartbeat_task: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
@@ -38,6 +41,8 @@ class WorkerDiscoveryService:
             return
 
         self.record = self._with_engine_load()
+        if self.cache_index_exporter is not None:
+            await asyncio.to_thread(self.cache_index_exporter.start)
         await self.registry.register(self.record)
 
         self._heartbeat_task = asyncio.create_task(
@@ -75,6 +80,8 @@ class WorkerDiscoveryService:
                 pass
             self._heartbeat_task = None
         await self.registry.unregister(self.record)
+        if self.cache_index_exporter is not None:
+            await asyncio.to_thread(self.cache_index_exporter.stop)
 
     async def _heartbeat(self) -> None:
         interval = self.heartbeat_interval or max(
@@ -103,5 +110,8 @@ class WorkerDiscoveryService:
 
         if self.traffic_metrics is not None:
             metadata["traffic"] = self.traffic_metrics.snapshot()
+
+        if self.cache_index_exporter is not None:
+            metadata["kv_index"] = self.cache_index_exporter.metadata()
 
         return replace(self.record, metadata=metadata)

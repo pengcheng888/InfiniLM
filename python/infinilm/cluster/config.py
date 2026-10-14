@@ -68,7 +68,7 @@ class FrontendOptions:
     namespace: str
     # file discovery 根目录，frontend 从这里周期性读取 worker JSON 记录。
     file_kv: Path
-    # 路由策略名；默认 round-robin，也支持 least-loaded 和 session-affinity。
+    # 路由策略名；支持 round-robin、least-loaded、session-affinity、kv-aware。
     router_mode: str
     # frontend 完成启动前需要发现的最小健康 worker 数量。
     router_min_initial_workers: int
@@ -92,6 +92,8 @@ class FrontendOptions:
     router_affinity_ttl_seconds: float = 300.0
     # session-affinity LRU 表容量。
     router_affinity_capacity: int = 4096
+    # kv-aware 路由要求至少可复用的 token 数。
+    kv_router_min_tokens: int = 1
 
 
 def parse_worker_cluster_args(argv: list[str] | None = None) -> WorkerOptions:
@@ -134,13 +136,23 @@ def parse_frontend_args(argv: list[str] | None = None) -> FrontendOptions:
     _add_cluster_arguments(parser)
     parser.add_argument(
         "--router-mode",
-        choices=["least-loaded", "round-robin", "session-affinity"],
+        choices=[
+            "kv-aware",
+            "least-loaded",
+            "round-robin",
+            "session-affinity",
+        ],
         default="round-robin",
     )
     parser.add_argument(
         "--router-affinity-ttl-secs",
         type=float,
         default=300.0,
+    )
+    parser.add_argument(
+        "--kv-router-min-tokens",
+        type=int,
+        default=1,
     )
     parser.add_argument(
         "--router-affinity-capacity",
@@ -160,6 +172,7 @@ def parse_frontend_args(argv: list[str] | None = None) -> FrontendOptions:
         router_mode=args.router_mode,
         router_affinity_ttl_seconds=args.router_affinity_ttl_secs,
         router_affinity_capacity=args.router_affinity_capacity,
+        kv_router_min_tokens=args.kv_router_min_tokens,
         router_min_initial_workers=args.router_min_initial_workers,
         http_host=args.http_host,
         http_port=args.http_port,

@@ -102,6 +102,15 @@ def _worker_snapshot(worker: Any, metrics: RouterMetrics) -> dict[str, Any]:
         "worker_canceled_requests_total": int(
             traffic.get("canceled_requests_total", 0)
         ),
+        "cache_hit_requests_total": int(
+            traffic.get("local_cache_hit_requests_total", 0)
+        ),
+        "cache_hit_tokens_total": int(
+            traffic.get("local_cache_hit_tokens_total", 0)
+        ),
+        "prefill_tokens_total": int(
+            traffic.get("local_prefill_tokens_total", 0)
+        ),
         "usage_prompt_tokens_total": metrics.worker_usage_prompt_tokens.get(
             worker_id, 0
         ),
@@ -169,6 +178,12 @@ def monitoring_snapshot(
             "affinity_hits_total": metrics.affinity_hits_total,
             "affinity_misses_total": metrics.affinity_misses_total,
             "affinity_entries": len(router.affinity),
+            "kv_aware_requests_total": metrics.kv_aware_requests_total,
+            "kv_hit_requests_total": metrics.kv_hit_requests_total,
+            "kv_miss_requests_total": metrics.kv_miss_requests_total,
+            "kv_predicted_saved_tokens_total": metrics.kv_predicted_saved_tokens_total,
+            "kv_actual_saved_tokens_total": metrics.kv_actual_saved_tokens_total,
+            "kv_index_entries": metrics.kv_index_entries,
             "worker_received_requests_total": sum(
                 int(
                     (worker.metadata or {}).get("traffic", {}).get(

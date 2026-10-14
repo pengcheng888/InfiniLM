@@ -24,6 +24,7 @@ _STANDARD_FIELDS = {
     "max_tokens",
     "stop",
     "__infinilm_routing_key",
+    "__infinilm_kv_prefix__",
 }
 
 
@@ -104,7 +105,8 @@ class HttpWorkerClient:
                 **self._create_args(payload, stream=True)
             )
             finish_reason = "stop"
-            usage: dict[str, int] = {}
+            usage: dict[str, Any] = {}
+            stream_cache = None
             try:
                 async for chunk in stream:
                     usage.update(_usage(chunk.usage))
@@ -114,10 +116,13 @@ class HttpWorkerClient:
                             yield {"type": "delta", "content": content}
                         if choice.finish_reason:
                             finish_reason = choice.finish_reason
+                        if getattr(chunk, "cache", None) is not None:
+                            stream_cache = chunk.cache
                 yield {
                     "type": "finish",
                     "finish_reason": finish_reason,
                     "usage": usage,
+                    "cache": stream_cache,
                 }
             finally:
                 # 关闭 SSE response 也是取消路径。frontend 客户端断开后，
@@ -137,6 +142,7 @@ class HttpWorkerClient:
             "content": content or "",
             "finish_reason": (choice.finish_reason if choice else None) or "stop",
             "usage": _usage(completion.usage),
+            "cache": getattr(completion, "cache", None),
         }
 
 

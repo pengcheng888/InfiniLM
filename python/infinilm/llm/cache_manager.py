@@ -1,5 +1,6 @@
 """Paged KV cache allocation and source-agnostic prefix lookup."""
 
+import threading
 from collections import deque
 from collections.abc import Sequence
 from typing import Dict, List, Set
@@ -81,6 +82,8 @@ class BlockManager:
         self.hash_to_block_ids: Dict[BlockHash, Set[int]] = {}
         self.free_block_ids: deque[int] = deque(range(num_blocks))
         self.used_block_ids: Set[int] = set()
+        self._index_lock = threading.RLock()
+        self._index_observers: list = []
 
     def __repr__(self) -> str:
         return (
@@ -107,17 +110,19 @@ class BlockManager:
         block_ids.remove(block.block_id)
         if not block_ids:
             del self.hash_to_block_ids[block.hash]
+            self._notify_index_observers("evicted", block.hash)
         block.hash = EMPTY_BLOCK_HASH
 
     def _deallocate_block(self, block_id: int) -> None:
-        block = self.blocks[block_id]
-        assert block.ref_count == 0, (
-            f"Block {block_id} ref_count not zero, cannot deallocate"
-        )
-        self._remove_block_hash(block)
-        block.free()
-        self.used_block_ids.remove(block_id)
-        self.free_block_ids.append(block_id)
+        with self._index_lock:
+            block = self.blocks[block_id]
+            assert block.ref_count == 0, (
+                f"Block {block_id} ref_count not zero, cannot deallocate"
+            )
+            self._remove_block_hash(block)
+            block.free()
+            self.used_block_ids.remove(block_id)
+            self.free_block_ids.append(block_id)
 
     def can_allocate(self, num_required_blocks: int) -> bool:
         return len(self.free_block_ids) >= num_required_blocks
@@ -139,21 +144,23 @@ class BlockManager:
         max_cache_hit_tokens: int,
     ) -> tuple[List[int], int]:
         """Pin the longest consecutive cached prefix identified by hashes."""
-        max_hit_blocks = min(
-            len(block_hashes), max(0, max_cache_hit_tokens) // self.block_size
-        )
-        cached_block_table: List[int] = []
-        for block_idx in range(max_hit_blocks):
-            block_hash = block_hashes[block_idx]
-            block_ids = self.hash_to_block_ids.get(block_hash)
-            if not block_ids:
-                break
-            block_id = next(iter(block_ids))
-            block = self.blocks[block_id]
-            assert block.hash == block_hash and block_id in self.used_block_ids
-            block.ref_count += 1
-            cached_block_table.append(block_id)
-        return cached_block_table, len(cached_block_table) * self.block_size
+        with self._index_lock:
+            max_hit_blocks = min(
+                len(block_hashes), max(0, max_cache_hit_tokens) // self.block_size
+            )
+            cached_block_table: List[int] = []
+            for block_idx in range(max_hit_blocks):
+                block_hash = block_hashes[block_idx]
+                block_ids = self.hash_to_block_ids.get(block_hash)
+                if not block_ids:
+                    break
+                block_id = next(iter(block_ids))
+                block = self.blocks[block_id]
+                assert block.hash == block_hash and block_id in self.used_block_ids
+                block.ref_count += 1
+                cached_block_table.append(block_id)
+                self._notify_index_observers("touched", block_hash)
+            return cached_block_table, len(cached_block_table) * self.block_size
 
     def allocate_slots(
         self,
@@ -289,30 +296,32 @@ class BlockManager:
         num_computed_tokens: int,
     ) -> int:
         """Publish newly computed full blocks and return the indexed boundary."""
-        end_block = min(
-            num_computed_tokens // self.block_size,
-            len(block_table),
-            len(block_hashes),
-        )
-        if not 0 <= start_block <= end_block:
-            raise ValueError(
-                f"invalid publish range: start_block={start_block}, end_block={end_block}"
+        with self._index_lock:
+            end_block = min(
+                num_computed_tokens // self.block_size,
+                len(block_table),
+                len(block_hashes),
             )
-        for block_idx in range(start_block, end_block):
-            block_id = block_table[block_idx]
-            block = self.blocks[block_id]
-            if block.hash != EMPTY_BLOCK_HASH:
-                raise RuntimeError(
-                    f"published block {block_id} cannot change its prefix hash"
+            if not 0 <= start_block <= end_block:
+                raise ValueError(
+                    f"invalid publish range: start_block={start_block}, end_block={end_block}"
                 )
+            for block_idx in range(start_block, end_block):
+                block_id = block_table[block_idx]
+                block = self.blocks[block_id]
+                if block.hash != EMPTY_BLOCK_HASH:
+                    raise RuntimeError(
+                        f"published block {block_id} cannot change its prefix hash"
+                    )
 
-        for block_idx in range(start_block, end_block):
-            block_id = block_table[block_idx]
-            block = self.blocks[block_id]
-            block_hash = block_hashes[block_idx]
-            block.hash = block_hash
-            self.hash_to_block_ids.setdefault(block_hash, set()).add(block_id)
-        return end_block
+            for block_idx in range(start_block, end_block):
+                block_id = block_table[block_idx]
+                block = self.blocks[block_id]
+                block_hash = block_hashes[block_idx]
+                block.hash = block_hash
+                self.hash_to_block_ids.setdefault(block_hash, set()).add(block_id)
+                self._notify_index_observers("published", block_hash)
+            return end_block
 
     def append_slot(
         self, block_table: List[int], num_tokens: int
@@ -336,16 +345,43 @@ class BlockManager:
 
     def try_free_blocks(self, num_required: int) -> bool:
         """Evict unreferenced blocks until the requested capacity is available."""
-        to_free = [
-            block_id
-            for block_id in self.used_block_ids
-            if self.blocks[block_id].ref_count == 0
-        ]
-        for block_id in to_free:
-            self._deallocate_block(block_id)
-            if self.can_allocate(num_required):
-                return True
-        return self.can_allocate(num_required)
+        with self._index_lock:
+            to_free = [
+                block_id
+                for block_id in self.used_block_ids
+                if self.blocks[block_id].ref_count == 0
+            ]
+            for block_id in to_free:
+                self._deallocate_block(block_id)
+                if self.can_allocate(num_required):
+                    return True
+            return self.can_allocate(num_required)
+
+    def add_index_observer(self, observer) -> None:
+        with self._index_lock:
+            self._index_observers.append(observer)
+
+    def remove_index_observer(self, observer) -> None:
+        with self._index_lock:
+            try:
+                self._index_observers.remove(observer)
+            except ValueError:
+                pass
+
+    def snapshot_prefix_index(self) -> list[str]:
+        """Return the currently published chained prefix hashes."""
+        with self._index_lock:
+            return [block_hash.hex() for block_hash in self.hash_to_block_ids]
+
+    def _notify_index_observers(self, event_type: str, block_hash: BlockHash) -> None:
+        event = {"type": event_type, "hash": block_hash.hex()}
+        for observer in self._index_observers:
+            try:
+                observer(event)
+            except Exception:
+                # Index export is advisory; cache execution must never fail due
+                # to a malformed or slow observer.
+                continue
 
     def update_blocks_slot(
         self, block_table: List[int], num_computed_tokens: int, total_tokens: int

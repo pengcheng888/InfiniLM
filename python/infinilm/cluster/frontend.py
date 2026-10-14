@@ -21,6 +21,7 @@ from fastapi.responses import (
 
 from .affinity import ROUTING_KEY_FIELD
 from .config import FrontendOptions, parse_frontend_args
+from .kv_prefix import PrefixHashCalculator
 from .metrics import FrontendMetrics
 from .monitoring import MONITORING_HTML, monitoring_snapshot
 from .registry import FileServiceRegistry, FileServiceWatcher
@@ -48,7 +49,9 @@ class ClusterFrontend:
             router_mode=options.router_mode,
             affinity_ttl_seconds=options.router_affinity_ttl_seconds,
             affinity_capacity=options.router_affinity_capacity,
+            kv_router_min_tokens=options.kv_router_min_tokens,
         )
+        self.prefix_calculator = PrefixHashCalculator()
         self.metrics = FrontendMetrics(router=self.router.metrics)
 
     def _resolve_model(self, requested: str | None) -> tuple[str, list] | None:
@@ -209,6 +212,26 @@ class ClusterFrontend:
                 )
             model_name, _ = resolved
             payload = {**payload, "model": model_name}
+            if self.options.router_mode == "kv-aware":
+                resolved_workers = self.router.available_workers(model_name)
+                model_path = resolved_workers[0].model
+                kv_index = (resolved_workers[0].metadata or {}).get("kv_index")
+                block_size = (
+                    int(kv_index.get("block_size"))
+                    if isinstance(kv_index, dict) and kv_index.get("block_size")
+                    else 256
+                )
+                kv_prefix = await asyncio.to_thread(
+                    self.prefix_calculator.calculate,
+                    payload,
+                    model_path=model_path,
+                    block_size=block_size,
+                )
+                if kv_prefix is not None:
+                    payload = {
+                        **payload,
+                        "__infinilm_kv_prefix__": kv_prefix,
+                    }
             session_id = request.headers.get("x-infinilm-session-id") or request.headers.get(
                 "x-session-id"
             )

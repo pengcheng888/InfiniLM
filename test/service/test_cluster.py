@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 import httpx
 from infinilm.cluster.affinity import AffinityStore, affinity_key
+from infinilm.cluster.cache_index import WorkerCacheIndexExporter
 from infinilm.cluster.config import (
     FrontendOptions,
     parse_frontend_args,
@@ -20,14 +21,23 @@ from infinilm.cluster.config import (
 from infinilm.cluster.frontend import ClusterFrontend
 from infinilm.cluster.frontend import main as frontend_main
 from infinilm.cluster.http_worker_client_factory import HttpWorkerClientFactory
-from infinilm.cluster.metrics import REQUEST_DURATION_BUCKETS, Histogram
+from infinilm.cluster.kv_index import KvIndexStore
+from infinilm.cluster.kv_prefix import PrefixHashCalculator, prefix_hashes
+from infinilm.cluster.metrics import (
+    REQUEST_DURATION_BUCKETS,
+    Histogram,
+    RouterMetrics,
+)
 from infinilm.cluster.registry import FileServiceRegistry, FileServiceWatcher
 from infinilm.cluster.router import ClusterRouter
 from infinilm.cluster.worker import ClusterInferenceServer, DrainingUvicornServer
 from infinilm.cluster.worker_discovery import WorkerDiscoveryService
 from infinilm.cluster.worker_traffic import WorkerTrafficMetrics
 from infinilm.llm import AsyncLLMEngine
+from infinilm.llm.cache_manager import BlockManager
+from infinilm.llm.request import InferenceRequest
 from infinilm.server.inference_server import InferenceServer
+from prometheus_client.parser import text_string_to_metric_families
 
 
 class FakeEngine:
@@ -60,6 +70,43 @@ class HistogramTest(unittest.TestCase):
             histogram.quantile(0.95, REQUEST_DURATION_BUCKETS), 0.4625
         )
         self.assertEqual(histogram.quantile(0.99, REQUEST_DURATION_BUCKETS) > 0.2, True)
+
+
+class MetricsRenderTest(unittest.TestCase):
+    def test_prometheus_parser_accepts_router_and_worker_cache_metrics(self):
+        metrics = RouterMetrics()
+        metrics.kv_aware_requests_total = 3
+        metrics.kv_hit_requests_total = 2
+        metrics.kv_miss_requests_total = 1
+        metrics.kv_predicted_saved_tokens_total = 512
+        metrics.kv_actual_saved_tokens_total = 506
+        metrics.kv_index_entries = 7
+        worker = SimpleNamespace(
+            instance_id="worker-1",
+            state="ready",
+            metadata={
+                "traffic": {
+                    "local_cache_hit_requests_total": 2,
+                    "local_cache_miss_requests_total": 1,
+                    "local_cache_hit_tokens_total": 506,
+                    "local_prefill_tokens_total": 18,
+                }
+            },
+        )
+
+        rendered = metrics.render(1, [worker])
+        families = {
+            family.name for family in text_string_to_metric_families(rendered)
+        }
+
+        self.assertIn("infinilm_router_kv_aware_requests", families)
+        self.assertIn("infinilm_router_kv_hit_requests", families)
+        self.assertIn("infinilm_router_kv_predicted_saved_tokens", families)
+        self.assertIn("infinilm_router_kv_actual_saved_tokens", families)
+        self.assertIn("infinilm_router_kv_index_entries", families)
+        self.assertIn("infinilm_worker_cache_hit_requests", families)
+        self.assertIn("infinilm_worker_cache_hit_tokens", families)
+        self.assertIn("infinilm_worker_prefill_tokens", families)
 
 
 class WorkerTrafficMetricsTest(unittest.TestCase):
@@ -107,6 +154,268 @@ class WorkerTrafficMetricsTest(unittest.TestCase):
             self.assertEqual(snapshot["active_requests"], 0)
 
         asyncio.run(run())
+
+
+class PrefixCacheObservabilityTest(unittest.TestCase):
+    def test_worker_traffic_records_actual_cache_hits(self):
+        metrics = WorkerTrafficMetrics()
+        metrics.record_cache(
+            {
+                "hit": True,
+                "matched_tokens": 512,
+                "prefill_tokens": 128,
+            }
+        )
+        metrics.record_cache({"hit": False, "matched_tokens": 0, "prefill_tokens": 256})
+
+        snapshot = metrics.snapshot()
+        self.assertEqual(snapshot["local_cache_hit_requests_total"], 1)
+        self.assertEqual(snapshot["local_cache_miss_requests_total"], 1)
+        self.assertEqual(snapshot["local_cache_hit_tokens_total"], 512)
+        self.assertEqual(snapshot["local_prefill_tokens_total"], 384)
+
+    def test_cache_response_uses_initial_prefix_hit(self):
+        request = InferenceRequest(
+            request_id="request-1",
+            prompt_token_ids=list(range(640)),
+        )
+        request.num_local_prefix_cache_hit_tokens = 512
+
+        stats = InferenceServer._cache_stats(request)
+        self.assertTrue(stats["hit"])
+        self.assertEqual(stats["matched_tokens"], 512)
+        self.assertEqual(stats["prefill_tokens"], 128)
+        self.assertEqual(stats["prompt_tokens"], 640)
+
+
+class CacheIndexTest(unittest.TestCase):
+    def _request_with_tokens(self, token_ids: list[int]) -> InferenceRequest:
+        request = InferenceRequest(request_id=str(len(token_ids)), prompt_token_ids=token_ids)
+        request.initialize_block_hashes(block_size=4, enable_prefix_caching=True)
+        return request
+
+    def test_worker_cache_export_paths_are_isolated_by_instance(self):
+        with TemporaryDirectory() as temporary:
+            registry = FileServiceRegistry(Path(temporary))
+            manager = BlockManager(num_blocks=4, block_size=4)
+            scheduler = SimpleNamespace(
+                cache_manager=manager,
+                enable_prefix_caching=True,
+            )
+            engine = SimpleNamespace(
+                engine=SimpleNamespace(scheduler=scheduler),
+                config=SimpleNamespace(block_size=4),
+            )
+            server = ClusterInferenceServer.__new__(ClusterInferenceServer)
+            server.registry = registry
+            server.model_path = "/models/qwen"
+            server.block_size = 4
+
+            first = server._create_cache_index_exporter(engine, "worker-a")
+            second = server._create_cache_index_exporter(engine, "worker-b")
+
+            self.assertIsNotNone(first)
+            self.assertIsNotNone(second)
+            self.assertNotEqual(first.output_dir, second.output_dir)
+            self.assertEqual(
+                first.output_dir,
+                Path(temporary).parent / "cache-index" / "worker-a",
+            )
+
+    def test_block_manager_prefix_lookup_and_events(self):
+        async def run():
+            with TemporaryDirectory() as temporary:
+                manager = BlockManager(num_blocks=8, block_size=4)
+                exporter = WorkerCacheIndexExporter(
+                    block_manager=manager,
+                    output_dir=Path(temporary),
+                    namespace="test-namespace",
+                    block_size=4,
+                )
+                first = self._request_with_tokens(list(range(8)))
+                first.block_table, first.slot_mapping = manager.allocate_slots(8)
+                await asyncio.to_thread(exporter.start)
+                manager.publish_computed_blocks(
+                    first.block_table,
+                    first.block_hashes,
+                    0,
+                    8,
+                )
+
+                second = self._request_with_tokens(list(range(12)))
+                cached, cached_tokens = manager.get_computed_blocks(
+                    second.block_hashes, 11
+                )
+                self.assertEqual(len(cached), 2)
+                self.assertEqual(cached_tokens, 8)
+
+                manager.free_blocks(cached)
+                await asyncio.to_thread(exporter.write_snapshot)
+                for _ in range(50):
+                    if exporter.metadata()["entries"] >= 2:
+                        break
+                    await asyncio.sleep(0.01)
+                self.assertGreaterEqual(exporter.metadata()["entries"], 2)
+
+                snapshot = json.loads(exporter.snapshot_path.read_text(encoding="utf-8"))
+                self.assertEqual(snapshot["namespace"], "test-namespace")
+                self.assertEqual(len(snapshot["hashes"]), 2)
+
+                manager.free_blocks(first.block_table)
+                manager.try_free_blocks(8)
+                self.assertEqual(manager.snapshot_prefix_index(), [])
+                for _ in range(50):
+                    if exporter.metadata()["entries"] == 0:
+                        break
+                    await asyncio.sleep(0.01)
+                self.assertEqual(exporter.metadata()["entries"], 0)
+                events = []
+                for _ in range(50):
+                    if exporter.events_path.exists():
+                        events = [
+                            json.loads(line)
+                            for line in exporter.events_path.read_text(
+                                encoding="utf-8"
+                            ).splitlines()
+                        ]
+                        if "evicted" in {event["type"] for event in events}:
+                            break
+                    await asyncio.sleep(0.01)
+                event_types = [event["type"] for event in events]
+                self.assertIn("published", event_types)
+                self.assertIn("evicted", event_types)
+                await asyncio.to_thread(exporter.stop)
+
+        asyncio.run(run())
+
+    def test_frontend_index_reads_snapshot_and_events(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            registry = FileServiceRegistry(root)
+            namespace = "test-namespace"
+            hashes = prefix_hashes(list(range(12)), block_size=4)
+            records = []
+            for index, matched_hash_count in enumerate((3, 1)):
+                output_dir = root / f"worker-{index}"
+                output_dir.mkdir()
+                snapshot_path = output_dir / "snapshot.json"
+                events_path = output_dir / "events.jsonl"
+                snapshot_path.write_text(
+                    json.dumps(
+                        {
+                            "namespace": namespace,
+                            "block_size": 4,
+                            "sequence": 1,
+                            "hashes": hashes[:matched_hash_count],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                events_path.write_text("", encoding="utf-8")
+                record = registry.new_record(
+                    namespace="test",
+                    component="infinilm",
+                    endpoint="generate",
+                    worker_type="aggregated",
+                    model="/models/qwen",
+                    served_model_name="qwen",
+                    host="127.0.0.1",
+                    port=18081 + index,
+                    metadata={
+                        "kv_index": {
+                            "namespace": namespace,
+                            "block_size": 4,
+                            "snapshot": str(snapshot_path),
+                            "events": str(events_path),
+                        }
+                    },
+                )
+                records.append(record)
+
+            index = KvIndexStore()
+            index.refresh(records)
+            matches = index.lookup(
+                {
+                    "namespace": namespace,
+                    "block_size": 4,
+                    "hashes": hashes,
+                },
+                records,
+            )
+            self.assertEqual(matches[0].worker_id, records[0].instance_id)
+            self.assertEqual(matches[0].matched_blocks, 3)
+            self.assertEqual(matches[0].matched_tokens, 12)
+            self.assertEqual(index.entries(), 4)
+
+            with Path(records[0].metadata["kv_index"]["events"]).open(
+                "a", encoding="utf-8"
+            ) as events:
+                events.write(
+                    json.dumps(
+                        {"sequence": 2, "type": "evicted", "hash": hashes[2]}
+                    )
+                    + "\n"
+                )
+            index.refresh(records)
+            matches = index.lookup(
+                {"namespace": namespace, "block_size": 4, "hashes": hashes},
+                records,
+            )
+            first = next(
+                match
+                for match in matches
+                if match.worker_id == records[0].instance_id
+            )
+            self.assertEqual(first.matched_blocks, 2)
+            self.assertEqual(index.entries(), 3)
+
+
+class PrefixHashCalculatorTest(unittest.TestCase):
+    def test_extracts_tokens_from_processor_batch_encoding(self):
+        class BatchEncoding:
+            def __getitem__(self, key):
+                if key != "input_ids":
+                    raise KeyError(key)
+                return [[1, 2, 3], [4, 5, 6]]
+
+        self.assertEqual(
+            PrefixHashCalculator._input_ids(BatchEncoding()),
+            [1, 2, 3],
+        )
+
+    def test_hashes_text_chat_prompt_with_worker_hash_algorithm(self):
+        model_path = "/data-aisoft/mechdancer/models/Qwen3-0.6B"
+        calculator = PrefixHashCalculator()
+        payload = {
+            "model": "qwen",
+            "messages": [
+                {"role": "system", "content": "You are concise."},
+                {"role": "user", "content": "hello world, this prompt spans multiple blocks"},
+            ],
+        }
+        result = calculator.calculate(payload, model_path=model_path, block_size=8)
+
+        self.assertIsNotNone(result)
+        self.assertGreaterEqual(result["token_count"], len(result["hashes"]) * 8)
+        self.assertGreater(len(result["hashes"]), 0)
+        self.assertEqual(len(result["namespace"]), 64)
+
+        multimodal = {
+            "model": "qwen",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": "http://invalid"}}
+                    ],
+                }
+            ],
+        }
+        self.assertIsNone(
+            calculator.calculate(
+                multimodal, model_path=model_path, block_size=8
+            )
+        )
 
 
 class WorkerDrainingTest(unittest.TestCase):
@@ -253,8 +562,18 @@ class RouterModeTest(unittest.TestCase):
         options = parse_frontend_args(["--router-mode", "session-affinity"])
         self.assertEqual(options.router_mode, "session-affinity")
 
+        options = parse_frontend_args(["--router-mode", "kv-aware"])
+        self.assertEqual(options.router_mode, "kv-aware")
+
         with self.assertRaises(SystemExit):
             parse_frontend_args(["--router-mode", "least-inflight"])
+
+    def test_kv_router_min_tokens_has_default_and_override(self):
+        options = parse_frontend_args([])
+        self.assertEqual(options.kv_router_min_tokens, 1)
+
+        options = parse_frontend_args(["--kv-router-min-tokens", "256"])
+        self.assertEqual(options.kv_router_min_tokens, 256)
 
     def test_affinity_options_have_defaults_and_overrides(self):
         options = parse_frontend_args([])
@@ -338,6 +657,75 @@ class RouterModeTest(unittest.TestCase):
             rebalanced = router.select(watcher.workers, routing_key=key)
             self.assertIsNot(rebalanced, fallback)
             self.assertEqual(router.metrics.affinity_misses_total, 3)
+
+    def test_kv_aware_routes_to_longest_cached_prefix(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            registry = FileServiceRegistry(root)
+            namespace = "kv-router-test"
+            hashes = prefix_hashes(list(range(12)), block_size=4)
+            records = []
+            for index, count in enumerate((1, 3)):
+                output_dir = root / f"worker-{index}"
+                output_dir.mkdir()
+                snapshot_path = output_dir / "snapshot.json"
+                events_path = output_dir / "events.jsonl"
+                snapshot_path.write_text(
+                    json.dumps(
+                        {
+                            "namespace": namespace,
+                            "block_size": 4,
+                            "sequence": 1,
+                            "hashes": hashes[:count],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                events_path.write_text("", encoding="utf-8")
+                records.append(
+                    registry.new_record(
+                        namespace="test",
+                        component="infinilm",
+                        endpoint="generate",
+                        worker_type="aggregated",
+                        model="/models/qwen",
+                        served_model_name="qwen",
+                        host="127.0.0.1",
+                        port=18091 + index,
+                        metadata={
+                            "kv_index": {
+                                "namespace": namespace,
+                                "block_size": 4,
+                                "snapshot": str(snapshot_path),
+                                "events": str(events_path),
+                            }
+                        },
+                    )
+                )
+
+            watcher = FileServiceWatcher(registry)
+            watcher._workers = records
+            router = ClusterRouter(
+                watcher,
+                connect_timeout=1.0,
+                request_timeout=2.0,
+                router_mode="kv-aware",
+            )
+            selected = router.select(
+                records,
+                kv_prefix={
+                    "namespace": namespace,
+                    "block_size": 4,
+                    "hashes": hashes,
+                },
+            )
+
+            self.assertIs(selected, records[1])
+            self.assertEqual(router.metrics.kv_aware_requests_total, 1)
+            self.assertEqual(router.metrics.kv_hit_requests_total, 1)
+            self.assertEqual(router.metrics.kv_miss_requests_total, 0)
+            self.assertEqual(router.metrics.kv_predicted_saved_tokens_total, 12)
+            self.assertEqual(router.kv_index.entries(), 4)
 
     def test_round_robin_selects_each_worker_evenly(self):
         with TemporaryDirectory() as temporary:
@@ -1180,6 +1568,153 @@ class HttpRequestPlaneTest(unittest.TestCase):
                     self.assertEqual(frontend.router.metrics.affinity_requests_total, 2)
                     self.assertEqual(frontend.router.metrics.affinity_hits_total, 1)
                     self.assertEqual(frontend.router.metrics.affinity_misses_total, 1)
+                finally:
+                    await worker_http.aclose()
+
+        asyncio.run(run())
+
+    def test_kv_aware_frontend_routes_and_hides_internal_payload(self):
+        visited_ports: list[int] = []
+
+        def worker_transport(request: httpx.Request) -> httpx.Response:
+            payload = json.loads(request.content)
+            self.assertNotIn("__infinilm_kv_prefix__", payload)
+            self.assertNotIn("__infinilm_routing_key", payload)
+            visited_ports.append(request.url.port)
+            return httpx.Response(
+                200,
+                json={
+                    "id": "worker-completion",
+                    "object": "chat.completion",
+                    "created": 1,
+                    "model": "qwen",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {"role": "assistant", "content": "Ready."},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "usage": {
+                        "prompt_tokens": 12,
+                        "completion_tokens": 2,
+                        "total_tokens": 14,
+                    },
+                    "cache": {
+                        "hit": True,
+                        "matched_tokens": 12,
+                        "prefill_tokens": 0,
+                        "prompt_tokens": 12,
+                    },
+                },
+            )
+
+        async def run():
+            with TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                registry = FileServiceRegistry(root)
+                namespace = "frontend-kv-test"
+                hashes = prefix_hashes(list(range(12)), block_size=4)
+                records = []
+                for index, count in enumerate((0, 3)):
+                    output_dir = root / f"worker-{index}"
+                    output_dir.mkdir()
+                    snapshot_path = output_dir / "snapshot.json"
+                    events_path = output_dir / "events.jsonl"
+                    snapshot_path.write_text(
+                        json.dumps(
+                            {
+                                "namespace": namespace,
+                                "block_size": 4,
+                                "sequence": 1,
+                                "hashes": hashes[:count],
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
+                    events_path.write_text("", encoding="utf-8")
+                    records.append(
+                        registry.new_record(
+                            namespace="test",
+                            component="infinilm",
+                            endpoint="generate",
+                            worker_type="aggregated",
+                            model="/models/qwen",
+                            served_model_name="qwen",
+                            host="127.0.0.1",
+                            port=18091 + index,
+                            metadata={
+                                "kv_index": {
+                                    "namespace": namespace,
+                                    "block_size": 4,
+                                    "snapshot": str(snapshot_path),
+                                    "events": str(events_path),
+                                }
+                            },
+                        )
+                    )
+                for record in records:
+                    await registry.register(record)
+
+                frontend = ClusterFrontend(
+                    FrontendOptions(
+                        namespace="test",
+                        file_kv=root,
+                        router_mode="kv-aware",
+                        router_min_initial_workers=1,
+                        http_host="127.0.0.1",
+                        http_port=18000,
+                        connect_timeout=1.0,
+                        request_timeout=2.0,
+                        health_interval=0.1,
+                        registry_ttl=10.0,
+                        heartbeat_interval=2.0,
+                        kv_router_min_tokens=4,
+                    )
+                )
+                await frontend.router.aclose()
+                worker_http = httpx.AsyncClient(
+                    transport=httpx.MockTransport(worker_transport)
+                )
+                frontend.router.worker_client_factory = HttpWorkerClientFactory(
+                    connect_timeout=1.0,
+                    request_timeout=2.0,
+                    http_client=worker_http,
+                )
+                await frontend.watcher.refresh("test")
+                app = frontend.create_app()
+
+                prefix = {
+                    "namespace": namespace,
+                    "block_size": 4,
+                    "hashes": hashes,
+                    "token_count": 12,
+                }
+                try:
+                    with patch.object(
+                        frontend.prefix_calculator,
+                        "calculate",
+                        return_value=prefix,
+                    ):
+                        async with httpx.AsyncClient(
+                            transport=httpx.ASGITransport(app=app),
+                            base_url="http://frontend",
+                        ) as client:
+                            response = await client.post(
+                                "/v1/chat/completions",
+                                json={
+                                    "model": "qwen",
+                                    "messages": [{"role": "user", "content": "hi"}],
+                                },
+                            )
+                            self.assertEqual(response.status_code, 200)
+
+                    self.assertEqual(visited_ports, [18092])
+                    metrics = frontend.router.metrics
+                    self.assertEqual(metrics.kv_aware_requests_total, 1)
+                    self.assertEqual(metrics.kv_hit_requests_total, 1)
+                    self.assertEqual(metrics.kv_predicted_saved_tokens_total, 12)
+                    self.assertEqual(metrics.kv_actual_saved_tokens_total, 12)
                 finally:
                     await worker_http.aclose()
 

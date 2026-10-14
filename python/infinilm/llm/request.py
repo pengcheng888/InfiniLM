@@ -196,6 +196,10 @@ class InferenceRequest:
             0  # Number of cached tokens visible to the current model step
         )
         self.num_computed_tokens: int = 0  # Total tokens computed (local + remote)
+        # Longest local prefix-cache hit observed when the prompt was first
+        # scheduled. Unlike num_local_cached_tokens, this value is not advanced
+        # as decode produces additional tokens.
+        self.num_local_prefix_cache_hit_tokens: int = 0
         self.num_blocks: int = 0
         # Incremental hashes for complete logical token blocks.
         self._block_hashes: List[BlockHash] = []

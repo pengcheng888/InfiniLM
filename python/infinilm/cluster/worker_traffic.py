@@ -21,6 +21,10 @@ class WorkerTrafficMetrics:
     failed_requests_total: int = 0
     canceled_requests_total: int = 0
     active_requests: int = 0
+    local_cache_hit_requests_total: int = 0
+    local_cache_miss_requests_total: int = 0
+    local_cache_hit_tokens_total: int = 0
+    local_prefill_tokens_total: int = 0
 
     def __post_init__(self) -> None:
         self._lock = threading.Lock()
@@ -54,4 +58,21 @@ class WorkerTrafficMetrics:
                 "failed_requests_total": self.failed_requests_total,
                 "canceled_requests_total": self.canceled_requests_total,
                 "active_requests": self.active_requests,
+                "local_cache_hit_requests_total": self.local_cache_hit_requests_total,
+                "local_cache_miss_requests_total": self.local_cache_miss_requests_total,
+                "local_cache_hit_tokens_total": self.local_cache_hit_tokens_total,
+                "local_prefill_tokens_total": self.local_prefill_tokens_total,
             }
+
+    def record_cache(self, cache: dict | None) -> None:
+        if not isinstance(cache, dict):
+            return
+        matched = max(0, int(cache.get("matched_tokens", 0)))
+        prefill = max(0, int(cache.get("prefill_tokens", 0)))
+        with self._lock:
+            if matched:
+                self.local_cache_hit_requests_total += 1
+            else:
+                self.local_cache_miss_requests_total += 1
+            self.local_cache_hit_tokens_total += matched
+            self.local_prefill_tokens_total += prefill

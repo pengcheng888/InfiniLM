@@ -254,6 +254,7 @@ class Scheduler:
                 req.num_local_cached_tokens = (
                     num_local_computed_tokens if load_kv_async else num_computed_tokens
                 )
+                req.num_local_prefix_cache_hit_tokens = num_local_computed_tokens
                 req.num_cache_indexed_blocks = len(cached_block_table)
                 req.num_computed_tokens = num_computed_tokens
 

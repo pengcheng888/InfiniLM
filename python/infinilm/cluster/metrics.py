@@ -161,6 +161,18 @@ class RouterMetrics:
     affinity_evictions_total: int = 0
     # session-affinity 模式下没有生成 affinity key 的请求数。
     affinity_unkeyed_requests_total: int = 0
+    # kv-aware 模式下可计算 prefix hash 的请求数。
+    kv_aware_requests_total: int = 0
+    # 预测存在可复用 KV prefix 的请求数。
+    kv_hit_requests_total: int = 0
+    # 无命中或因负载回退的请求数。
+    kv_miss_requests_total: int = 0
+    # 预测可节省的 prompt token 数。
+    kv_predicted_saved_tokens_total: int = 0
+    # worker 实际报告的本地 prefix cache 命中 token 数。
+    kv_actual_saved_tokens_total: int = 0
+    # frontend 当前维护的全局 KV prefix index 条目数。
+    kv_index_entries: int = 0
     # 返回给客户端的内部 token chunk 数；不是 tokenizer 精确 usage token 数。
     # 输出为 `infinilm_router_tokens_total`。
     tokens_total: int = 0
@@ -393,6 +405,25 @@ class RouterMetrics:
             "# HELP infinilm_router_affinity_entries Active affinity table entries.",
             "# TYPE infinilm_router_affinity_entries gauge",
             f"infinilm_router_affinity_entries {affinity_entries}",
+            # kv-aware 路由预测和实际命中。
+            "# HELP infinilm_router_kv_aware_requests_total Requests eligible for KV-aware routing.",
+            "# TYPE infinilm_router_kv_aware_requests_total counter",
+            f"infinilm_router_kv_aware_requests_total {self.kv_aware_requests_total}",
+            "# HELP infinilm_router_kv_hit_requests_total Requests routed to a predicted cached prefix.",
+            "# TYPE infinilm_router_kv_hit_requests_total counter",
+            f"infinilm_router_kv_hit_requests_total {self.kv_hit_requests_total}",
+            "# HELP infinilm_router_kv_miss_requests_total KV-aware misses and load fallbacks.",
+            "# TYPE infinilm_router_kv_miss_requests_total counter",
+            f"infinilm_router_kv_miss_requests_total {self.kv_miss_requests_total}",
+            "# HELP infinilm_router_kv_predicted_saved_tokens_total Predicted prompt tokens reusable from KV cache.",
+            "# TYPE infinilm_router_kv_predicted_saved_tokens_total counter",
+            f"infinilm_router_kv_predicted_saved_tokens_total {self.kv_predicted_saved_tokens_total}",
+            "# HELP infinilm_router_kv_actual_saved_tokens_total Actual local prefix-cache hit tokens reported by workers.",
+            "# TYPE infinilm_router_kv_actual_saved_tokens_total counter",
+            f"infinilm_router_kv_actual_saved_tokens_total {self.kv_actual_saved_tokens_total}",
+            "# HELP infinilm_router_kv_index_entries Active worker prefix hashes in the frontend index.",
+            "# TYPE infinilm_router_kv_index_entries gauge",
+            f"infinilm_router_kv_index_entries {self.kv_index_entries}",
             # 输出 token chunk 数，不表示精确 tokenizer token 用量。
             "# HELP infinilm_router_tokens_total Token chunks streamed to clients.",
             "# TYPE infinilm_router_tokens_total counter",
@@ -467,6 +498,26 @@ class RouterMetrics:
                 "active_requests",
                 "infinilm_worker_active_requests",
                 "Worker-side active requests",
+            ),
+            (
+                "local_cache_hit_requests_total",
+                "infinilm_worker_cache_hit_requests_total",
+                "Worker-side local prefix-cache hits",
+            ),
+            (
+                "local_cache_miss_requests_total",
+                "infinilm_worker_cache_miss_requests_total",
+                "Worker-side local prefix-cache misses",
+            ),
+            (
+                "local_cache_hit_tokens_total",
+                "infinilm_worker_cache_hit_tokens_total",
+                "Worker-side local prefix-cache hit tokens",
+            ),
+            (
+                "local_prefill_tokens_total",
+                "infinilm_worker_prefill_tokens_total",
+                "Worker-side prefill tokens after local cache hits",
             ),
         )
         for source_name, metric_name, help_text in worker_traffic_names:

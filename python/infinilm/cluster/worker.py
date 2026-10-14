@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import sys
@@ -20,7 +21,9 @@ from infinilm.server.inference_server import (
     setup_logging,
 )
 
+from .cache_index import WorkerCacheIndexExporter
 from .config import WorkerOptions, parse_worker_cluster_args, remove_cluster_worker_args
+from .kv_prefix import model_cache_namespace
 from .registry import FileServiceRegistry
 from .worker_discovery import WorkerDiscoveryService
 from .worker_traffic import WorkerTrafficMetrics
@@ -94,6 +97,8 @@ class ClusterInferenceServer(InferenceServer):
         try:
             response = await super()._chat(request_id, data, http_request)
             failed = int(getattr(response, "status_code", 200)) >= 400
+            if isinstance(response, dict):
+                self.worker_traffic.record_cache(response.get("cache"))
             return response
         except asyncio.CancelledError:
             canceled = True
@@ -116,6 +121,12 @@ class ClusterInferenceServer(InferenceServer):
                     and ('"error"' in chunk or '"timeout"' in chunk)
                 ):
                     failed = True
+                if "finish_reason" in chunk:
+                    try:
+                        message = json.loads(chunk.removeprefix("data: ").strip())
+                        self.worker_traffic.record_cache(message.get("cache"))
+                    except ValueError:
+                        pass
                 yield chunk
         except asyncio.CancelledError:
             canceled = True
@@ -159,12 +170,38 @@ class ClusterInferenceServer(InferenceServer):
                 "max_batch_size": self.max_batch_size,
             },
         )
+        cache_exporter = self._create_cache_index_exporter(engine, record.instance_id)
         return WorkerDiscoveryService(
             engine=engine,
             registry=self.registry,
             record=record,
             heartbeat_interval=self.cluster_options.heartbeat_interval,
             traffic_metrics=self.worker_traffic,
+            cache_index_exporter=cache_exporter,
+        )
+
+    def _create_cache_index_exporter(
+        self,
+        engine: object,
+        instance_id: str,
+    ) -> WorkerCacheIndexExporter | None:
+        """Export paged-cache prefix hashes when prefix caching is enabled."""
+        scheduler = getattr(getattr(engine, "engine", None), "scheduler", None)
+        block_manager = getattr(scheduler, "cache_manager", None)
+        block_size = int(getattr(engine, "config", None).block_size or self.block_size)
+        if block_manager is None or not getattr(
+            scheduler, "enable_prefix_caching", False
+        ):
+            return None
+
+        output_dir = (
+            self.registry.root.parent / "cache-index" / instance_id
+        )
+        return WorkerCacheIndexExporter(
+            block_manager=block_manager,
+            output_dir=output_dir,
+            namespace=model_cache_namespace(self.model_path, block_size),
+            block_size=block_size,
         )
 
     def _create_app(self) -> FastAPI:

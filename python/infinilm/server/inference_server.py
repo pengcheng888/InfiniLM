@@ -27,7 +27,12 @@ DEFAULT_REQUEST_TIMEOUT = 1000.0
 
 
 def chunk_json(
-    id_, content=None, role=None, finish_reason=None, model: str = "unknown"
+    id_,
+    content=None,
+    role=None,
+    finish_reason=None,
+    model: str = "unknown",
+    cache: dict | None = None,
 ):
     """Generate JSON chunk for streaming response."""
     delta = {}
@@ -35,7 +40,7 @@ def chunk_json(
         delta["content"] = content
     if role:
         delta["role"] = role
-    return {
+    chunk = {
         "id": id_,
         "object": "chat.completion.chunk",
         "created": int(time.time()),
@@ -51,6 +56,9 @@ def chunk_json(
             }
         ],
     }
+    if cache is not None:
+        chunk["cache"] = cache
+    return chunk
 
 
 def completion_json(
@@ -62,9 +70,10 @@ def completion_json(
     prompt_tokens: int = 0,
     completion_tokens: int = 0,
     total_tokens: int = 0,
+    cache: dict | None = None,
 ):
     """Generate JSON response for non-streaming completion."""
-    return {
+    response = {
         "id": id_,
         "object": "chat.completion",
         "created": int(time.time()),
@@ -87,6 +96,9 @@ def completion_json(
             "total_tokens": total_tokens,
         },
     }
+    if cache is not None:
+        response["cache"] = cache
+    return response
 
 
 class InferenceServer:
@@ -463,9 +475,13 @@ class InferenceServer:
                     finish_reason = self._convert_finish_reason(
                         token_output.finish_reason
                     )
+                    cache_stats = self._cache_stats(req)
                     chunk = json.dumps(
                         chunk_json(
-                            request_id, finish_reason=finish_reason, model=self.model_id
+                            request_id,
+                            finish_reason=finish_reason,
+                            model=self.model_id,
+                            cache=cache_stats,
                         ),
                         ensure_ascii=False,
                     )
@@ -557,6 +573,7 @@ class InferenceServer:
                 prompt_tokens=req.get_prompt_length(),
                 completion_tokens=req.get_num_generated_tokens(),
                 total_tokens=req.get_total_length(),
+                cache=self._cache_stats(req),
             )
             return response
 
@@ -583,6 +600,20 @@ class InferenceServer:
             return "stop"
 
         return reason.value
+
+    @staticmethod
+    def _cache_stats(req) -> dict:
+        """Return the local prefix-cache hit observed for this request."""
+        prompt_tokens = req.get_prompt_length() if req is not None else 0
+        cached_tokens = (
+            req.num_local_prefix_cache_hit_tokens if req is not None else 0
+        )
+        return {
+            "hit": cached_tokens > 0,
+            "matched_tokens": cached_tokens,
+            "prefill_tokens": max(0, prompt_tokens - cached_tokens),
+            "prompt_tokens": prompt_tokens,
+        }
 
 
 def setup_logging(log_level: str = "INFO"):
