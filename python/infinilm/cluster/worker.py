@@ -24,7 +24,8 @@ from infinilm.server.inference_server import (
 from .cache_index import WorkerCacheIndexExporter
 from .config import WorkerOptions, parse_worker_cluster_args, remove_cluster_worker_args
 from .kv_prefix import model_cache_namespace
-from .registry import FileServiceRegistry
+from .registry import ServiceRegistry
+from .registry_factory import create_service_registry
 from .worker_discovery import WorkerDiscoveryService
 from .worker_traffic import WorkerTrafficMetrics
 
@@ -92,7 +93,7 @@ class ClusterInferenceServer(InferenceServer):
         self,
         *,
         cluster_options: WorkerOptions,
-        registry: FileServiceRegistry,
+        registry: ServiceRegistry,
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
@@ -217,6 +218,7 @@ class ClusterInferenceServer(InferenceServer):
             "worker_type",
             "aggregated",
         )
+        cluster_options = getattr(self, "cluster_options", None)
         if worker_type != "aggregated":
             return None
         scheduler = getattr(getattr(engine, "engine", None), "scheduler", None)
@@ -226,9 +228,17 @@ class ClusterInferenceServer(InferenceServer):
             scheduler, "enable_prefix_caching", False
         ):
             return None
+        if (
+            getattr(cluster_options, "discovery_backend", "file") == "etcd"
+            and getattr(cluster_options, "cache_index_dir", None) is None
+        ):
+            return None
 
+        cache_index_dir = getattr(cluster_options, "cache_index_dir", None)
         output_dir = (
-            self.registry.root.parent / "cache-index" / instance_id
+            cache_index_dir / instance_id
+            if cache_index_dir is not None
+            else self.registry.root.parent / "cache-index" / instance_id
         )
         return WorkerCacheIndexExporter(
             block_manager=block_manager,
@@ -254,6 +264,7 @@ class ClusterInferenceServer(InferenceServer):
                 finally:
                     await discovery.stop()
                     self.worker_discovery = None
+                    await self.registry.aclose()
 
         app.router.lifespan_context = cluster_lifespan
         return app
@@ -325,10 +336,7 @@ def _build_server(argv: list[str]) -> ClusterInferenceServer:
     if cluster_options.worker_type in PD_KV_ROLES and cfg.tp != 1:
         raise ValueError("PD cluster workers currently require --tp 1")
 
-    registry = FileServiceRegistry(
-        cluster_options.file_kv,
-        lease_seconds=cluster_options.registry_ttl,
-    )
+    registry = create_service_registry(cluster_options)
     server = ClusterInferenceServer(
         cluster_options=cluster_options,
         registry=registry,

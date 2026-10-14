@@ -12,6 +12,9 @@ HOST="${HOST:-127.0.0.1}"
 NAMESPACE="${NAMESPACE:-infinilm-pd}"
 RUN_DIR="${RUN_DIR:-/tmp/infinilm-pd}"
 FILE_KV="${FILE_KV:-$RUN_DIR/discovery}"
+DISCOVERY_BACKEND="${DISCOVERY_BACKEND:-file}"
+ETCD_ENDPOINTS="${ETCD_ENDPOINTS:-127.0.0.1:2379}"
+ETCD_PREFIX="${ETCD_PREFIX:-/infinilm}"
 DRAIN_GRACE_SECONDS="${DRAIN_GRACE_SECONDS:-3}"
 MOONCAKE_PROTOCOL="${MOONCAKE_PROTOCOL:-tcp}"
 MOONCAKE_WORKERS="${MOONCAKE_WORKERS:-4}"
@@ -88,13 +91,30 @@ if [[ "$ENABLE_GRAPH" == 1 || "$ENABLE_GRAPH" == true || "$ENABLE_GRAPH" == yes 
   graph_args=(--enable-graph)
 fi
 
+discovery_args=(
+  --discovery-backend "$DISCOVERY_BACKEND"
+  --file-kv "$FILE_KV"
+)
+if [[ "$DISCOVERY_BACKEND" == etcd ]]; then
+  discovery_args+=(
+    --etcd-endpoints "$ETCD_ENDPOINTS"
+    --etcd-prefix "$ETCD_PREFIX"
+    --etcd-username "${ETCD_USERNAME:-}"
+    --etcd-password-env "${ETCD_PASSWORD_ENV:-ETCD_PASSWORD}"
+    --etcd-ca-cert "${ETCD_CA_CERT:-}"
+    --etcd-cert-file "${ETCD_CERT_FILE:-}"
+    --etcd-key-file "${ETCD_KEY_FILE:-}"
+    --etcd-timeout "${ETCD_TIMEOUT:-3}"
+  )
+fi
+
 kv_transfer_config="$(
   printf '{"kv_connector":"MooncakeConnector","engine_id":"%s","kv_connector_extra_config":{"mooncake_protocol":"%s","num_workers":%s}}' \
     "$ENGINE_ID" "$MOONCAKE_PROTOCOL" "$MOONCAKE_WORKERS"
 )"
 
 echo "[$MODE] gpu=$GPU http=${HOST}:${PORT} bootstrap=${HOST}:${BOOTSTRAP_PORT} engine_id=$ENGINE_ID" >&2
-echo "[$MODE] discovery=$FILE_KV namespace=$NAMESPACE model=$SERVED_MODEL_NAME" >&2
+echo "[$MODE] discovery=$DISCOVERY_BACKEND namespace=$NAMESPACE model=$SERVED_MODEL_NAME" >&2
 exec env \
   CUDA_VISIBLE_DEVICES="$GPU" \
   INFINILM_HOST_IP="$HOST" \
@@ -104,8 +124,7 @@ exec env \
     --model "$MODEL" \
     --served-model-name "$SERVED_MODEL_NAME" \
     --namespace "$NAMESPACE" \
-    --discovery-backend file \
-    --file-kv "$FILE_KV" \
+    "${discovery_args[@]}" \
     --request-plane http \
     --advertise-host "$HOST" \
     --disaggregation-mode "$MODE" \

@@ -24,7 +24,8 @@ from .config import FrontendOptions, parse_frontend_args
 from .kv_prefix import PrefixHashCalculator
 from .metrics import FrontendMetrics
 from .monitoring import MONITORING_HTML, monitoring_snapshot
-from .registry import FileServiceRegistry, FileServiceWatcher
+from .registry import FileServiceWatcher
+from .registry_factory import create_service_registry
 from .router import ClusterRouter, NoWorkersAvailable
 
 logger = logging.getLogger(__name__)
@@ -36,10 +37,16 @@ class ClusterFrontend:
     def __init__(self, options: FrontendOptions) -> None:
         """根据配置初始化 discovery、watcher、router 和指标对象。"""
         self.options = options
-        self.registry = FileServiceRegistry(
-            options.file_kv,
-            lease_seconds=options.registry_ttl,
-        )
+        if (
+            options.discovery_backend == "etcd"
+            and options.router_mode == "kv-aware"
+            and options.cache_index_dir is None
+        ):
+            raise ValueError(
+                "cross-node kv-aware routing with etcd requires --cache-index-dir "
+                "on shared storage"
+            )
+        self.registry = create_service_registry(options)
         self.watcher = FileServiceWatcher(self.registry)
         self.router = ClusterRouter(
             self.watcher,
@@ -99,6 +106,7 @@ class ClusterFrontend:
             finally:
                 await self.watcher.stop()
                 await self.router.aclose()
+                await self.registry.aclose()
 
         app = FastAPI(lifespan=lifespan)
 

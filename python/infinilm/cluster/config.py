@@ -16,14 +16,43 @@ def _add_cluster_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--discovery-backend",
-        choices=["file"],
-        default="file",
-        help="service discovery backend; only file is supported initially",
+        choices=["file", "etcd"],
+        default=os.getenv("DYN_DISCOVERY_BACKEND", "file"),
+        help="service discovery backend; file is local-only and etcd is distributed",
     )
     parser.add_argument(
         "--file-kv",
         default=os.getenv("DYN_FILE_KV", "/tmp/infinilm_store_kv"),
         help="directory used by the file discovery backend",
+    )
+    parser.add_argument(
+        "--etcd-endpoints",
+        default=os.getenv("ETCD_ENDPOINTS", "127.0.0.1:2379"),
+        help="comma-separated etcd endpoints, for example host:2379",
+    )
+    parser.add_argument(
+        "--etcd-prefix",
+        default=os.getenv("ETCD_PREFIX", "/infinilm"),
+        help="etcd key prefix used by discovery",
+    )
+    parser.add_argument("--etcd-username", default=os.getenv("ETCD_USERNAME"))
+    parser.add_argument(
+        "--etcd-password-env",
+        default=os.getenv("ETCD_PASSWORD_ENV", "ETCD_PASSWORD"),
+        help="environment variable containing the optional etcd password",
+    )
+    parser.add_argument("--etcd-ca-cert", default=os.getenv("ETCD_CA_CERT"))
+    parser.add_argument("--etcd-cert-file", default=os.getenv("ETCD_CERT_FILE"))
+    parser.add_argument("--etcd-key-file", default=os.getenv("ETCD_KEY_FILE"))
+    parser.add_argument(
+        "--etcd-timeout",
+        type=float,
+        default=float(os.getenv("ETCD_TIMEOUT", "3")),
+    )
+    parser.add_argument(
+        "--cache-index-dir",
+        default=None,
+        help="shared cache-index directory; required for cross-node kv-aware routing",
     )
     parser.add_argument(
         "--request-plane",
@@ -58,6 +87,16 @@ class WorkerOptions:
     disaggregation_mode: str = "aggregated"
     worker_type: str = "aggregated"
     request_plane: str = "http"
+    discovery_backend: str = "file"
+    etcd_endpoints: str = "127.0.0.1:2379"
+    etcd_prefix: str = "/infinilm"
+    etcd_username: str | None = None
+    etcd_password_env: str = "ETCD_PASSWORD"
+    etcd_ca_cert: str | None = None
+    etcd_cert_file: str | None = None
+    etcd_key_file: str | None = None
+    etcd_timeout: float = 3.0
+    cache_index_dir: Path | None = None
     drain_grace_seconds: float = 1.0
     mooncake_bootstrap_host: str = "127.0.0.1"
     mooncake_bootstrap_port: int = 8998
@@ -91,6 +130,16 @@ class FrontendOptions:
     heartbeat_interval: float
     # frontend 到 worker 的请求面类型；当前仅支持 http。
     request_plane: str = "http"
+    discovery_backend: str = "file"
+    etcd_endpoints: str = "127.0.0.1:2379"
+    etcd_prefix: str = "/infinilm"
+    etcd_username: str | None = None
+    etcd_password_env: str = "ETCD_PASSWORD"
+    etcd_ca_cert: str | None = None
+    etcd_cert_file: str | None = None
+    etcd_key_file: str | None = None
+    etcd_timeout: float = 3.0
+    cache_index_dir: Path | None = None
     # session-affinity 条目的生存时间。
     router_affinity_ttl_seconds: float = 300.0
     # session-affinity LRU 表容量。
@@ -159,6 +208,16 @@ def parse_worker_cluster_args(argv: list[str] | None = None) -> WorkerOptions:
         disaggregation_mode=mode,
         worker_type=mode,
         request_plane=args.request_plane,
+        discovery_backend=args.discovery_backend,
+        etcd_endpoints=args.etcd_endpoints,
+        etcd_prefix=args.etcd_prefix,
+        etcd_username=args.etcd_username,
+        etcd_password_env=args.etcd_password_env,
+        etcd_ca_cert=args.etcd_ca_cert,
+        etcd_cert_file=args.etcd_cert_file,
+        etcd_key_file=args.etcd_key_file,
+        etcd_timeout=args.etcd_timeout,
+        cache_index_dir=Path(args.cache_index_dir) if args.cache_index_dir else None,
         drain_grace_seconds=args.drain_grace_seconds,
         mooncake_bootstrap_host=args.mooncake_bootstrap_host,
         mooncake_bootstrap_port=args.mooncake_bootstrap_port,
@@ -235,4 +294,14 @@ def parse_frontend_args(argv: list[str] | None = None) -> FrontendOptions:
         registry_ttl=args.registry_ttl,
         heartbeat_interval=args.heartbeat_interval,
         request_plane=args.request_plane,
+        discovery_backend=args.discovery_backend,
+        etcd_endpoints=args.etcd_endpoints,
+        etcd_prefix=args.etcd_prefix,
+        etcd_username=args.etcd_username,
+        etcd_password_env=args.etcd_password_env,
+        etcd_ca_cert=args.etcd_ca_cert,
+        etcd_cert_file=args.etcd_cert_file,
+        etcd_key_file=args.etcd_key_file,
+        etcd_timeout=args.etcd_timeout,
+        cache_index_dir=Path(args.cache_index_dir) if args.cache_index_dir else None,
     )

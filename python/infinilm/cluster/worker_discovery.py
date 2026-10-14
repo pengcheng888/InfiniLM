@@ -9,7 +9,7 @@ from dataclasses import replace
 from infinilm.llm import AsyncLLMEngine
 
 from .cache_index import WorkerCacheIndexExporter
-from .registry import FileServiceRegistry, WorkerRecord
+from .registry import ServiceRegistry, WorkerRecord
 from .worker_traffic import WorkerTrafficMetrics
 
 logger = logging.getLogger(__name__)
@@ -22,7 +22,7 @@ class WorkerDiscoveryService:
         self,
         *,
         engine: AsyncLLMEngine,
-        registry: FileServiceRegistry,
+        registry: ServiceRegistry,
         record: WorkerRecord,
         heartbeat_interval: float | None = None,
         traffic_metrics: WorkerTrafficMetrics | None = None,
@@ -89,11 +89,22 @@ class WorkerDiscoveryService:
         )
         while True:
             await asyncio.sleep(interval)
-            self.record = self._with_engine_load()
-            self.record = await self.registry.heartbeat(
-                self.record,
-                engine_healthy=self.engine.is_healthy(),
-            )
+            try:
+                self.record = self._with_engine_load()
+                self.record = await self.registry.heartbeat(
+                    self.record,
+                    engine_healthy=self.engine.is_healthy(),
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "Worker %s discovery heartbeat failed; retrying",
+                    self.record.instance_id,
+                )
+                await asyncio.sleep(
+                    min(interval, max(0.1, self.registry.lease_seconds / 3.0))
+                )
 
     def _with_engine_load(self) -> WorkerRecord:
         metadata = dict(self.record.metadata)

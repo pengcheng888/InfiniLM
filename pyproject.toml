@@ -18,6 +18,11 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 
+[project.optional-dependencies]
+etcd = [
+    "etcd3>=0.12.0,<0.13",
+]
+
 [project.urls]
 Homepage = "https://github.com/InfiniTensor/InfiniLM"
 

@@ -82,8 +82,14 @@ discovery 文件只保存服务元数据，不承载推理请求和 token 流。
 | 参数 | 默认值 | 说明 |
 |---|---:|---|
 | `--namespace` | `infinilm-agg` | discovery 命名空间，frontend 和 worker 必须一致 |
-| `--discovery-backend` | `file` | 当前仅支持文件注册表 |
-| `--file-kv` | `/tmp/infinilm_store_kv` | discovery JSON 根目录 |
+| `--discovery-backend` | `file` | `file` 或 `etcd` |
+| `--file-kv` | `/tmp/infinilm_store_kv` | file discovery JSON 根目录 |
+| `--etcd-endpoints` | `127.0.0.1:2379` | etcd endpoint 列表，逗号分隔 |
+| `--etcd-prefix` | `/infinilm` | etcd discovery key prefix |
+| `--etcd-username` / `--etcd-password-env` | 空 / `ETCD_PASSWORD` | 可选 etcd 用户名和密码环境变量 |
+| `--etcd-ca-cert` | 空 | etcd CA 证书；HTTPS endpoint 必填 |
+| `--etcd-cert-file` / `--etcd-key-file` | 空 | 可选 etcd 双向 TLS 客户端证书 |
+| `--etcd-timeout` | `3` 秒 | etcd 操作超时 |
 | `--request-plane` | `http` | 当前仅支持 HTTP |
 | `--registry-ttl` | `10` 秒 | worker 心跳租约时长 |
 | `--heartbeat-interval` | `2` 秒 | worker 心跳间隔 |
@@ -140,6 +146,33 @@ worker 专属参数：
 ```text
 qwen3.infinilm.generate.12345-abcdef123456.json
 ```
+
+### `etcd_registry.py`
+
+`EtcdServiceRegistry` 提供与 file backend 相同的 `WorkerRecord` JSON 协议。
+etcd key 格式：
+
+```text
+{etcd-prefix}/discovery/{namespace}/{component}/{endpoint}/{instance_id}
+```
+
+worker 注册时创建 etcd lease，并把 JSON value 绑定到该 lease。heartbeat 会
+refresh lease 并更新 value；正常退出会 delete key 并 revoke lease；进程 crash
+后 key 随 lease 到期自动删除。因此跨节点场景不依赖各机器的系统时钟。
+
+当前 watcher 仍按 `--health-interval` 周期执行 etcd prefix range，后续可在此
+基础上增加 etcd watch 增量更新。
+
+etcd 客户端是 optional dependency：
+
+```bash
+python -m pip install -e '.[etcd]'
+```
+
+跨节点使用 aggregated `kv-aware` 时，还必须通过 `--cache-index-dir` 指定所有
+frontend 和 worker 都可访问的共享 cache-index 目录；否则无法保证 frontend 能
+读取 worker 导出的 prefix snapshot。未配置该目录时，frontend 会拒绝
+`etcd + kv-aware` 组合。PD frontend 不读取这些文件，因此不受该限制影响。
 
 ### `kv_prefix.py`
 
@@ -617,6 +650,28 @@ frontend 不等待 worker，先立即监听。没有可用 P/D model 时：
 默认 OpenAI 请求返回 503，frontend 进程持续运行。后续 P/D 通过同一 namespace
 和 file registry 动态加入即可。
 
+使用 etcd discovery 时，frontend 和 worker 必须使用相同的 namespace、
+`ETCD_ENDPOINTS` 和 `ETCD_PREFIX`：
+
+```bash
+DISCOVERY_BACKEND=etcd \
+ETCD_ENDPOINTS=127.0.0.1:2379 \
+ETCD_PREFIX=/infinilm \
+NAMESPACE=infinilm-pd \
+PD_FRONTEND_PORT=18520 \
+bash python/infinilm/cluster/run_pd_frontend.sh
+```
+
+```bash
+DISCOVERY_BACKEND=etcd \
+ETCD_ENDPOINTS=127.0.0.1:2379 \
+ETCD_PREFIX=/infinilm \
+NAMESPACE=infinilm-pd \
+GPU=4 PORT=18541 BOOTSTRAP_PORT=18548 \
+ENGINE_ID=infinilm-pd-prefill-0 \
+bash python/infinilm/cluster/run_pd_worker.sh prefill
+```
+
 启动 prefill：
 
 ```bash
@@ -656,7 +711,7 @@ frontend 发现新 worker 后查询对应 `/query` 并纳入路由候选。
 | 字段 | 说明 |
 |---|---|
 | `namespace` | discovery 命名空间 |
-| `component` | 固定为 `infinilm` |
+| `component` | aggregated 为 `infinilm`，prefill 为 `prefill`，decode 为 `backend` |
 | `endpoint` | 固定为 `generate` |
 | `instance_id` | worker 实例唯一 ID |
 | `worker_type` | `aggregated`、`prefill` 或 `decode` |

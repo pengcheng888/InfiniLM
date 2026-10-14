@@ -26,7 +26,8 @@ from ..server.mooncake_proxy_server import (
 )
 from .config import _add_cluster_arguments
 from .monitoring import PD_MONITORING_HTML, pd_monitoring_snapshot
-from .registry import FileServiceRegistry, FileServiceWatcher, WorkerRecord
+from .registry import FileServiceWatcher, WorkerRecord
+from .registry_factory import create_service_registry
 from .router import worker_load
 
 logger = logging.getLogger(__name__)
@@ -50,6 +51,15 @@ class PdFrontendOptions:
     registry_ttl: float
     heartbeat_interval: float
     request_plane: str = "http"
+    discovery_backend: str = "file"
+    etcd_endpoints: str = "127.0.0.1:2379"
+    etcd_prefix: str = "/infinilm"
+    etcd_username: str | None = None
+    etcd_password_env: str = "ETCD_PASSWORD"
+    etcd_ca_cert: str | None = None
+    etcd_cert_file: str | None = None
+    etcd_key_file: str | None = None
+    etcd_timeout: float = 3.0
     min_prefill_workers: int = 1
     min_decode_workers: int = 1
 
@@ -84,6 +94,15 @@ def parse_pd_frontend_args(argv: list[str] | None = None) -> PdFrontendOptions:
         registry_ttl=args.registry_ttl,
         heartbeat_interval=args.heartbeat_interval,
         request_plane=args.request_plane,
+        discovery_backend=args.discovery_backend,
+        etcd_endpoints=args.etcd_endpoints,
+        etcd_prefix=args.etcd_prefix,
+        etcd_username=args.etcd_username,
+        etcd_password_env=args.etcd_password_env,
+        etcd_ca_cert=args.etcd_ca_cert,
+        etcd_cert_file=args.etcd_cert_file,
+        etcd_key_file=args.etcd_key_file,
+        etcd_timeout=args.etcd_timeout,
         min_prefill_workers=max(1, args.min_prefill_workers),
         min_decode_workers=max(1, args.min_decode_workers),
     )
@@ -94,10 +113,7 @@ class PdClusterFrontend:
 
     def __init__(self, options: PdFrontendOptions) -> None:
         self.options = options
-        self.registry = FileServiceRegistry(
-            options.file_kv,
-            lease_seconds=options.registry_ttl,
-        )
+        self.registry = create_service_registry(options)
         self.watcher = FileServiceWatcher(
             self.registry,
             worker_types=("prefill", "decode"),
@@ -384,6 +400,7 @@ class PdClusterFrontend:
                 for role_clients in self.clients.values():
                     for info in role_clients.values():
                         await info["client"].aclose()
+                await self.registry.aclose()
 
         app = FastAPI(lifespan=lifespan)
 

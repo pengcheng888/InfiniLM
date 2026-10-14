@@ -12,6 +12,9 @@ NAMESPACE="${NAMESPACE:-infinilm-pd}"
 RUN_DIR="${RUN_DIR:-/tmp/infinilm-pd}"
 FILE_KV="${FILE_KV:-$RUN_DIR/discovery}"
 ROUTER_MODE="${ROUTER_MODE:-round-robin}"
+DISCOVERY_BACKEND="${DISCOVERY_BACKEND:-file}"
+ETCD_ENDPOINTS="${ETCD_ENDPOINTS:-127.0.0.1:2379}"
+ETCD_PREFIX="${ETCD_PREFIX:-/infinilm}"
 PROXY_PORT="${PD_FRONTEND_PORT:-18520}"
 PREFILL_PORT_BASE="${PREFILL_PORT_BASE:-${PREFILL_PORT:-18521}}"
 DECODE_PORT_BASE="${DECODE_PORT_BASE:-${DECODE_PORT:-$((${PREFILL_PORT:-18521} + 10))}}"
@@ -76,6 +79,8 @@ wait_for_url() {
 
 command -v "$PYTHON" >/dev/null 2>&1 || fail "Python interpreter not found: $PYTHON"
 [[ -d "$MODEL" ]] || fail "model directory does not exist: $MODEL"
+[[ "$DISCOVERY_BACKEND" == file || "$DISCOVERY_BACKEND" == etcd ]] ||
+  fail "DISCOVERY_BACKEND must be file or etcd"
 [[ "$MOONCAKE_PROTOCOL" == tcp || "$MOONCAKE_PROTOCOL" == rdma ]] ||
   fail "MOONCAKE_PROTOCOL must be tcp or rdma"
 [[ "$ROUTER_MODE" == round-robin || "$ROUTER_MODE" == least-loaded ]] ||
@@ -88,6 +93,10 @@ if ! "$PYTHON" -c 'import infinilm' >/dev/null 2>&1; then
 fi
 "$PYTHON" -c 'import mooncake' >/dev/null 2>&1 ||
   fail "the mooncake Python package is required"
+if [[ "$DISCOVERY_BACKEND" == etcd ]]; then
+  "$PYTHON" -c 'import etcd3' >/dev/null 2>&1 ||
+    fail "etcd discovery requires: python -m pip install -e '.[etcd]'"
+fi
 
 cuda_runtime_dir="${CUDA12_RUNTIME_DIR:-}"
 if [[ -z "$cuda_runtime_dir" ]]; then
@@ -107,8 +116,25 @@ if [[ -n "$cuda_runtime_dir" && -d "$cuda_runtime_dir" ]]; then
   export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-/root/.infini/lib}:$cuda_runtime_dir"
 fi
 
-mkdir -p "$FILE_KV"
-rm -f "$FILE_KV/${NAMESPACE}."*.json
+discovery_args=(
+  --discovery-backend "$DISCOVERY_BACKEND"
+  --file-kv "$FILE_KV"
+)
+if [[ "$DISCOVERY_BACKEND" == etcd ]]; then
+  discovery_args+=(
+    --etcd-endpoints "$ETCD_ENDPOINTS"
+    --etcd-prefix "$ETCD_PREFIX"
+    --etcd-username "${ETCD_USERNAME:-}"
+    --etcd-password-env "${ETCD_PASSWORD_ENV:-ETCD_PASSWORD}"
+    --etcd-ca-cert "${ETCD_CA_CERT:-}"
+    --etcd-cert-file "${ETCD_CERT_FILE:-}"
+    --etcd-key-file "${ETCD_KEY_FILE:-}"
+    --etcd-timeout "${ETCD_TIMEOUT:-3}"
+  )
+else
+  mkdir -p "$FILE_KV"
+  rm -f "$FILE_KV/${NAMESPACE}."*.json
+fi
 
 graph_args=()
 if [[ "$ENABLE_GRAPH" == 1 || "$ENABLE_GRAPH" == true || "$ENABLE_GRAPH" == yes ]]; then
@@ -134,8 +160,7 @@ start_engine() {
     --model "$MODEL" \
     --served-model-name "$SERVED_MODEL_NAME" \
     --namespace "$NAMESPACE" \
-    --discovery-backend file \
-    --file-kv "$FILE_KV" \
+    "${discovery_args[@]}" \
     --request-plane http \
     --advertise-host "$HOST" \
     --disaggregation-mode "$disaggregation_mode" \
@@ -202,8 +227,7 @@ fi
 echo "[frontend] http=${HOST}:${PROXY_PORT} router=$ROUTER_MODE"
 "$PYTHON" -m infinilm.cluster.pd_frontend \
   --namespace "$NAMESPACE" \
-  --discovery-backend file \
-  --file-kv "$FILE_KV" \
+  "${discovery_args[@]}" \
   --request-plane http \
   --router-mode "$ROUTER_MODE" \
   --http-host "$HOST" \
@@ -245,7 +269,7 @@ wait_for_url "PD frontend" "$frontend_url/health" "$frontend_pid"
 cat <<EOF
 PD API:       $frontend_url/v1
 Monitoring:   $frontend_url/monitoring
-Discovery:    $FILE_KV
+Discovery:    $DISCOVERY_BACKEND
 Transfer:     mooncake/$MOONCAKE_PROTOCOL
 Prefill:      ${PREFILL_GPU_ARRAY[*]} @ ${HOST}:${PREFILL_PORT_BASE}+
 Decode:       ${DECODE_GPU_ARRAY[*]} @ ${HOST}:${DECODE_PORT_BASE}+

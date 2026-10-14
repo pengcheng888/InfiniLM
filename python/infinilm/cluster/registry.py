@@ -11,7 +11,7 @@ import time
 import uuid
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Protocol
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +49,35 @@ class WorkerRecord:
 
     def discovery_key(self) -> str:
         return ".".join((self.namespace, self.component, self.endpoint))
+
+
+class ServiceRegistry(Protocol):
+    """The backend-neutral discovery contract used by workers and watchers."""
+
+    lease_seconds: float
+
+    def new_record(self, **kwargs: Any) -> WorkerRecord: ...
+
+    async def register(self, record: WorkerRecord) -> WorkerRecord: ...
+
+    async def heartbeat(
+        self,
+        record: WorkerRecord,
+        *,
+        engine_healthy: bool | None = None,
+    ) -> WorkerRecord: ...
+
+    async def unregister(self, record: WorkerRecord) -> None: ...
+
+    async def snapshot(
+        self,
+        namespace: str,
+        endpoint: str | None = None,
+        served_model_name: str | None = None,
+        worker_types: Iterable[str] | None = None,
+    ) -> list[WorkerRecord]: ...
+
+    async def aclose(self) -> None: ...
 
 
 class FileServiceRegistry:
@@ -230,13 +259,16 @@ class FileServiceRegistry:
             worker_types,
         )
 
+    async def aclose(self) -> None:
+        """File discovery owns no long-lived connection."""
+
 
 class FileServiceWatcher:
     """Polls the file registry and publishes the current worker set."""
 
     def __init__(
         self,
-        registry: FileServiceRegistry,
+        registry: ServiceRegistry,
         *,
         worker_types: Iterable[str] | None = None,
     ) -> None:
