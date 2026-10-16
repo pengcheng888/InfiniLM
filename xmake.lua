@@ -1,4 +1,4 @@
-add_requires("pybind11 2.13.6", {system = false})
+add_requires("pybind11 3.0.1", {system = false})
 -- add_requires("pybind11")
 
 set_toolchains("gcc")
