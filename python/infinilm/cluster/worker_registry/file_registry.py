@@ -1,4 +1,4 @@
-"""File-backed service discovery for a single-node InfiniLM cluster."""
+"""File-backed worker registry for a single-node InfiniLM cluster."""
 
 from __future__ import annotations
 
@@ -9,78 +9,18 @@ import os
 import re
 import time
 import uuid
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import asdict, replace
 from pathlib import Path
-from typing import Any, Iterable, Protocol
+from typing import Any, Iterable
+
+from .types import WorkerRecord
 
 logger = logging.getLogger(__name__)
 
 _UNSAFE_FILENAME = re.compile(r"[^A-Za-z0-9_.-]+")
 
 
-@dataclass(frozen=True)
-class WorkerRecord:
-    namespace: str
-    component: str
-    endpoint: str
-    instance_id: str
-    worker_type: str
-    model: str
-    served_model_name: str
-    host: str
-    port: int
-    # worker 实例首次创建注册记录的时间。该字段用于观测和排查，例如判断
-    # worker 何时加入集群；heartbeat 时不会更新，也不参与过期判断。
-    registered_at: float
-
-    # 最近一次 heartbeat 的时间。worker 正常运行时会周期性刷新该时间。
-    # 它用于人工观察最近心跳，过期判断使用的是 lease_expires_at。
-    heartbeat_at: float
-
-    # 当前注册租约的截止时间，由 heartbeat_at + lease_seconds 得到。
-    # frontend snapshot 时如果发现 lease_expires_at < 当前时间，就认为
-    # worker 已停止 heartbeat，该注册记录过期且不可路由。
-    lease_expires_at: float
-    engine_healthy: bool = True
-    transport: str = "http"
-    # ready 表示可接收新请求；draining 表示存量请求可继续，但不再接收新请求。
-    state: str = "ready"
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-    def discovery_key(self) -> str:
-        return ".".join((self.namespace, self.component, self.endpoint))
-
-
-class ServiceRegistry(Protocol):
-    """The backend-neutral discovery contract used by workers and watchers."""
-
-    lease_seconds: float
-
-    def new_record(self, **kwargs: Any) -> WorkerRecord: ...
-
-    async def register(self, record: WorkerRecord) -> WorkerRecord: ...
-
-    async def heartbeat(
-        self,
-        record: WorkerRecord,
-        *,
-        engine_healthy: bool | None = None,
-    ) -> WorkerRecord: ...
-
-    async def unregister(self, record: WorkerRecord) -> None: ...
-
-    async def snapshot(
-        self,
-        namespace: str,
-        endpoint: str | None = None,
-        served_model_name: str | None = None,
-        worker_types: Iterable[str] | None = None,
-    ) -> list[WorkerRecord]: ...
-
-    async def aclose(self) -> None: ...
-
-
-class FileServiceRegistry:
+class FileWorkerRegistry:
     """Writes one atomic JSON record per worker instance."""
 
     def __init__(self, root: Path, lease_seconds: float = 10.0) -> None:
@@ -263,83 +203,3 @@ class FileServiceRegistry:
 
     async def aclose(self) -> None:
         """File discovery owns no long-lived connection."""
-
-
-class FileServiceWatcher:
-    """Polls the file registry and publishes the current worker set."""
-
-    def __init__(
-        self,
-        registry: ServiceRegistry,
-        *,
-        worker_types: Iterable[str] | None = None,
-    ) -> None:
-        self.registry = registry
-        self.worker_types = (
-            tuple(worker_types) if worker_types is not None else ("aggregated",)
-        )
-        self._task: asyncio.Task[None] | None = None
-        self._workers: list[WorkerRecord] = []
-        self._changed = asyncio.Event()
-        self._stop = asyncio.Event()
-
-    @property
-    def workers(self) -> list[WorkerRecord]:
-        return list(self._workers)
-
-    @property
-    def changed(self) -> asyncio.Event:
-        return self._changed
-
-    async def refresh(self, namespace: str) -> list[WorkerRecord]:
-        workers = await self.registry.snapshot(
-            namespace, worker_types=self.worker_types
-        )
-        old_ids = {worker.instance_id for worker in self._workers}
-        new_ids = {worker.instance_id for worker in workers}
-        self._workers = workers
-        if old_ids != new_ids:
-            self._changed.set()
-            logger.info(
-                "Discovery workers changed: added=%s removed=%s current=%d",
-                sorted(new_ids - old_ids),
-                sorted(old_ids - new_ids),
-                len(workers),
-            )
-        return workers
-
-    async def run(self, namespace: str, interval: float) -> None:
-        """周期性 snapshot file registry，维护 frontend 可见的 worker 集合。
-
-        frontend 的 FileServiceWatcher 不是被动等待文件事件，而是按 interval
-        轮询 registry.snapshot()。每次 snapshot 都会读取 JSON 记录、过滤可用
-        worker，并清理已经超过 lease_expires_at 的过期注册文件。
-        """
-        while not self._stop.is_set():
-            try:
-                await self.refresh(namespace)
-            except Exception:
-                logger.exception("Failed to refresh file discovery registry")
-            try:
-                await asyncio.wait_for(self._stop.wait(), timeout=interval)
-            except asyncio.TimeoutError:
-                pass
-
-    def start(self, namespace: str, interval: float) -> None:
-        if self._task is not None:
-            return
-        self._stop.clear()
-        self._task = asyncio.create_task(
-            self.run(namespace, interval), name="infinilm-file-discovery-watcher"
-        )
-
-    async def stop(self) -> None:
-        self._stop.set()
-        if self._task is None:
-            return
-        self._task.cancel()
-        try:
-            await self._task
-        except asyncio.CancelledError:
-            pass
-        self._task = None

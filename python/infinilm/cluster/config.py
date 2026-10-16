@@ -140,12 +140,6 @@ class FrontendOptions:
     etcd_key_file: str | None = None
     etcd_timeout: float = 3.0
     cache_index_dir: Path | None = None
-    # session-affinity 条目的生存时间。
-    router_affinity_ttl_seconds: float = 300.0
-    # session-affinity LRU 表容量。
-    router_affinity_capacity: int = 4096
-    # kv-aware 路由要求至少可复用的 token 数。
-    kv_router_min_tokens: int = 1
 
 
 def parse_worker_cluster_args(argv: list[str] | None = None) -> WorkerOptions:
@@ -256,21 +250,6 @@ def parse_frontend_args(argv: list[str] | None = None) -> FrontendOptions:
         ],
         default="round-robin",
     )
-    parser.add_argument(
-        "--router-affinity-ttl-secs",
-        type=float,
-        default=300.0,
-    )
-    parser.add_argument(
-        "--kv-router-min-tokens",
-        type=int,
-        default=1,
-    )
-    parser.add_argument(
-        "--router-affinity-capacity",
-        type=int,
-        default=4096,
-    )
     parser.add_argument("--router-min-initial-workers", type=int, default=1)
     parser.add_argument("--http-host", default="127.0.0.1")
     parser.add_argument("--http-port", type=int, default=18000)
@@ -282,9 +261,6 @@ def parse_frontend_args(argv: list[str] | None = None) -> FrontendOptions:
         namespace=args.namespace,
         file_kv=Path(args.file_kv),
         router_mode=args.router_mode,
-        router_affinity_ttl_seconds=args.router_affinity_ttl_secs,
-        router_affinity_capacity=args.router_affinity_capacity,
-        kv_router_min_tokens=args.kv_router_min_tokens,
         router_min_initial_workers=args.router_min_initial_workers,
         http_host=args.http_host,
         http_port=args.http_port,

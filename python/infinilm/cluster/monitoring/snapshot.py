@@ -8,8 +8,8 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from ..config import FrontendOptions
     from ..metrics import RouterMetrics
-    from ..registry import FileServiceWatcher
     from ..router import ClusterRouter
+    from ..worker_registry import WorkerRegistryWatcher
 
 from ..metrics import (
     INTER_TOKEN_BUCKETS,
@@ -51,9 +51,7 @@ def _worker_snapshot(worker: Any, metrics: RouterMetrics) -> dict[str, Any]:
     traffic = raw_traffic if isinstance(raw_traffic, dict) else {}
     gpu = metadata.get("cuda_visible_devices")
     heartbeat_age_seconds = max(0.0, time.time() - worker.heartbeat_at)
-    max_batch_size = int(
-        load.get("max_batch_size", metadata.get("max_batch_size", 0))
-    )
+    max_batch_size = int(load.get("max_batch_size", metadata.get("max_batch_size", 0)))
 
     return {
         "instance_id": worker_id,
@@ -68,9 +66,7 @@ def _worker_snapshot(worker: Any, metrics: RouterMetrics) -> dict[str, Any]:
         "engine_healthy": bool(worker.engine_healthy),
         "heartbeat_age_seconds": heartbeat_age_seconds,
         "load_snapshot_age_seconds": heartbeat_age_seconds,
-        "lease_remaining_seconds": max(
-            0.0, worker.lease_expires_at - time.time()
-        ),
+        "lease_remaining_seconds": max(0.0, worker.lease_expires_at - time.time()),
         "load_score": metrics.worker_load_scores.get(worker_id, 0.0),
         "inflight": metrics.worker_inflight.get(worker_id, 0),
         "waiting_requests": metrics.worker_waiting_requests.get(
@@ -96,30 +92,22 @@ def _worker_snapshot(worker: Any, metrics: RouterMetrics) -> dict[str, Any]:
         "worker_successful_requests_total": int(
             traffic.get("successful_requests_total", 0)
         ),
-        "worker_failed_requests_total": int(
-            traffic.get("failed_requests_total", 0)
-        ),
+        "worker_failed_requests_total": int(traffic.get("failed_requests_total", 0)),
         "worker_canceled_requests_total": int(
             traffic.get("canceled_requests_total", 0)
         ),
         "cache_hit_requests_total": int(
             traffic.get("local_cache_hit_requests_total", 0)
         ),
-        "cache_hit_tokens_total": int(
-            traffic.get("local_cache_hit_tokens_total", 0)
-        ),
-        "prefill_tokens_total": int(
-            traffic.get("local_prefill_tokens_total", 0)
-        ),
+        "cache_hit_tokens_total": int(traffic.get("local_cache_hit_tokens_total", 0)),
+        "prefill_tokens_total": int(traffic.get("local_prefill_tokens_total", 0)),
         "usage_prompt_tokens_total": metrics.worker_usage_prompt_tokens.get(
             worker_id, 0
         ),
         "usage_completion_tokens_total": (
             metrics.worker_usage_completion_tokens.get(worker_id, 0)
         ),
-        "usage_total_tokens_total": metrics.worker_usage_total_tokens.get(
-            worker_id, 0
-        ),
+        "usage_total_tokens_total": metrics.worker_usage_total_tokens.get(worker_id, 0),
         "errors_total": metrics.worker_errors.get(worker_id, 0),
         "retries_total": metrics.worker_retries.get(worker_id, 0),
         "last_success_timestamp": metrics.worker_last_success_timestamp.get(
@@ -139,7 +127,7 @@ def _worker_snapshot(worker: Any, metrics: RouterMetrics) -> dict[str, Any]:
 def monitoring_snapshot(
     *,
     options: FrontendOptions,
-    watcher: FileServiceWatcher,
+    watcher: WorkerRegistryWatcher,
     router: ClusterRouter,
 ) -> dict[str, Any]:
     """Build a JSON snapshot consumed by the built-in dashboard."""
@@ -177,7 +165,7 @@ def monitoring_snapshot(
             "affinity_requests_total": metrics.affinity_requests_total,
             "affinity_hits_total": metrics.affinity_hits_total,
             "affinity_misses_total": metrics.affinity_misses_total,
-            "affinity_entries": len(router.affinity),
+            "affinity_entries": router.affinity_entries,
             "kv_aware_requests_total": metrics.kv_aware_requests_total,
             "kv_hit_requests_total": metrics.kv_hit_requests_total,
             "kv_miss_requests_total": metrics.kv_miss_requests_total,
@@ -186,16 +174,18 @@ def monitoring_snapshot(
             "kv_index_entries": metrics.kv_index_entries,
             "worker_received_requests_total": sum(
                 int(
-                    (worker.metadata or {}).get("traffic", {}).get(
-                        "received_requests_total", 0
-                    )
+                    (worker.metadata or {})
+                    .get("traffic", {})
+                    .get("received_requests_total", 0)
                 )
                 if isinstance((worker.metadata or {}).get("traffic"), dict)
                 else 0
                 for worker in workers
             ),
             "worker_active_requests": sum(
-                int((worker.metadata or {}).get("traffic", {}).get("active_requests", 0))
+                int(
+                    (worker.metadata or {}).get("traffic", {}).get("active_requests", 0)
+                )
                 if isinstance((worker.metadata or {}).get("traffic"), dict)
                 else 0
                 for worker in workers
@@ -204,9 +194,9 @@ def monitoring_snapshot(
                 max(
                     0,
                     int(
-                        (worker.metadata or {}).get("traffic", {}).get(
-                            "received_requests_total", 0
-                        )
+                        (worker.metadata or {})
+                        .get("traffic", {})
+                        .get("received_requests_total", 0)
                     )
                     - int(metrics.worker_requests.get(worker.instance_id, 0)),
                 )

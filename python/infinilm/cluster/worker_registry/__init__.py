@@ -1,22 +1,23 @@
-"""Construction helpers for discovery registry backends."""
-
-from __future__ import annotations
+"""Worker registry backends and shared discovery protocols."""
 
 from typing import Any
 
-from .etcd_registry import EtcdServiceRegistry
-from .registry import FileServiceRegistry, ServiceRegistry
+from .base import WorkerRegistry
+from .etcd_registry import EtcdWorkerRegistry
+from .file_registry import FileWorkerRegistry
+from .types import WorkerRecord
+from .watcher import WorkerRegistryWatcher
 
 
-def create_service_registry(options: Any) -> ServiceRegistry:
+def create_worker_registry(options: Any) -> WorkerRegistry:
     backend = options.discovery_backend
     if backend == "file":
-        return FileServiceRegistry(
+        return FileWorkerRegistry(
             options.file_kv,
             lease_seconds=options.registry_ttl,
         )
     if backend == "etcd":
-        return EtcdServiceRegistry(
+        return EtcdWorkerRegistry(
             endpoints=options.etcd_endpoints,
             prefix=options.etcd_prefix,
             lease_seconds=options.registry_ttl,
@@ -28,3 +29,13 @@ def create_service_registry(options: Any) -> ServiceRegistry:
             timeout=options.etcd_timeout,
         )
     raise ValueError(f"unsupported discovery backend: {backend!r}")
+
+
+__all__ = [
+    "EtcdWorkerRegistry",
+    "FileWorkerRegistry",
+    "WorkerRegistry",
+    "WorkerRegistryWatcher",
+    "WorkerRecord",
+    "create_worker_registry",
+]

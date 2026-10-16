@@ -3,9 +3,12 @@ import json
 import unittest
 
 from infinilm.cluster.config import parse_frontend_args, parse_worker_cluster_args
-from infinilm.cluster.etcd_registry import EtcdServiceRegistry, _parse_endpoint
-from infinilm.cluster.registry import FileServiceRegistry
-from infinilm.cluster.registry_factory import create_service_registry
+from infinilm.cluster.worker_registry import (
+    EtcdWorkerRegistry,
+    FileWorkerRegistry,
+    create_worker_registry,
+)
+from infinilm.cluster.worker_registry.etcd_registry import _parse_endpoint
 
 
 class FakeLease:
@@ -64,7 +67,7 @@ class FakeEtcdClient:
 
 
 class EtcdRegistryTest(unittest.TestCase):
-    def test_discovery_backend_configuration_and_factory(self):
+    def test_discovery_backend_configuration_and_registry_factory(self):
         worker = parse_worker_cluster_args(
             [
                 "--discovery-backend",
@@ -86,11 +89,11 @@ class EtcdRegistryTest(unittest.TestCase):
             ]
         )
 
-        self.assertIsInstance(create_service_registry(worker), EtcdServiceRegistry)
-        self.assertIsInstance(create_service_registry(frontend), EtcdServiceRegistry)
+        self.assertIsInstance(create_worker_registry(worker), EtcdWorkerRegistry)
+        self.assertIsInstance(create_worker_registry(frontend), EtcdWorkerRegistry)
         self.assertIsInstance(
-            create_service_registry(parse_worker_cluster_args([])),
-            FileServiceRegistry,
+            create_worker_registry(parse_worker_cluster_args([])),
+            FileWorkerRegistry,
         )
 
     def test_parse_endpoint_accepts_host_and_url(self):
@@ -105,7 +108,7 @@ class EtcdRegistryTest(unittest.TestCase):
     def test_register_snapshot_heartbeat_and_unregister(self):
         async def run():
             client = FakeEtcdClient()
-            registry = EtcdServiceRegistry(
+            registry = EtcdWorkerRegistry(
                 endpoints="127.0.0.1:2379",
                 prefix="/infinilm-test",
                 lease_seconds=10,
@@ -157,7 +160,7 @@ class EtcdRegistryTest(unittest.TestCase):
     def test_snapshot_ignores_malformed_values_and_lease_expiry_removes_worker(self):
         async def run():
             client = FakeEtcdClient()
-            registry = EtcdServiceRegistry(
+            registry = EtcdWorkerRegistry(
                 endpoints="127.0.0.1:2379",
                 prefix="/infinilm-test",
             )

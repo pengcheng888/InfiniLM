@@ -1,4 +1,4 @@
-"""etcd-backed service discovery for distributed InfiniLM clusters."""
+"""etcd-backed worker registry for distributed InfiniLM clusters."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from dataclasses import asdict, replace
 from typing import Any, Callable, Iterable
 from urllib.parse import urlsplit
 
-from .registry import WorkerRecord
+from .types import WorkerRecord
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +31,7 @@ def _parse_endpoint(endpoint: str) -> tuple[str, int]:
     return parsed.hostname, parsed.port or 2379
 
 
-class EtcdServiceRegistry:
+class EtcdWorkerRegistry:
     """Stores one lease-backed WorkerRecord JSON per worker in etcd.
 
     The existence of an etcd key is authoritative. Worker timestamps remain in

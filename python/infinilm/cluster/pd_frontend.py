@@ -26,9 +26,12 @@ from ..server.mooncake_proxy_server import (
 )
 from .config import _add_cluster_arguments
 from .monitoring import PD_MONITORING_HTML, pd_monitoring_snapshot
-from .registry import FileServiceWatcher, WorkerRecord
-from .registry_factory import create_service_registry
-from .router import worker_load
+from .routing import WorkerLoadScorer
+from .worker_registry import (
+    WorkerRecord,
+    WorkerRegistryWatcher,
+    create_worker_registry,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -113,8 +116,8 @@ class PdClusterFrontend:
 
     def __init__(self, options: PdFrontendOptions) -> None:
         self.options = options
-        self.registry = create_service_registry(options)
-        self.watcher = FileServiceWatcher(
+        self.registry = create_worker_registry(options)
+        self.watcher = WorkerRegistryWatcher(
             self.registry,
             worker_types=("prefill", "decode"),
         )
@@ -124,6 +127,7 @@ class PdClusterFrontend:
         }
         self.inflight: dict[str, int] = defaultdict(int)
         self.cursors: dict[str, int] = {"prefill": 0, "decode": 0}
+        self.load_scorer = WorkerLoadScorer()
         self.request_counters: dict[str, int] = {
             "prefill": 0,
             "decode": 0,
@@ -278,12 +282,11 @@ class PdClusterFrontend:
         if self.options.router_mode == "least-loaded":
 
             def score(record: WorkerRecord) -> tuple[float, str]:
-                load = worker_load(record)
                 return (
-                    0.90 * self.inflight[record.instance_id]
-                    + 0.05 * load.waiting_requests
-                    + 0.03 * load.running_requests / load.max_batch_size
-                    + 0.02 * load.kv_usage,
+                    self.load_scorer.score(
+                        record,
+                        self.inflight[record.instance_id],
+                    ),
                     record.instance_id,
                 )
 

@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .registry import WorkerRecord
+from .worker_registry import WorkerRecord
 
 
 @dataclass

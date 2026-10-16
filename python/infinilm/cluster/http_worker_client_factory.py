@@ -9,7 +9,7 @@ import httpx
 import openai
 from openai import AsyncOpenAI
 
-from .registry import WorkerRecord
+from .worker_registry import WorkerRecord
 
 logger = logging.getLogger(__name__)
 
@@ -89,9 +89,7 @@ class HttpWorkerClient:
         # sampling_params）不能作为 SDK 强类型参数传入，统一放入 extra_body，
         # SDK 最终会把它们合并到 worker 收到的 JSON 顶层。
         args["extra_body"] = {
-            key: value
-            for key, value in payload.items()
-            if key not in _STANDARD_FIELDS
+            key: value for key, value in payload.items() if key not in _STANDARD_FIELDS
         }
         return args
 

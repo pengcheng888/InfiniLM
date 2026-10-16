@@ -14,12 +14,15 @@ from infinilm.cluster.pd_frontend import (
     PdFrontendOptions,
     parse_pd_frontend_args,
 )
-from infinilm.cluster.registry import FileServiceRegistry, FileServiceWatcher
 from infinilm.cluster.worker import (
     WORKER_CAPABILITIES,
     WORKER_NEEDS,
     ClusterInferenceServer,
     _resolve_kv_transfer_config,
+)
+from infinilm.cluster.worker_registry import (
+    FileWorkerRegistry,
+    WorkerRegistryWatcher,
 )
 from infinilm.cluster.worker_traffic import WorkerTrafficMetrics
 from infinilm.config import KVTransferConfig
@@ -30,7 +33,7 @@ class FakeEngine:
         return True
 
 
-def make_record(registry: FileServiceRegistry, worker_type: str, model="qwen"):
+def make_record(registry: FileWorkerRegistry, worker_type: str, model="qwen"):
     return registry.new_record(
         namespace="pd-test",
         component="infinilm",
@@ -51,7 +54,7 @@ class PdDiscoveryTest(unittest.TestCase):
     def test_registry_and_watcher_filter_worker_roles(self):
         async def run():
             with TemporaryDirectory() as temporary:
-                registry = FileServiceRegistry(Path(temporary))
+                registry = FileWorkerRegistry(Path(temporary))
                 records = [
                     make_record(registry, "aggregated"),
                     make_record(registry, "prefill"),
@@ -61,11 +64,14 @@ class PdDiscoveryTest(unittest.TestCase):
                     await registry.register(record)
 
                 self.assertEqual(
-                    [record.worker_type for record in await registry.snapshot("pd-test")],
+                    [
+                        record.worker_type
+                        for record in await registry.snapshot("pd-test")
+                    ],
                     ["aggregated"],
                 )
 
-                watcher = FileServiceWatcher(
+                watcher = WorkerRegistryWatcher(
                     registry,
                     worker_types=("prefill", "decode"),
                 )
@@ -90,7 +96,7 @@ class PdDiscoveryTest(unittest.TestCase):
                 worker_type="prefill",
                 mooncake_bootstrap_port=18528,
             )
-            server.registry = FileServiceRegistry(Path(temporary))
+            server.registry = FileWorkerRegistry(Path(temporary))
             server.model_path = "/models/qwen"
             server.host = "127.0.0.1"
             server.port = 18521
@@ -118,7 +124,7 @@ class PdDiscoveryTest(unittest.TestCase):
 
     def test_pd_frontend_model_and_load_selection(self):
         with TemporaryDirectory() as temporary:
-            registry = FileServiceRegistry(Path(temporary))
+            registry = FileWorkerRegistry(Path(temporary))
             prefill = make_record(registry, "prefill")
             decode = make_record(registry, "decode")
             loaded = replace_load(decode)
@@ -139,7 +145,10 @@ class PdDiscoveryTest(unittest.TestCase):
             frontend.watcher = SimpleNamespace(workers=[prefill, loaded])
 
             self.assertEqual(frontend._ready_models(), ["qwen"])
-            self.assertEqual(frontend._select_record([decode, loaded]).instance_id, decode.instance_id)
+            self.assertEqual(
+                frontend._select_record([decode, loaded]).instance_id,
+                decode.instance_id,
+            )
 
     def test_cli_parses_worker_and_frontend_roles(self):
         mode = parse_worker_cluster_args(
@@ -189,7 +198,7 @@ class PdDiscoveryTest(unittest.TestCase):
 
     def test_pd_frontend_round_robin_selects_each_role(self):
         with TemporaryDirectory() as temporary:
-            registry = FileServiceRegistry(Path(temporary))
+            registry = FileWorkerRegistry(Path(temporary))
             workers = [
                 make_record(registry, "prefill"),
                 make_record(registry, "prefill"),
@@ -230,7 +239,7 @@ class PdDiscoveryTest(unittest.TestCase):
 
     def test_pd_monitoring_routes_expose_role_workers(self):
         with TemporaryDirectory() as temporary:
-            registry = FileServiceRegistry(Path(temporary))
+            registry = FileWorkerRegistry(Path(temporary))
             prefill = replace_pd(make_record(registry, "prefill"))
             decode = replace_pd(make_record(registry, "decode"))
             frontend = PdClusterFrontend(
@@ -331,7 +340,7 @@ class PdDiscoveryTest(unittest.TestCase):
 
     def test_frontend_filters_workers_without_required_capability(self):
         with TemporaryDirectory() as temporary:
-            registry = FileServiceRegistry(Path(temporary))
+            registry = FileWorkerRegistry(Path(temporary))
             capable = make_record(registry, "decode")
             legacy = replace_metadata(make_record(registry, "decode"), {})
             frontend = PdClusterFrontend(
@@ -356,7 +365,9 @@ class PdDiscoveryTest(unittest.TestCase):
                 "openai-chat",
             )
 
-            self.assertEqual([worker.instance_id for worker in workers], [capable.instance_id])
+            self.assertEqual(
+                [worker.instance_id for worker in workers], [capable.instance_id]
+            )
 
 
 def replace_load(record):

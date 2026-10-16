@@ -24,9 +24,12 @@ from .config import FrontendOptions, parse_frontend_args
 from .kv_prefix import PrefixHashCalculator
 from .metrics import FrontendMetrics
 from .monitoring import MONITORING_HTML, monitoring_snapshot
-from .registry import FileServiceWatcher
-from .registry_factory import create_service_registry
 from .router import ClusterRouter, NoWorkersAvailable
+from .worker_registry import (
+    WorkerRecord,
+    WorkerRegistryWatcher,
+    create_worker_registry,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -46,36 +49,33 @@ class ClusterFrontend:
                 "cross-node kv-aware routing with etcd requires --cache-index-dir "
                 "on shared storage"
             )
-        self.registry = create_service_registry(options)
-        self.watcher = FileServiceWatcher(self.registry)
+        self.registry = create_worker_registry(options)
+        self.watcher = WorkerRegistryWatcher(self.registry)
         self.router = ClusterRouter(
             self.watcher,
             connect_timeout=options.connect_timeout,
             request_timeout=options.request_timeout,
             request_plane=options.request_plane,
             router_mode=options.router_mode,
-            affinity_ttl_seconds=options.router_affinity_ttl_seconds,
-            affinity_capacity=options.router_affinity_capacity,
-            kv_router_min_tokens=options.kv_router_min_tokens,
         )
         self.prefix_calculator = PrefixHashCalculator()
         self.metrics = FrontendMetrics(router=self.router.metrics)
 
-    def _resolve_model(self, requested: str | None) -> tuple[str, list] | None:
-        """解析请求中的模型名，并返回该模型可用的 worker 列表。
+    def _resolve_model(
+        self,
+        model_name: str,
+    ) -> tuple[str, list[WorkerRecord]] | None:
+        """解析请求模型名，并返回可服务该模型的 worker 列表。"""
+        if model_name is None:
+            # None 不是合法输入；空字符串才表示未指定模型。
+            raise ValueError("model_name must not be None; use an empty string")
 
-        如果调用方没有指定模型，则使用第一个可用 worker 的 served_model_name。
-        返回 ``None`` 表示没有找到可服务的 worker。
-        """
-        workers = self.router.available_workers(requested)
+        workers = self.router.routable_workers(model_name)
         if workers:
-            return requested or workers[0].served_model_name, workers
-        if not requested and self.watcher.workers:
-            ready_workers = [
-                worker for worker in self.watcher.workers if worker.state == "ready"
-            ]
-            if ready_workers:
-                return ready_workers[0].served_model_name, ready_workers
+            # 未指定模型时，使用第一个可用 worker 的对外模型名。
+            return model_name or workers[0].served_model_name, workers
+
+        # 无可用 worker 时交由调用方返回对应错误。
         return None
 
     def create_app(self) -> FastAPI:
@@ -84,15 +84,21 @@ class ClusterFrontend:
         @asynccontextmanager
         async def lifespan(app: FastAPI):
             """管理 frontend 生命周期：等待初始 worker、启动 watcher、退出清理。"""
-            await self.watcher.refresh(self.options.namespace)
-            while len(self.watcher.workers) < self.options.router_min_initial_workers:
+            while True:
+                # 每轮先刷新 discovery，再基于真实 worker 状态判断是否可启动。
+                await self.watcher.refresh(self.options.namespace)
+                ready_count = len(self.router.routable_workers())
+                # watcher.workers 包含 DRAINING 等 discovery 可见 worker；
+                # routable_workers() 只包含当前真正可路由的 ready worker。
+                if ready_count >= self.options.router_min_initial_workers:
+                    break
+
                 logger.info(
-                    "Waiting for %d workers; currently %d",
+                    "Waiting for %d routable workers; currently %d",
                     self.options.router_min_initial_workers,
-                    len(self.watcher.workers),
+                    ready_count,
                 )
                 await asyncio.sleep(max(0.1, self.options.health_interval))
-                await self.watcher.refresh(self.options.namespace)
 
             self.watcher.start(
                 self.options.namespace,
@@ -111,7 +117,7 @@ class ClusterFrontend:
         async def health():
             """返回 frontend 自身健康状态和当前发现的 worker 数量。"""
             worker_count = len(self.watcher.workers)
-            ready_count = len(self.router.available_workers())
+            ready_count = len(self.router.routable_workers())
             return {
                 "status": "healthy",
                 "namespace": self.options.namespace,
@@ -142,7 +148,7 @@ class ClusterFrontend:
         @app.get("/v1/models/{model_name}/ready")
         async def model_ready(model_name: str):
             """查询指定模型是否已经满足最小 worker 副本数。"""
-            workers = self.router.available_workers(model_name)
+            workers = self.router.routable_workers(model_name)
             ready = len(workers) >= self.options.router_min_initial_workers
             return {
                 "ready": ready,
@@ -161,7 +167,7 @@ class ClusterFrontend:
                 self.metrics.render(
                     len(self.watcher.workers),
                     self.watcher.workers,
-                    len(self.router.affinity),
+                    self.router.affinity_entries,
                 ),
                 media_type="text/plain; version=0.0.4",
             )
@@ -209,25 +215,47 @@ class ClusterFrontend:
                         }
                     },
                 )
-
-            requested_model = payload.get("model")
-            resolved = self._resolve_model(requested_model)
-            if resolved is None:
+            # payload 是 curl 发送的请求体；model 为空字符串表示未指定模型。
+            """
+            {
+                "model": "Qwen3-0.6B",
+                "messages": [...]
+            }
+            """
+            model_name = payload.get("model")
+            if model_name is None:
+                # 缺失或 null 都不允许；需要默认模型时应显式传入空字符串。
                 return JSONResponse(
-                    status_code=503 if not requested_model else 404,
+                    status_code=400,
                     content={
                         "error": {
-                            "message": f"model is not ready: {requested_model or '<default>'}",
-                            "type": "service_unavailable"
-                            if not requested_model
-                            else "invalid_request_error",
+                            "message": "model is required",
+                            "type": "invalid_request_error",
                         }
                     },
                 )
+            resolved = self._resolve_model(model_name)
+            if resolved is None:
+                return JSONResponse(
+                    status_code=503 if not model_name else 404,
+                    content={
+                        "error": {
+                            "message": (
+                                f"model is not ready: {model_name or '<default>'}"
+                            ),
+                            "type": (
+                                "service_unavailable"
+                                if not model_name
+                                else "invalid_request_error"
+                            ),
+                        }
+                    },
+                )
+
             model_name, _ = resolved
             payload = {**payload, "model": model_name}
             if self.options.router_mode == "kv-aware":
-                resolved_workers = self.router.available_workers(model_name)
+                resolved_workers = self.router.routable_workers(model_name)
                 model_path = resolved_workers[0].model
                 kv_index = (resolved_workers[0].metadata or {}).get("kv_index")
                 block_size = (
@@ -430,8 +458,8 @@ if __name__ == "__main__":
      -> parse_frontend_args()
      -> logging.basicConfig()
      -> ClusterFrontend(options)
-        -> FileServiceRegistry
-        -> FileServiceWatcher
+        -> worker registry
+        -> WorkerRegistryWatcher
         -> ClusterRouter
         -> HttpWorkerClientFactory
         -> FrontendMetrics

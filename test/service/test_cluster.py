@@ -10,8 +10,6 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import httpx
-from infinilm.cluster.affinity import AffinityStore, affinity_key
-from infinilm.cluster.cache_index import WorkerCacheIndexExporter
 from infinilm.cluster.config import (
     FrontendOptions,
     parse_frontend_args,
@@ -21,20 +19,24 @@ from infinilm.cluster.config import (
 from infinilm.cluster.frontend import ClusterFrontend
 from infinilm.cluster.frontend import main as frontend_main
 from infinilm.cluster.http_worker_client_factory import HttpWorkerClientFactory
-from infinilm.cluster.kv_index import KvIndexStore
-from infinilm.cluster.kv_prefix import PrefixHashCalculator, prefix_hashes
 from infinilm.cluster.metrics import (
     REQUEST_DURATION_BUCKETS,
     Histogram,
     RouterMetrics,
 )
-from infinilm.cluster.registry import FileServiceRegistry, FileServiceWatcher
 from infinilm.cluster.router import ClusterRouter
-from infinilm.cluster.worker import ClusterInferenceServer, DrainingUvicornServer
+from infinilm.cluster.worker import (
+    ClusterInferenceServer,
+    ClusterWorkerRuntime,
+    DrainingUvicornServer,
+)
 from infinilm.cluster.worker_discovery import WorkerDiscoveryService
+from infinilm.cluster.worker_registry import (
+    FileWorkerRegistry,
+    WorkerRegistryWatcher,
+)
 from infinilm.cluster.worker_traffic import WorkerTrafficMetrics
 from infinilm.llm import AsyncLLMEngine
-from infinilm.llm.cache_manager import BlockManager
 from infinilm.llm.request import InferenceRequest
 from infinilm.server.inference_server import InferenceServer
 from prometheus_client.parser import text_string_to_metric_families
@@ -95,9 +97,7 @@ class MetricsRenderTest(unittest.TestCase):
         )
 
         rendered = metrics.render(1, [worker])
-        families = {
-            family.name for family in text_string_to_metric_families(rendered)
-        }
+        families = {family.name for family in text_string_to_metric_families(rendered)}
 
         self.assertIn("infinilm_router_kv_aware_requests", families)
         self.assertIn("infinilm_router_kv_hit_requests", families)
@@ -131,8 +131,8 @@ class WorkerTrafficMetricsTest(unittest.TestCase):
             return SimpleNamespace(status_code=200)
 
         async def fake_stream_chat(self, request_id, data, http_request):
-            yield "data: {\"choices\":[{\"delta\":{\"content\":\"Ready\"}}]}\n\n"
-            yield "data: {\"choices\":[{\"finish_reason\": \"stop\"}]}\n\n"
+            yield 'data: {"choices":[{"delta":{"content":"Ready"}}]}\n\n'
+            yield 'data: {"choices":[{"finish_reason": "stop"}]}\n\n'
 
         server = ClusterInferenceServer.__new__(ClusterInferenceServer)
         server.worker_traffic = WorkerTrafficMetrics()
@@ -143,7 +143,10 @@ class WorkerTrafficMetricsTest(unittest.TestCase):
                 patch.object(InferenceServer, "_stream_chat", new=fake_stream_chat),
             ):
                 await server._chat("request-1", {}, object())
-                chunks = [chunk async for chunk in server._stream_chat("request-2", {}, object())]
+                chunks = [
+                    chunk
+                    async for chunk in server._stream_chat("request-2", {}, object())
+                ]
 
             self.assertEqual(len(chunks), 2)
             snapshot = server.worker_traffic.snapshot()
@@ -188,236 +191,6 @@ class PrefixCacheObservabilityTest(unittest.TestCase):
         self.assertEqual(stats["prompt_tokens"], 640)
 
 
-class CacheIndexTest(unittest.TestCase):
-    def _request_with_tokens(self, token_ids: list[int]) -> InferenceRequest:
-        request = InferenceRequest(request_id=str(len(token_ids)), prompt_token_ids=token_ids)
-        request.initialize_block_hashes(block_size=4, enable_prefix_caching=True)
-        return request
-
-    def test_worker_cache_export_paths_are_isolated_by_instance(self):
-        with TemporaryDirectory() as temporary:
-            registry = FileServiceRegistry(Path(temporary))
-            manager = BlockManager(num_blocks=4, block_size=4)
-            scheduler = SimpleNamespace(
-                cache_manager=manager,
-                enable_prefix_caching=True,
-            )
-            engine = SimpleNamespace(
-                engine=SimpleNamespace(scheduler=scheduler),
-                config=SimpleNamespace(block_size=4),
-            )
-            server = ClusterInferenceServer.__new__(ClusterInferenceServer)
-            server.registry = registry
-            server.model_path = "/models/qwen"
-            server.block_size = 4
-
-            first = server._create_cache_index_exporter(engine, "worker-a")
-            second = server._create_cache_index_exporter(engine, "worker-b")
-
-            self.assertIsNotNone(first)
-            self.assertIsNotNone(second)
-            self.assertNotEqual(first.output_dir, second.output_dir)
-            self.assertEqual(
-                first.output_dir,
-                Path(temporary).parent / "cache-index" / "worker-a",
-            )
-
-    def test_block_manager_prefix_lookup_and_events(self):
-        async def run():
-            with TemporaryDirectory() as temporary:
-                manager = BlockManager(num_blocks=8, block_size=4)
-                exporter = WorkerCacheIndexExporter(
-                    block_manager=manager,
-                    output_dir=Path(temporary),
-                    namespace="test-namespace",
-                    block_size=4,
-                )
-                first = self._request_with_tokens(list(range(8)))
-                first.block_table, first.slot_mapping = manager.allocate_slots(8)
-                await asyncio.to_thread(exporter.start)
-                manager.publish_computed_blocks(
-                    first.block_table,
-                    first.block_hashes,
-                    0,
-                    8,
-                )
-
-                second = self._request_with_tokens(list(range(12)))
-                cached, cached_tokens = manager.get_computed_blocks(
-                    second.block_hashes, 11
-                )
-                self.assertEqual(len(cached), 2)
-                self.assertEqual(cached_tokens, 8)
-
-                manager.free_blocks(cached)
-                await asyncio.to_thread(exporter.write_snapshot)
-                for _ in range(50):
-                    if exporter.metadata()["entries"] >= 2:
-                        break
-                    await asyncio.sleep(0.01)
-                self.assertGreaterEqual(exporter.metadata()["entries"], 2)
-
-                snapshot = json.loads(exporter.snapshot_path.read_text(encoding="utf-8"))
-                self.assertEqual(snapshot["namespace"], "test-namespace")
-                self.assertEqual(len(snapshot["hashes"]), 2)
-
-                manager.free_blocks(first.block_table)
-                manager.try_free_blocks(8)
-                self.assertEqual(manager.snapshot_prefix_index(), [])
-                for _ in range(50):
-                    if exporter.metadata()["entries"] == 0:
-                        break
-                    await asyncio.sleep(0.01)
-                self.assertEqual(exporter.metadata()["entries"], 0)
-                events = []
-                for _ in range(50):
-                    if exporter.events_path.exists():
-                        events = [
-                            json.loads(line)
-                            for line in exporter.events_path.read_text(
-                                encoding="utf-8"
-                            ).splitlines()
-                        ]
-                        if "evicted" in {event["type"] for event in events}:
-                            break
-                    await asyncio.sleep(0.01)
-                event_types = [event["type"] for event in events]
-                self.assertIn("published", event_types)
-                self.assertIn("evicted", event_types)
-                await asyncio.to_thread(exporter.stop)
-
-        asyncio.run(run())
-
-    def test_frontend_index_reads_snapshot_and_events(self):
-        with TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            registry = FileServiceRegistry(root)
-            namespace = "test-namespace"
-            hashes = prefix_hashes(list(range(12)), block_size=4)
-            records = []
-            for index, matched_hash_count in enumerate((3, 1)):
-                output_dir = root / f"worker-{index}"
-                output_dir.mkdir()
-                snapshot_path = output_dir / "snapshot.json"
-                events_path = output_dir / "events.jsonl"
-                snapshot_path.write_text(
-                    json.dumps(
-                        {
-                            "namespace": namespace,
-                            "block_size": 4,
-                            "sequence": 1,
-                            "hashes": hashes[:matched_hash_count],
-                        }
-                    ),
-                    encoding="utf-8",
-                )
-                events_path.write_text("", encoding="utf-8")
-                record = registry.new_record(
-                    namespace="test",
-                    component="infinilm",
-                    endpoint="generate",
-                    worker_type="aggregated",
-                    model="/models/qwen",
-                    served_model_name="qwen",
-                    host="127.0.0.1",
-                    port=18081 + index,
-                    metadata={
-                        "kv_index": {
-                            "namespace": namespace,
-                            "block_size": 4,
-                            "snapshot": str(snapshot_path),
-                            "events": str(events_path),
-                        }
-                    },
-                )
-                records.append(record)
-
-            index = KvIndexStore()
-            index.refresh(records)
-            matches = index.lookup(
-                {
-                    "namespace": namespace,
-                    "block_size": 4,
-                    "hashes": hashes,
-                },
-                records,
-            )
-            self.assertEqual(matches[0].worker_id, records[0].instance_id)
-            self.assertEqual(matches[0].matched_blocks, 3)
-            self.assertEqual(matches[0].matched_tokens, 12)
-            self.assertEqual(index.entries(), 4)
-
-            with Path(records[0].metadata["kv_index"]["events"]).open(
-                "a", encoding="utf-8"
-            ) as events:
-                events.write(
-                    json.dumps(
-                        {"sequence": 2, "type": "evicted", "hash": hashes[2]}
-                    )
-                    + "\n"
-                )
-            index.refresh(records)
-            matches = index.lookup(
-                {"namespace": namespace, "block_size": 4, "hashes": hashes},
-                records,
-            )
-            first = next(
-                match
-                for match in matches
-                if match.worker_id == records[0].instance_id
-            )
-            self.assertEqual(first.matched_blocks, 2)
-            self.assertEqual(index.entries(), 3)
-
-
-class PrefixHashCalculatorTest(unittest.TestCase):
-    def test_extracts_tokens_from_processor_batch_encoding(self):
-        class BatchEncoding:
-            def __getitem__(self, key):
-                if key != "input_ids":
-                    raise KeyError(key)
-                return [[1, 2, 3], [4, 5, 6]]
-
-        self.assertEqual(
-            PrefixHashCalculator._input_ids(BatchEncoding()),
-            [1, 2, 3],
-        )
-
-    def test_hashes_text_chat_prompt_with_worker_hash_algorithm(self):
-        model_path = "/data-aisoft/mechdancer/models/Qwen3-0.6B"
-        calculator = PrefixHashCalculator()
-        payload = {
-            "model": "qwen",
-            "messages": [
-                {"role": "system", "content": "You are concise."},
-                {"role": "user", "content": "hello world, this prompt spans multiple blocks"},
-            ],
-        }
-        result = calculator.calculate(payload, model_path=model_path, block_size=8)
-
-        self.assertIsNotNone(result)
-        self.assertGreaterEqual(result["token_count"], len(result["hashes"]) * 8)
-        self.assertGreater(len(result["hashes"]), 0)
-        self.assertEqual(len(result["namespace"]), 64)
-
-        multimodal = {
-            "model": "qwen",
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "image_url", "image_url": {"url": "http://invalid"}}
-                    ],
-                }
-            ],
-        }
-        self.assertIsNone(
-            calculator.calculate(
-                multimodal, model_path=model_path, block_size=8
-            )
-        )
-
-
 class WorkerDrainingTest(unittest.TestCase):
     def test_worker_options_include_drain_grace(self):
         options = parse_worker_cluster_args(["--drain-grace-seconds", "3"])
@@ -446,61 +219,23 @@ class WorkerDrainingTest(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_runtime_coordinates_inference_and_http_server(self):
+        async def start_draining():
+            return None
 
-class AffinityTest(unittest.TestCase):
-    def test_affinity_store_expires_and_evicts_lru_entries(self):
-        now = 100.0
-
-        def clock() -> float:
-            return now
-
-        store = AffinityStore(ttl_seconds=10, capacity=2, clock=clock)
-        store.assign("a", "worker-a")
-        now = 105.0
-        store.assign("b", "worker-b")
-        store.get("a", {"worker-a"})
-
-        now = 106.0
-        store.assign("c", "worker-c")
-        self.assertNotIn("b", store._entries)
-        self.assertIn("a", store._entries)
-
-        now = 116.0
-        lookup = store.get("a", {"worker-a"})
-        self.assertFalse(lookup.hit)
-        self.assertTrue(lookup.expired)
-        self.assertNotIn("a", store._entries)
-        self.assertIn("c", store._entries)
-
-    def test_affinity_key_uses_identity_and_stable_conversation_prefix(self):
-        identity = affinity_key(
-            {"user": "user-1"},
-            {"x-session-id": "session-1"},
+        inference_server = SimpleNamespace(
+            host="127.0.0.1",
+            port=18091,
+            cluster_options=SimpleNamespace(drain_grace_seconds=7),
+            _create_app=lambda: object(),
+            start_draining=start_draining,
         )
-        self.assertEqual(
-            identity,
-            affinity_key({"user": "other-user"}, {"x-session-id": "session-1"}),
-        )
-        self.assertNotEqual(identity, affinity_key({"user": "user-2"}, {}))
+        runtime = ClusterWorkerRuntime(inference_server)
 
-        first_turn = {
-            "model": "qwen",
-            "messages": [
-                {"role": "system", "content": "You are concise."},
-                {"role": "user", "content": "hello"},
-            ],
-        }
-        next_turn = {
-            "model": "qwen",
-            "messages": [
-                {"role": "system", "content": "You are concise."},
-                {"role": "user", "content": "hello"},
-                {"role": "assistant", "content": "hi"},
-                {"role": "user", "content": "continue"},
-            ],
-        }
-        self.assertEqual(affinity_key(first_turn), affinity_key(next_turn))
-        self.assertIsNotNone(affinity_key(first_turn))
+        self.assertEqual(runtime.http_server.config.host, "127.0.0.1")
+        self.assertEqual(runtime.http_server.config.port, 18091)
+        self.assertEqual(runtime.http_server.drain_grace_seconds, 7)
+        self.assertIs(runtime.http_server.on_drain_start, start_draining)
 
 
 class FileRegistryTest(unittest.TestCase):
@@ -508,7 +243,7 @@ class FileRegistryTest(unittest.TestCase):
         with TemporaryDirectory() as temporary:
             # 打印本次测试使用的 discovery 根目录；with 块结束后会自动删除。
             print(f"temporary directory: {temporary}")
-            registry = FileServiceRegistry(Path(temporary), lease_seconds=10)
+            registry = FileWorkerRegistry(Path(temporary), lease_seconds=10)
             record = registry.new_record(
                 namespace="test",
                 component="infinilm",
@@ -541,7 +276,7 @@ class FileRegistryTest(unittest.TestCase):
             asyncio.run(registry.register(expired))
 
             self.assertEqual(asyncio.run(registry.snapshot("test")), [])
-        
+
             self.assertEqual(list(Path(temporary).glob("*.json")), [])
 
             # 需要人工检查临时文件时设置 INFINILM_TEST_PAUSE_SECONDS。
@@ -551,45 +286,10 @@ class FileRegistryTest(unittest.TestCase):
                 time.sleep(pause_seconds)
 
 
-class RouterModeTest(unittest.TestCase):
-    def test_least_loaded_is_default_and_round_robin_is_accepted(self):
-        options = parse_frontend_args([])
-        self.assertEqual(options.router_mode, "round-robin")
-
-        options = parse_frontend_args(["--router-mode", "round-robin"])
-        self.assertEqual(options.router_mode, "round-robin")
-
-        options = parse_frontend_args(["--router-mode", "session-affinity"])
-        self.assertEqual(options.router_mode, "session-affinity")
-
-        options = parse_frontend_args(["--router-mode", "kv-aware"])
-        self.assertEqual(options.router_mode, "kv-aware")
-
+class RouterCommonTest(unittest.TestCase):
+    def test_rejects_removed_least_inflight_mode(self):
         with self.assertRaises(SystemExit):
             parse_frontend_args(["--router-mode", "least-inflight"])
-
-    def test_kv_router_min_tokens_has_default_and_override(self):
-        options = parse_frontend_args([])
-        self.assertEqual(options.kv_router_min_tokens, 1)
-
-        options = parse_frontend_args(["--kv-router-min-tokens", "256"])
-        self.assertEqual(options.kv_router_min_tokens, 256)
-
-    def test_affinity_options_have_defaults_and_overrides(self):
-        options = parse_frontend_args([])
-        self.assertEqual(options.router_affinity_ttl_seconds, 300.0)
-        self.assertEqual(options.router_affinity_capacity, 4096)
-
-        options = parse_frontend_args(
-            [
-                "--router-affinity-ttl-secs",
-                "60",
-                "--router-affinity-capacity",
-                "128",
-            ]
-        )
-        self.assertEqual(options.router_affinity_ttl_seconds, 60.0)
-        self.assertEqual(options.router_affinity_capacity, 128)
 
     def test_frontend_startup_logs_monitoring_url(self):
         from unittest.mock import patch
@@ -611,157 +311,9 @@ class RouterModeTest(unittest.TestCase):
             logs.output,
         )
 
-    def test_session_affinity_reuses_and_falls_back(self):
-        with TemporaryDirectory() as temporary:
-            registry = FileServiceRegistry(Path(temporary))
-            records = [
-                registry.new_record(
-                    namespace="test",
-                    component="infinilm",
-                    endpoint="generate",
-                    worker_type="aggregated",
-                    model="/models/qwen",
-                    served_model_name="qwen",
-                    host="127.0.0.1",
-                    port=18081 + index,
-                    transport="http",
-                )
-                for index in range(3)
-            ]
-            watcher = FileServiceWatcher(registry)
-            watcher._workers = records
-            router = ClusterRouter(
-                watcher,
-                connect_timeout=1.0,
-                request_timeout=2.0,
-                router_mode="session-affinity",
-            )
-            key = affinity_key({"user": "user-1"})
-
-            first = router.select(records, routing_key=key)
-            second = router.select(records, routing_key=key)
-            self.assertIs(first, second)
-            self.assertEqual(router.metrics.affinity_requests_total, 2)
-            self.assertEqual(router.metrics.affinity_hits_total, 1)
-            self.assertEqual(router.metrics.affinity_misses_total, 1)
-            self.assertEqual(len(router.affinity), 1)
-
-            watcher._workers = [
-                record for record in records if record.instance_id != first.instance_id
-            ]
-            fallback = router.select(watcher.workers, routing_key=key)
-            self.assertIsNot(fallback, first)
-            self.assertEqual(router.metrics.affinity_misses_total, 2)
-
-            router.worker_inflight[fallback.instance_id] = 5
-            rebalanced = router.select(watcher.workers, routing_key=key)
-            self.assertIsNot(rebalanced, fallback)
-            self.assertEqual(router.metrics.affinity_misses_total, 3)
-
-    def test_kv_aware_routes_to_longest_cached_prefix(self):
-        with TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            registry = FileServiceRegistry(root)
-            namespace = "kv-router-test"
-            hashes = prefix_hashes(list(range(12)), block_size=4)
-            records = []
-            for index, count in enumerate((1, 3)):
-                output_dir = root / f"worker-{index}"
-                output_dir.mkdir()
-                snapshot_path = output_dir / "snapshot.json"
-                events_path = output_dir / "events.jsonl"
-                snapshot_path.write_text(
-                    json.dumps(
-                        {
-                            "namespace": namespace,
-                            "block_size": 4,
-                            "sequence": 1,
-                            "hashes": hashes[:count],
-                        }
-                    ),
-                    encoding="utf-8",
-                )
-                events_path.write_text("", encoding="utf-8")
-                records.append(
-                    registry.new_record(
-                        namespace="test",
-                        component="infinilm",
-                        endpoint="generate",
-                        worker_type="aggregated",
-                        model="/models/qwen",
-                        served_model_name="qwen",
-                        host="127.0.0.1",
-                        port=18091 + index,
-                        metadata={
-                            "kv_index": {
-                                "namespace": namespace,
-                                "block_size": 4,
-                                "snapshot": str(snapshot_path),
-                                "events": str(events_path),
-                            }
-                        },
-                    )
-                )
-
-            watcher = FileServiceWatcher(registry)
-            watcher._workers = records
-            router = ClusterRouter(
-                watcher,
-                connect_timeout=1.0,
-                request_timeout=2.0,
-                router_mode="kv-aware",
-            )
-            selected = router.select(
-                records,
-                kv_prefix={
-                    "namespace": namespace,
-                    "block_size": 4,
-                    "hashes": hashes,
-                },
-            )
-
-            self.assertIs(selected, records[1])
-            self.assertEqual(router.metrics.kv_aware_requests_total, 1)
-            self.assertEqual(router.metrics.kv_hit_requests_total, 1)
-            self.assertEqual(router.metrics.kv_miss_requests_total, 0)
-            self.assertEqual(router.metrics.kv_predicted_saved_tokens_total, 12)
-            self.assertEqual(router.kv_index.entries(), 4)
-
-    def test_round_robin_selects_each_worker_evenly(self):
-        with TemporaryDirectory() as temporary:
-            registry = FileServiceRegistry(Path(temporary))
-            records = [
-                registry.new_record(
-                    namespace="test",
-                    component="infinilm",
-                    endpoint="generate",
-                    worker_type="aggregated",
-                    model="/models/qwen",
-                    served_model_name="qwen",
-                    host="127.0.0.1",
-                    port=18081 + index,
-                    transport="http",
-                )
-                for index in range(3)
-            ]
-            watcher = FileServiceWatcher(registry)
-            watcher._workers = records
-            router = ClusterRouter(
-                watcher,
-                connect_timeout=1.0,
-                request_timeout=2.0,
-                router_mode="round-robin",
-            )
-
-            selected = [router.select(records) for _ in range(6)]
-            counts = {
-                record.instance_id: selected.count(record) for record in records
-            }
-            self.assertEqual(list(counts.values()), [2, 2, 2])
-
     def test_router_excludes_draining_worker(self):
         with TemporaryDirectory() as temporary:
-            registry = FileServiceRegistry(Path(temporary))
+            registry = FileWorkerRegistry(Path(temporary))
             ready = registry.new_record(
                 namespace="test",
                 component="infinilm",
@@ -785,7 +337,7 @@ class RouterModeTest(unittest.TestCase):
                 transport="http",
                 state="draining",
             )
-            watcher = FileServiceWatcher(registry)
+            watcher = WorkerRegistryWatcher(registry)
             watcher._workers = [draining, ready]
             router = ClusterRouter(
                 watcher,
@@ -793,214 +345,15 @@ class RouterModeTest(unittest.TestCase):
                 request_timeout=2.0,
             )
 
-            self.assertEqual(router.available_workers(), [ready])
+            self.assertEqual(router.routable_workers(), [ready])
             self.assertIs(router.select([draining, ready]), ready)
-
-
-class LoadAwareRouterTest(unittest.TestCase):
-    def test_least_loaded_inflight_is_dominant(self):
-        with TemporaryDirectory() as temporary:
-            registry = FileServiceRegistry(Path(temporary))
-            busy, medium, idle = [
-                registry.new_record(
-                    namespace="test",
-                    component="infinilm",
-                    endpoint="generate",
-                    worker_type="aggregated",
-                    model="/models/qwen",
-                    served_model_name="qwen",
-                    host="127.0.0.1",
-                    port=18081 + index,
-                    transport="http",
-                )
-                for index in range(3)
-            ]
-            watcher = FileServiceWatcher(registry)
-            watcher._workers = [busy, medium, idle]
-            router = ClusterRouter(
-                watcher,
-                connect_timeout=1.0,
-                request_timeout=2.0,
-                router_mode="least-loaded",
-            )
-            router.worker_inflight.update(
-                {
-                    busy.instance_id: 5,
-                    medium.instance_id: 2,
-                    idle.instance_id: 0,
-                }
-            )
-
-            self.assertIs(router.select([busy, medium, idle]), idle)
-            self.assertAlmostEqual(router.load_score(busy), 4.5)
-            self.assertAlmostEqual(router.load_score(medium), 1.8)
-            self.assertAlmostEqual(router.load_score(idle), 0.0)
-            rendered = router.metrics.render(3, [busy, medium, idle])
-            self.assertIn("infinilm_router_mode{mode=\"least-loaded\"} 1", rendered)
-            self.assertIn("infinilm_router_worker_inflight", rendered)
-
-    def test_least_loaded_routes_around_active_request(self):
-        class FakeClient:
-            def __init__(self, release: asyncio.Event) -> None:
-                self.release = release
-
-            async def stream_chat(self, payload):
-                yield {"type": "delta", "content": "partial"}
-                await self.release.wait()
-                yield {"type": "finish", "finish_reason": "stop"}
-
-        class FakeFactory:
-            def __init__(self) -> None:
-                self.release = asyncio.Event()
-
-            def create(self, worker):
-                return FakeClient(self.release)
-
-            async def aclose(self) -> None:
-                return None
-
-        async def run():
-            with TemporaryDirectory() as temporary:
-                registry = FileServiceRegistry(Path(temporary))
-                records = [
-                    registry.new_record(
-                        namespace="test",
-                        component="infinilm",
-                        endpoint="generate",
-                        worker_type="aggregated",
-                        model="/models/qwen",
-                        served_model_name="qwen",
-                        host="127.0.0.1",
-                        port=18081 + index,
-                        transport="http",
-                    )
-                    for index in range(2)
-                ]
-                watcher = FileServiceWatcher(registry)
-                watcher._workers = records
-                router = ClusterRouter(
-                    watcher,
-                    connect_timeout=1.0,
-                    request_timeout=2.0,
-                    router_mode="least-loaded",
-                )
-                await router.aclose()
-                factory = FakeFactory()
-                router.worker_client_factory = factory
-
-                first = router.stream_chat(
-                    {"model": "qwen", "messages": [{"role": "user", "content": "1"}]}
-                )
-                first_frame = await first.__anext__()
-                first_worker = first_frame["worker_id"]
-                self.assertEqual(router.metrics.inflight, 1)
-
-                second = router.stream_chat(
-                    {"model": "qwen", "messages": [{"role": "user", "content": "2"}]}
-                )
-                second_frame = await second.__anext__()
-                second_worker = second_frame["worker_id"]
-                self.assertNotEqual(first_worker, second_worker)
-                self.assertEqual(router.metrics.inflight, 2)
-                self.assertEqual(router.metrics.worker_inflight[first_worker], 1)
-                self.assertEqual(router.metrics.worker_inflight[second_worker], 1)
-
-                factory.release.set()
-                async for _ in first:
-                    pass
-                async for _ in second:
-                    pass
-
-                self.assertEqual(router.metrics.inflight, 0)
-                self.assertEqual(router.metrics.successful_requests_total, 2)
-                self.assertEqual(router.metrics.worker_inflight[first_worker], 0)
-                self.assertEqual(router.metrics.worker_inflight[second_worker], 0)
-
-        asyncio.run(run())
-
-    def test_least_loaded_uses_worker_metadata(self):
-        with TemporaryDirectory() as temporary:
-            registry = FileServiceRegistry(Path(temporary))
-            light, medium, heavy = [
-                registry.new_record(
-                    namespace="test",
-                    component="infinilm",
-                    endpoint="generate",
-                    worker_type="aggregated",
-                    model="/models/qwen",
-                    served_model_name="qwen",
-                    host="127.0.0.1",
-                    port=18081 + index,
-                    transport="http",
-                )
-                for index in range(3)
-            ]
-            light = replace(
-                light,
-                metadata={
-                    "load": {
-                        "waiting_requests": 0,
-                        "running_requests": 1,
-                        "max_batch_size": 8,
-                        "kv_capacity": 100,
-                        "kv_used": 10,
-                    }
-                },
-            )
-            medium = replace(
-                medium,
-                metadata={
-                    "load": {
-                        "waiting_requests": 1,
-                        "running_requests": 2,
-                        "max_batch_size": 8,
-                        "kv_capacity": 100,
-                        "kv_used": 40,
-                    }
-                },
-            )
-            heavy = replace(
-                heavy,
-                metadata={
-                    "load": {
-                        "waiting_requests": 4,
-                        "running_requests": 8,
-                        "max_batch_size": 8,
-                        "kv_capacity": 100,
-                        "kv_used": 90,
-                    }
-                },
-            )
-            watcher = FileServiceWatcher(registry)
-            watcher._workers = [light, medium, heavy]
-            router = ClusterRouter(
-                watcher,
-                connect_timeout=1.0,
-                request_timeout=2.0,
-                router_mode="least-loaded",
-            )
-
-            self.assertIs(router.select([light, medium, heavy]), light)
-            self.assertLess(
-                router.load_score(light),
-                router.load_score(medium),
-            )
-            self.assertLess(
-                router.load_score(medium),
-                router.load_score(heavy),
-            )
-            rendered = router.metrics.render(3, [light, medium, heavy])
-            self.assertIn("infinilm_router_worker_load_score", rendered)
-            self.assertIn("infinilm_router_worker_waiting_requests", rendered)
-            self.assertIn("infinilm_router_worker_running_requests", rendered)
-            self.assertIn("infinilm_router_worker_kv_usage_ratio", rendered)
 
 
 class WorkerDiscoveryServiceTest(unittest.TestCase):
     def test_register_load_metadata_heartbeat_and_unregister(self):
         async def run():
             with TemporaryDirectory() as temporary:
-                registry = FileServiceRegistry(Path(temporary), lease_seconds=0.1)
+                registry = FileWorkerRegistry(Path(temporary), lease_seconds=0.1)
                 record = registry.new_record(
                     namespace="test",
                     component="infinilm",
@@ -1087,7 +440,7 @@ class MonitoringDashboardTest(unittest.TestCase):
         async def run():
             with TemporaryDirectory() as temporary:
                 root = Path(temporary)
-                registry = FileServiceRegistry(root)
+                registry = FileWorkerRegistry(root)
                 record = registry.new_record(
                     namespace="test",
                     component="infinilm",
@@ -1150,7 +503,7 @@ class MonitoringDashboardTest(unittest.TestCase):
                     {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18},
                 )
                 frontend.router.metrics.mark_worker_success(record.instance_id)
-                
+
                 app = frontend.create_app()
 
                 async with httpx.AsyncClient(
@@ -1182,12 +535,8 @@ class MonitoringDashboardTest(unittest.TestCase):
                     self.assertEqual(
                         snapshot["global"]["worker_received_requests_total"], 9
                     )
-                    self.assertEqual(
-                        snapshot["global"]["worker_active_requests"], 2
-                    )
-                    self.assertEqual(
-                        snapshot["global"]["untracked_requests_total"], 2
-                    )
+                    self.assertEqual(snapshot["global"]["worker_active_requests"], 2)
+                    self.assertEqual(snapshot["global"]["untracked_requests_total"], 2)
                     self.assertEqual(snapshot["global"]["affinity_requests_total"], 0)
                     self.assertEqual(snapshot["global"]["affinity_hits_total"], 0)
                     self.assertEqual(snapshot["global"]["affinity_misses_total"], 0)
@@ -1228,9 +577,14 @@ class MonitoringDashboardTest(unittest.TestCase):
 
                     metrics_response = await client.get("/metrics")
                     self.assertEqual(metrics_response.status_code, 200)
-                    self.assertIn("infinilm_worker_received_requests_total", metrics_response.text)
-                    self.assertIn("infinilm_worker_untracked_requests_total", metrics_response.text)
-                    self.assertIn('infinilm_worker_state{', metrics_response.text)
+                    self.assertIn(
+                        "infinilm_worker_received_requests_total", metrics_response.text
+                    )
+                    self.assertIn(
+                        "infinilm_worker_untracked_requests_total",
+                        metrics_response.text,
+                    )
+                    self.assertIn("infinilm_worker_state{", metrics_response.text)
                     self.assertIn(
                         "infinilm_router_affinity_entries 0",
                         metrics_response.text,
@@ -1269,7 +623,7 @@ class HttpRequestPlaneTest(unittest.TestCase):
         async def run():
             with TemporaryDirectory() as temporary:
                 root = Path(temporary)
-                registry = FileServiceRegistry(root)
+                registry = FileWorkerRegistry(root)
                 record = registry.new_record(
                     namespace="test",
                     component="infinilm",
@@ -1299,7 +653,7 @@ class HttpRequestPlaneTest(unittest.TestCase):
                     )
                 )
                 await frontend.router.aclose()
-                
+
                 worker_http = httpx.AsyncClient(
                     transport=httpx.MockTransport(worker_transport)
                 )
@@ -1396,7 +750,7 @@ class HttpRequestPlaneTest(unittest.TestCase):
 
         async def run():
             with TemporaryDirectory() as temporary:
-                registry = FileServiceRegistry(Path(temporary))
+                registry = FileWorkerRegistry(Path(temporary))
                 record = registry.new_record(
                     namespace="test",
                     component="infinilm",
@@ -1408,7 +762,7 @@ class HttpRequestPlaneTest(unittest.TestCase):
                     port=18081,
                     transport="http",
                 )
-                watcher = FileServiceWatcher(registry)
+                watcher = WorkerRegistryWatcher(registry)
                 watcher._workers = [record]
                 router = ClusterRouter(
                     watcher,
@@ -1467,259 +821,6 @@ class HttpRequestPlaneTest(unittest.TestCase):
 
         asyncio.run(run())
 
-    def test_session_affinity_uses_frontend_header_and_hides_internal_key(self):
-        visited_ports: list[int] = []
-
-        def worker_transport(request: httpx.Request) -> httpx.Response:
-            payload = json.loads(request.content)
-            self.assertNotIn("__infinilm_routing_key", payload)
-            visited_ports.append(request.url.port)
-            return httpx.Response(
-                200,
-                json={
-                    "id": "worker-completion",
-                    "object": "chat.completion",
-                    "created": 1,
-                    "model": "qwen",
-                    "choices": [
-                        {
-                            "index": 0,
-                            "message": {"role": "assistant", "content": "Ready."},
-                            "finish_reason": "stop",
-                        }
-                    ],
-                    "usage": {
-                        "prompt_tokens": 3,
-                        "completion_tokens": 2,
-                        "total_tokens": 5,
-                    },
-                },
-            )
-
-        async def run():
-            with TemporaryDirectory() as temporary:
-                root = Path(temporary)
-                registry = FileServiceRegistry(root)
-                records = [
-                    registry.new_record(
-                        namespace="test",
-                        component="infinilm",
-                        endpoint="generate",
-                        worker_type="aggregated",
-                        model="/models/qwen",
-                        served_model_name="qwen",
-                        host="127.0.0.1",
-                        port=port,
-                        transport="http",
-                    )
-                    for port in (18091, 18092)
-                ]
-                for record in records:
-                    await registry.register(record)
-
-                frontend = ClusterFrontend(
-                    FrontendOptions(
-                        namespace="test",
-                        file_kv=root,
-                        router_mode="session-affinity",
-                        router_min_initial_workers=1,
-                        http_host="127.0.0.1",
-                        http_port=18000,
-                        connect_timeout=1.0,
-                        request_timeout=2.0,
-                        health_interval=0.1,
-                        registry_ttl=10.0,
-                        heartbeat_interval=2.0,
-                    )
-                )
-                await frontend.router.aclose()
-                worker_http = httpx.AsyncClient(
-                    transport=httpx.MockTransport(worker_transport)
-                )
-                frontend.router.worker_client_factory = HttpWorkerClientFactory(
-                    connect_timeout=1.0,
-                    request_timeout=2.0,
-                    http_client=worker_http,
-                )
-                await frontend.watcher.refresh("test")
-                app = frontend.create_app()
-
-                try:
-                    async with httpx.AsyncClient(
-                        transport=httpx.ASGITransport(app=app),
-                        base_url="http://frontend",
-                    ) as client:
-                        headers = {"X-Session-ID": "session-1"}
-                        for _ in range(2):
-                            response = await client.post(
-                                "/v1/chat/completions",
-                                headers=headers,
-                                json={
-                                    "model": "qwen",
-                                    "messages": [
-                                        {"role": "user", "content": "hi"}
-                                    ],
-                                },
-                            )
-                            self.assertEqual(response.status_code, 200)
-
-                    self.assertEqual(len(visited_ports), 2)
-                    self.assertEqual(visited_ports[0], visited_ports[1])
-                    self.assertEqual(frontend.router.metrics.affinity_requests_total, 2)
-                    self.assertEqual(frontend.router.metrics.affinity_hits_total, 1)
-                    self.assertEqual(frontend.router.metrics.affinity_misses_total, 1)
-                finally:
-                    await worker_http.aclose()
-
-        asyncio.run(run())
-
-    def test_kv_aware_frontend_routes_and_hides_internal_payload(self):
-        visited_ports: list[int] = []
-
-        def worker_transport(request: httpx.Request) -> httpx.Response:
-            payload = json.loads(request.content)
-            self.assertNotIn("__infinilm_kv_prefix__", payload)
-            self.assertNotIn("__infinilm_routing_key", payload)
-            visited_ports.append(request.url.port)
-            return httpx.Response(
-                200,
-                json={
-                    "id": "worker-completion",
-                    "object": "chat.completion",
-                    "created": 1,
-                    "model": "qwen",
-                    "choices": [
-                        {
-                            "index": 0,
-                            "message": {"role": "assistant", "content": "Ready."},
-                            "finish_reason": "stop",
-                        }
-                    ],
-                    "usage": {
-                        "prompt_tokens": 12,
-                        "completion_tokens": 2,
-                        "total_tokens": 14,
-                    },
-                    "cache": {
-                        "hit": True,
-                        "matched_tokens": 12,
-                        "prefill_tokens": 0,
-                        "prompt_tokens": 12,
-                    },
-                },
-            )
-
-        async def run():
-            with TemporaryDirectory() as temporary:
-                root = Path(temporary)
-                registry = FileServiceRegistry(root)
-                namespace = "frontend-kv-test"
-                hashes = prefix_hashes(list(range(12)), block_size=4)
-                records = []
-                for index, count in enumerate((0, 3)):
-                    output_dir = root / f"worker-{index}"
-                    output_dir.mkdir()
-                    snapshot_path = output_dir / "snapshot.json"
-                    events_path = output_dir / "events.jsonl"
-                    snapshot_path.write_text(
-                        json.dumps(
-                            {
-                                "namespace": namespace,
-                                "block_size": 4,
-                                "sequence": 1,
-                                "hashes": hashes[:count],
-                            }
-                        ),
-                        encoding="utf-8",
-                    )
-                    events_path.write_text("", encoding="utf-8")
-                    records.append(
-                        registry.new_record(
-                            namespace="test",
-                            component="infinilm",
-                            endpoint="generate",
-                            worker_type="aggregated",
-                            model="/models/qwen",
-                            served_model_name="qwen",
-                            host="127.0.0.1",
-                            port=18091 + index,
-                            metadata={
-                                "kv_index": {
-                                    "namespace": namespace,
-                                    "block_size": 4,
-                                    "snapshot": str(snapshot_path),
-                                    "events": str(events_path),
-                                }
-                            },
-                        )
-                    )
-                for record in records:
-                    await registry.register(record)
-
-                frontend = ClusterFrontend(
-                    FrontendOptions(
-                        namespace="test",
-                        file_kv=root,
-                        router_mode="kv-aware",
-                        router_min_initial_workers=1,
-                        http_host="127.0.0.1",
-                        http_port=18000,
-                        connect_timeout=1.0,
-                        request_timeout=2.0,
-                        health_interval=0.1,
-                        registry_ttl=10.0,
-                        heartbeat_interval=2.0,
-                        kv_router_min_tokens=4,
-                    )
-                )
-                await frontend.router.aclose()
-                worker_http = httpx.AsyncClient(
-                    transport=httpx.MockTransport(worker_transport)
-                )
-                frontend.router.worker_client_factory = HttpWorkerClientFactory(
-                    connect_timeout=1.0,
-                    request_timeout=2.0,
-                    http_client=worker_http,
-                )
-                await frontend.watcher.refresh("test")
-                app = frontend.create_app()
-
-                prefix = {
-                    "namespace": namespace,
-                    "block_size": 4,
-                    "hashes": hashes,
-                    "token_count": 12,
-                }
-                try:
-                    with patch.object(
-                        frontend.prefix_calculator,
-                        "calculate",
-                        return_value=prefix,
-                    ):
-                        async with httpx.AsyncClient(
-                            transport=httpx.ASGITransport(app=app),
-                            base_url="http://frontend",
-                        ) as client:
-                            response = await client.post(
-                                "/v1/chat/completions",
-                                json={
-                                    "model": "qwen",
-                                    "messages": [{"role": "user", "content": "hi"}],
-                                },
-                            )
-                            self.assertEqual(response.status_code, 200)
-
-                    self.assertEqual(visited_ports, [18092])
-                    metrics = frontend.router.metrics
-                    self.assertEqual(metrics.kv_aware_requests_total, 1)
-                    self.assertEqual(metrics.kv_hit_requests_total, 1)
-                    self.assertEqual(metrics.kv_predicted_saved_tokens_total, 12)
-                    self.assertEqual(metrics.kv_actual_saved_tokens_total, 12)
-                finally:
-                    await worker_http.aclose()
-
-        asyncio.run(run())
-
     def test_http_worker_5xx_retries_next_worker(self):
         async def handler(request: httpx.Request) -> httpx.Response:
             if request.url.port == 18091:
@@ -1751,7 +852,7 @@ class HttpRequestPlaneTest(unittest.TestCase):
 
         async def run():
             with TemporaryDirectory() as temporary:
-                registry = FileServiceRegistry(Path(temporary))
+                registry = FileWorkerRegistry(Path(temporary))
                 records = [
                     registry.new_record(
                         namespace="test",
@@ -1767,7 +868,7 @@ class HttpRequestPlaneTest(unittest.TestCase):
                     for port in (18091, 18092)
                 ]
                 bad, good = records
-                watcher = FileServiceWatcher(registry)
+                watcher = WorkerRegistryWatcher(registry)
                 watcher._workers = records
                 router = ClusterRouter(
                     watcher,
