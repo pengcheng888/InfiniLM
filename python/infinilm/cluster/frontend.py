@@ -274,6 +274,7 @@ class ClusterFrontend:
                         **payload,
                         "__infinilm_kv_prefix__": kv_prefix,
                     }
+                    
             session_id = request.headers.get(
                 "x-infinilm-session-id"
             ) or request.headers.get("x-session-id")
