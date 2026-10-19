@@ -10,6 +10,7 @@ readme = "README.md"
 dependencies = [
     "httpx>=0.27",
     "openai>=1.0",
+    "PyYAML>=6.0",
 ]
 requires-python = ">=3.10"
 classifiers = [
@@ -29,6 +30,12 @@ Homepage = "https://github.com/InfiniTensor/InfiniLM"
 [project.scripts]
 "infinilm.frontend" = "infinilm.cluster.frontend:main"
 "infinilm.infinilm" = "infinilm.cluster.worker:main"
+# 聚合式集群 YAML 启动入口；安装后无需设置 PYTHONPATH。
+"infinilm.cluster-launch" = "infinilm.cluster.launch.launcher:main"
+
+# 把示例配置一起安装，便于安装环境直接引用 launch/configs 下的 YAML。
+[tool.setuptools.package-data]
+"infinilm.cluster.launch" = ["configs/*.yaml"]
 
 [tool.ruff]
 src = ["."]
