@@ -831,7 +831,23 @@ infinicore::Tensor DeepseekV4Attention::forward(const infinicore::Tensor &positi
     // flashmla_schedule_cache 在一次 forward 内缓存 FlashMLA 调度 metadata，
     // 供同类 attention 的不同 decoder layer 复用。
     infinicore::Tensor attn_out;
-    {
+    const auto &attn_metadata = forward_context.attn_metadata;
+    const bool is_prefill =
+        !attn_metadata.total_sequence_lengths.has_value() ||
+        attn_metadata.total_sequence_lengths.value()->shape()[0] != seq_len;
+    if (is_prefill) {
+        attn_out = compute_sparse_attention_v2(q,
+                                               seq_len,
+                                               hidden_states->device(),
+                                               layer_cache.swa_cache_raw,
+                                               dsv4_metadata.swa_indices,
+                                               dsv4_metadata.swa_topk_lengths,
+                                               extra_raw_cache,
+                                               extra_indices,
+                                               extra_topk_lengths,
+                                               extra_page_size,
+                                               dsv4_metadata);
+    } else {
         attn_out = prepare_attn_out_workspace(seq_len,
                                               hidden_states->dtype(),
                                               hidden_states->device());
@@ -847,20 +863,6 @@ infinicore::Tensor DeepseekV4Attention::forward(const infinicore::Tensor &positi
                                  extra_topk_lengths,
                                  extra_page_size,
                                  dsv4_metadata);
-    }
-    {
-
-        // attn_out = compute_sparse_attention_v2(q,
-        //                                        seq_len,
-        //                                        hidden_states->device(),
-        //                                        layer_cache.swa_cache_raw,
-        //                                        dsv4_metadata.swa_indices,
-        //                                        dsv4_metadata.swa_topk_lengths,
-        //                                        extra_raw_cache,
-        //                                        extra_indices,
-        //                                        extra_topk_lengths,
-        //                                        extra_page_size,
-        //                                        dsv4_metadata);
     }
     // attn_out是 [seq_len, num_local_attention_heads_, head_dim_]
     auto out_rope = attn_out->narrow({{2, head_dim_ - qk_rope_head_dim_, qk_rope_head_dim_}});
