@@ -130,7 +130,10 @@ class AggregatedFrontend:
         async def models():
             """以 OpenAI models API 格式返回当前可用模型名列表。"""
             names = sorted(
-                {worker.served_model_name for worker in self.watcher.worker_records}
+                {
+                    worker.served_model_name
+                    for worker in self.router.routable_workers()
+                }
             )
             return {
                 "object": "list",
@@ -466,7 +469,7 @@ if __name__ == "__main__":
      -> logger.info()
      -> uvicorn.run(frontend.create_app())
         -> FastAPI lifespan
-           -> 读取 file discovery
+           -> 读取 worker registry
            -> 等待最小 worker 数
            -> 启动 watcher 周期任务
            -> 注册 API 路由

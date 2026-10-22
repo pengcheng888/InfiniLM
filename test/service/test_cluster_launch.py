@@ -27,6 +27,32 @@ EXAMPLE_CONFIG = (
 
 
 class ClusterLaunchConfigTest(unittest.TestCase):
+    def test_python_package_contains_cluster_runtime_artifacts(self):
+        """安装包必须携带 cluster 依赖、入口、文档和启动脚本。"""
+        pyproject = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        self.assertIn('"fastapi>=0.110"', pyproject)
+        self.assertIn('"uvicorn>=0.29"', pyproject)
+        self.assertIn('"infinilm.pd-frontend"', pyproject)
+        self.assertIn('"infinilm.cluster" = ["readme.md"]', pyproject)
+        self.assertIn('"infinilm.cluster.aggregated" = ["*.sh"]', pyproject)
+        self.assertIn('"infinilm.cluster.disaggregated" = ["*.sh"]', pyproject)
+
+        script_paths = [
+            REPO_ROOT / "python/infinilm/cluster/aggregated/run_cluster.sh",
+            REPO_ROOT / "python/infinilm/cluster/aggregated/run_worker.sh",
+            REPO_ROOT
+            / "python/infinilm/cluster/disaggregated/run_pd_discovery_cluster.sh",
+            REPO_ROOT / "python/infinilm/cluster/disaggregated/run_pd_frontend.sh",
+            REPO_ROOT / "python/infinilm/cluster/disaggregated/run_pd_worker.sh",
+        ]
+        for script_path in script_paths:
+            with self.subTest(script=script_path.name):
+                self.assertTrue(script_path.is_file())
+                self.assertTrue(
+                    os.access(script_path, os.X_OK),
+                    f"{script_path} must stay executable",
+                )
+
     def test_example_config_loads_and_builds_three_workers(self):
         """验证三卡环境会展开为 1 个 frontend 和 3 个独立 GPU worker。"""
         config = load_cluster_launch_config(

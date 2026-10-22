@@ -13,6 +13,7 @@ import httpx
 from infinilm.cluster.aggregated.frontend import AggregatedFrontend
 from infinilm.cluster.aggregated.frontend import main as frontend_main
 from infinilm.cluster.aggregated.http_worker_client_factory import (
+    HttpWorkerClient,
     HttpWorkerClientFactory,
 )
 from infinilm.cluster.aggregated.metrics import (
@@ -399,6 +400,9 @@ class RouterCommonTest(unittest.TestCase):
 
             self.assertEqual(router.routable_workers(), [ready])
             self.assertIs(router.select([draining, ready]), ready)
+            # changed event 只按 ID 集合变化且从不 clear，容易让调用方漏掉
+            # metadata/state 更新，因此不应作为 public API 暴露。
+            self.assertFalse(hasattr(watcher, "changed"))
 
 
 class WorkerDiscoveryServiceTest(unittest.TestCase):
@@ -638,6 +642,112 @@ class MonitoringDashboardTest(unittest.TestCase):
 
 
 class HttpRequestPlaneTest(unittest.TestCase):
+    def test_models_only_returns_routable_models(self):
+        """/v1/models 不能把 DRAINING 或 engine 不健康的模型广告为可用。"""
+
+        async def run():
+            with TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                registry = FileWorkerRegistry(root)
+                ready = registry.new_record(
+                    namespace="test",
+                    component="infinilm",
+                    endpoint="generate",
+                    worker_type="aggregated",
+                    model="/models/qwen",
+                    served_model_name="qwen",
+                    host="127.0.0.1",
+                    port=18081,
+                )
+                draining = registry.new_record(
+                    namespace="test",
+                    component="infinilm",
+                    endpoint="generate",
+                    worker_type="aggregated",
+                    model="/models/draining",
+                    served_model_name="draining-model",
+                    host="127.0.0.1",
+                    port=18082,
+                    state="draining",
+                )
+                unhealthy = replace(
+                    registry.new_record(
+                        namespace="test",
+                        component="infinilm",
+                        endpoint="generate",
+                        worker_type="aggregated",
+                        model="/models/unhealthy",
+                        served_model_name="unhealthy-model",
+                        host="127.0.0.1",
+                        port=18083,
+                    ),
+                    engine_healthy=False,
+                )
+
+                frontend = AggregatedFrontend(
+                    FrontendOptions(
+                        namespace="test",
+                        file_kv=root,
+                        router_mode="round-robin",
+                        router_min_initial_workers=1,
+                        http_host="127.0.0.1",
+                        http_port=18000,
+                    )
+                )
+                frontend.watcher = SimpleNamespace(
+                    worker_records=[draining, unhealthy, ready]
+                )
+                frontend.router.watcher = frontend.watcher
+                try:
+                    async with httpx.AsyncClient(
+                        transport=httpx.ASGITransport(app=frontend.create_app()),
+                        base_url="http://frontend",
+                    ) as client:
+                        response = await client.get("/v1/models")
+
+                    self.assertEqual(response.status_code, 200)
+                    self.assertEqual(
+                        [item["id"] for item in response.json()["data"]],
+                        ["qwen"],
+                    )
+                finally:
+                    await frontend.router.aclose()
+                    await frontend.registry.aclose()
+
+        asyncio.run(run())
+
+    def test_http_worker_client_wraps_ipv6_hostname(self):
+        """聚合式 HTTP client 必须生成合法的 IPv6 base URL。"""
+
+        async def run():
+            with TemporaryDirectory() as temporary:
+                registry = FileWorkerRegistry(Path(temporary))
+                record = registry.new_record(
+                    namespace="test",
+                    component="infinilm",
+                    endpoint="generate",
+                    worker_type="aggregated",
+                    model="/models/qwen",
+                    served_model_name="qwen",
+                    host="2001:db8::1",
+                    port=18081,
+                )
+                http_client = httpx.AsyncClient()
+                try:
+                    worker_client = HttpWorkerClient(
+                        record,
+                        http_client=http_client,
+                        request_timeout=2.0,
+                    )
+                    self.assertEqual(
+                        str(worker_client.client.base_url),
+                        "http://[2001:db8::1]:18081/v1/",
+                    )
+                finally:
+                    await http_client.aclose()
+
+        asyncio.run(run())
+
     def test_frontend_non_stream_uses_http_worker(self):
         def worker_transport(request: httpx.Request) -> httpx.Response:
             payload = json.loads(request.content)

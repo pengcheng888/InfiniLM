@@ -19,6 +19,8 @@ python/infinilm/lib/*.so
 !python/infinilm/cluster/run_pd_discovery_cluster.sh
 !python/infinilm/cluster/run_pd_frontend.sh
 !python/infinilm/cluster/run_pd_worker.sh
+!python/infinilm/cluster/aggregated/*.sh
+!python/infinilm/cluster/disaggregated/*.sh
 model_weight/
 
 # Python

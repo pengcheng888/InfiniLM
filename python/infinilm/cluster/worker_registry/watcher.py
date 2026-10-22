@@ -27,16 +27,11 @@ class WorkerRegistryWatcher:
         )
         self._task: asyncio.Task[None] | None = None
         self._worker_records: list[WorkerRecord] = []
-        self._changed = asyncio.Event()
         self._stop = asyncio.Event()
 
     @property
     def worker_records(self) -> list[WorkerRecord]:
         return list(self._worker_records)
-
-    @property
-    def changed(self) -> asyncio.Event:
-        return self._changed
 
     async def refresh(self, namespace: str) -> list[WorkerRecord]:
         records = await self.registry.snapshot(
@@ -46,7 +41,6 @@ class WorkerRegistryWatcher:
         new_ids = {record.instance_id for record in records}
         self._worker_records = records
         if old_ids != new_ids:
-            self._changed.set()
             logger.info(
                 "Discovery worker records changed: added=%s removed=%s current=%d",
                 sorted(new_ids - old_ids),

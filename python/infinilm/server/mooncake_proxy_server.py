@@ -293,13 +293,23 @@ async def forward_request(client_info: dict, api: str, req_data: dict, headers: 
 async def send_request(
     client_info: dict, dp_rank: int, api: str, req_data: dict, request_id: str
 ):
+    """向 prefill worker 发送内部预填充请求。
+
+    PD frontend 会把原请求复制一份并改成“只做 prefill、只生成一个 token”：
+    prefill worker 计算并发布 KV，decode worker 随后通过 transfer_id 拉取。
+    该函数只消费 prefill 响应，不把响应内容返回给客户端。
+    """
+    # PD frontend 和 decode 可能并发读取原 payload；复制后修改不会影响 decode 侧。
     req_data = req_data.copy()
+    # do_remote_prefill=False 表示本请求在当前 worker 本地执行 prompt prefill；
+    # do_remote_decode=True 表示生成的 KV 会被远端 decode 消费。
     req_data["kv_transfer_params"] = {
         "do_remote_prefill": False,
         "do_remote_decode": True,
         "transfer_id": f"xfer-{request_id}",
     }
     req_data["stream"] = False
+    # PD 协议只需要 prefill 完成一个 token，用于触发 KV 发布。
     req_data["max_tokens"] = 1
 
     if "max_completion_tokens" in req_data:
@@ -315,9 +325,17 @@ async def send_request(
         # Uncomment in high-concurrency or long-context scenarios (minor performance overhead):
         "Connection": "close",
     }
-    # Consume prefill response via forward_request for unified error handling
-    async for _ in forward_request(client_info, api, req_data, headers):
-        pass
+    # 显式持有 forward_request() generator。若不持有引用，外层 prefill
+    # task 被取消时 Starlette/httpx 不一定关闭内层 async generator，
+    # 对应 HTTP response 连接可能继续占用 worker。
+    response_stream = forward_request(client_info, api, req_data, headers)
+    try:
+        # 消费完整响应，确保 prefill worker 已经完成 KV 发布流程。
+        async for _ in response_stream:
+            pass
+    finally:
+        # 正常完成、异常和任务取消都会关闭 response，释放底层连接。
+        await response_stream.aclose()
 
 
 async def stream_response(
@@ -328,6 +346,11 @@ async def stream_response(
     req_data: dict,
     request_id: str,
 ):
+    """向 decode worker 转发请求，并透传增量生成结果。
+
+    decode 请求会携带 prefill bootstrap 地址和 engine ID；Mooncake
+    connector 先查询远端 KV 传输信息，再拉取 prefill 已发布的 KV。
+    """
     headers = {
         "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
         "X-Request-Id": request_id,
@@ -344,9 +367,16 @@ async def stream_response(
         "transfer_id": f"xfer-{request_id}",
     }
 
-    # Delegate to forward_request for unified error handling
-    async for chunk in forward_request(decode_client_info, api, req_data, headers):
-        yield chunk
+    # 显式持有并关闭转发 generator：客户端断开时，外层 P/D stream 被
+    # 取消，这里同步关闭 decode HTTP response，避免连接和生成任务泄漏。
+    response_stream = forward_request(decode_client_info, api, req_data, headers)
+    try:
+        # 保持原始 bytes 透传，不在 proxy 层重新拼装或解析 SSE。
+        async for chunk in response_stream:
+            yield chunk
+    finally:
+        # 无论正常结束、worker 异常还是客户端取消，都释放 decode 连接。
+        await response_stream.aclose()
 
 
 async def _handle_completions(api: str, request: Request):

@@ -62,9 +62,20 @@ class DisaggregatedRouter:
         cursor = self.cursors[role]
         return records[cursor.increment() % len(records)]
 
-    def begin_request(self, record: WorkerRecord) -> None:
-        """记录角色请求开始，并增加对应 worker 的 inflight。"""
-        self.worker_inflight.begin_request(record.instance_id)
+    def begin_request(
+        self,
+        record: WorkerRecord,
+        *,
+        count_inflight: bool = True,
+    ) -> None:
+        """记录角色请求开始，并默认增加对应 worker 的 inflight。
+
+        PD frontend 会在 manager.acquire_workers() 中原子登记 P/D 两个
+        worker 的 inflight，因此请求任务内再调用本方法时传
+        ``count_inflight=False``，只推进角色请求总量，避免重复计数。
+        """
+        if count_inflight:
+            self.worker_inflight.begin_request(record.instance_id)
         self.role_request_totals[record.worker_type.value] += 1
 
     def finish_request(self, instance_id: str) -> None:

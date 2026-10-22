@@ -18,6 +18,7 @@ from infinilm.cluster.disaggregated.frontend import (
     parse_disaggregated_frontend_args,
 )
 from infinilm.cluster.environment import (
+    bootstrap_timeout_seconds,
     connect_timeout,
     drain_grace_seconds,
     health_interval_seconds,
@@ -58,6 +59,27 @@ class ClusterTimeoutEnvironmentTest(unittest.TestCase):
         for raw_value in ("invalid", "0", "-1", "nan", "inf"):
             with self.subTest(raw_value=raw_value), self.assertRaises(ValueError):
                 request_timeout({"INFINILM_CLUSTER_REQUEST_TIMEOUT": raw_value})
+
+    def test_bootstrap_timeout_reads_environment(self):
+        self.assertEqual(bootstrap_timeout_seconds({}), 3.0)
+        self.assertEqual(
+            bootstrap_timeout_seconds(
+                {"INFINILM_CLUSTER_BOOTSTRAP_TIMEOUT_SECONDS": ""}
+            ),
+            3.0,
+        )
+        self.assertEqual(
+            bootstrap_timeout_seconds(
+                {"INFINILM_CLUSTER_BOOTSTRAP_TIMEOUT_SECONDS": "0.5"}
+            ),
+            0.5,
+        )
+
+        for raw_value in ("invalid", "0", "-1", "nan", "inf"):
+            with self.subTest(raw_value=raw_value), self.assertRaises(ValueError):
+                bootstrap_timeout_seconds(
+                    {"INFINILM_CLUSTER_BOOTSTRAP_TIMEOUT_SECONDS": raw_value}
+                )
 
     def test_health_interval_reads_environment(self):
         self.assertEqual(health_interval_seconds({}), 1.0)
@@ -205,6 +227,7 @@ class ClusterTimeoutEnvironmentTest(unittest.TestCase):
             environment = {
                 "INFINILM_CLUSTER_CONNECT_TIMEOUT": "4",
                 "INFINILM_CLUSTER_REQUEST_TIMEOUT": "120",
+                "INFINILM_CLUSTER_BOOTSTRAP_TIMEOUT_SECONDS": "0.5",
                 "INFINILM_CLUSTER_HEALTH_INTERVAL_SECONDS": "0.1",
             }
 
@@ -213,6 +236,7 @@ class ClusterTimeoutEnvironmentTest(unittest.TestCase):
 
             self.assertEqual(frontend._connect_timeout, 4.0)
             self.assertEqual(frontend._request_timeout, 120.0)
+            self.assertEqual(frontend._bootstrap_timeout, 0.5)
             self.assertEqual(frontend._discovery_refresh_interval_seconds, 0.1)
             asyncio.run(frontend.registry.aclose())
 

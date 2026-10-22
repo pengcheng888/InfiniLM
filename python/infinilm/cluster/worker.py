@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import os
@@ -129,13 +130,68 @@ class ClusterInferenceServer(InferenceServer):
             return
         await self.worker_discovery.start_draining()
 
+    @staticmethod
+    async def _client_disconnected(http_request) -> bool:
+        """读取 HTTP 客户端是否断开，兼容异步和同步两种测试 fake。
+
+        Starlette Request.is_disconnected() 返回 coroutine；部分单元测试
+        注入的是同步 callable。两种形态都统一转换成 bool，避免包装层
+        依赖具体测试对象类型。
+        """
+        is_disconnected = getattr(http_request, "is_disconnected", None)
+        if not callable(is_disconnected):
+            # 没有 disconnect API 时视为仍连接，交由正常超时/完成路径处理。
+            return False
+        result = is_disconnected()
+        if inspect.isawaitable(result):
+            # 异步实现必须 await 后才能得到真实连接状态。
+            result = await result
+        return bool(result)
+
+    async def _wait_for_request(
+        self,
+        request_task: asyncio.Task,
+        http_request,
+    ):
+        """等待内部 InferenceServer 任务完成，并把断开转换为任务取消。
+
+        ``request_task`` 包住真正的 ``_chat()`` 或 ``__anext__()``。
+        使用任务而不是直接 await，是为了每 100ms 有机会检查客户端是否
+        断开；一旦断开，就取消内部任务，让 InferenceServer 的 finally
+        调用 add_aborted_req() 终止 engine 请求。
+        """
+        while not request_task.done():
+            # 0.1 秒是断开检测频率，不是请求超时；任务可以持续运行很久。
+            done, _pending = await asyncio.wait(
+                {request_task},
+                timeout=0.1,
+            )
+            if done:
+                break
+            if await self._client_disconnected(http_request):
+                # 客户端已经离开，取消内部推理/流式读取任务。
+                request_task.cancel()
+                try:
+                    await request_task
+                except asyncio.CancelledError:
+                    pass
+                # 对外统一抛 CancelledError，让 traffic metrics 和上层
+                # async generator 进入各自的取消清理路径。
+                raise asyncio.CancelledError
+        # 任务完成或抛错都在这里恢复结果/异常。
+        return request_task.result()
+
     async def _chat(self, request_id: str, data: dict, http_request):
-        """Count non-streaming traffic before delegating to InferenceServer."""
+        """包装非流式 InferenceServer 请求，统计流量并传播客户端断开。"""
         self.worker_traffic.begin(streaming=False)
         canceled = False
         failed = False
         try:
-            response = await super()._chat(request_id, data, http_request)
+            # 内部请求放入独立 task，由 _wait_for_request() 周期检查断开。
+            response = await self._wait_for_request(
+                asyncio.create_task(super()._chat(request_id, data, http_request)),
+                http_request,
+            )
             failed = int(getattr(response, "status_code", 200)) >= 400
             if isinstance(response, dict):
                 self.worker_traffic.record_cache(response.get("cache"))
@@ -147,15 +203,33 @@ class ClusterInferenceServer(InferenceServer):
             failed = True
             raise
         finally:
+            # begin/finish 一一对应，保证 active_requests 不会因断开泄漏。
             self.worker_traffic.finish(canceled=canceled, failed=failed)
 
     async def _stream_chat(self, request_id: str, data: dict, http_request):
-        """Count streaming traffic for the full response-generator lifetime."""
+        """包装流式 InferenceServer generator，统计流量并传播取消。"""
         self.worker_traffic.begin(streaming=True)
         canceled = False
         failed = False
         try:
-            async for chunk in super()._stream_chat(request_id, data, http_request):
+            # internal_stream 是原有 InferenceServer._stream_chat()；
+            # 这里逐 chunk 包装，才能在等待下一个 token 时检查断开。
+            internal_stream = super()._stream_chat(request_id, data, http_request)
+            while True:
+                try:
+                    # 每个 chunk 都通过独立 task 等待，等待期间可检测断开。
+                    chunk = await self._wait_for_request(
+                        asyncio.create_task(internal_stream.__anext__()),
+                        http_request,
+                    )
+                except StopAsyncIteration:
+                    # 正常结束，进入 traffic finish 统计。
+                    break
+                except asyncio.CancelledError:
+                    # 客户端断开时显式关闭内层 generator，触发原有
+                    # engine abort 和资源释放逻辑。
+                    await internal_stream.aclose()
+                    raise
                 if "finish_reason" in chunk and (
                     '"error"' in chunk or '"timeout"' in chunk
                 ):
@@ -177,13 +251,14 @@ class ClusterInferenceServer(InferenceServer):
             failed = True
             raise
         finally:
+            # 流式请求的 active 状态必须覆盖整个响应 generator 生命周期。
             self.worker_traffic.finish(canceled=canceled, failed=failed)
 
     def _create_discovery_service(
         self,
         engine: object,
     ) -> WorkerDiscoveryService:
-        """在 engine ready 后构造 worker 的 file discovery 服务。"""
+        """在 engine ready 后构造 worker 的 registry discovery 服务。"""
         served_model_name = (
             self.cluster_options.served_model_name
             or os.path.basename(os.path.normpath(self.model_path))

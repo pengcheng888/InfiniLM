@@ -53,6 +53,33 @@ PD KV plane:
 
 worker registry 只保存元数据，不承载推理请求和 token 流。
 
+### PD HTTP transport
+
+`disaggregated/pd_http_transport.py` 是 discovery-aware PD frontend 专用的
+HTTP 转发层，负责组装 prefill/decode 的 `kv_transfer_params`、添加内部请求
+header、透传响应 bytes，并在请求取消时释放 httpx response。该模块不依赖
+standalone `mooncake_proxy_server.py`，旧代理服务可以独立演进。
+
+### PD client 生命周期
+
+PD frontend 在请求路径外维护 worker HTTP client：
+
+```text
+worker registry
+  -> WorkerRegistryWatcher 周期 snapshot
+  -> PdClientReconciler 过滤 ready 且 engine healthy 的 P/D record
+  -> WorkerClientPoolManager 调度每个 worker 的 bootstrap task
+  -> prefill /query 获取 engine ID
+  -> 初始化成功后进入 routable pool
+  -> /health、/v1/models 和 chat 请求只读取 routable pool
+```
+
+`WorkerClientPoolManager` 的状态锁只保护内存中的 desired/pending/pool
+状态；`httpx.AsyncClient` 创建、prefill bootstrap 查询和连接关闭都在锁外
+执行。同一个 worker 的并发初始化通过 pending task 去重，不同 worker 可以
+并发初始化。worker 从 discovery 消失时，pending task 会被取消；已在服务
+存量请求的 client 会先标记为不可路由，待 inflight 归零后关闭。
+
 ## 2. 配置
 
 ### 公共配置
@@ -71,6 +98,7 @@ worker registry 只保存元数据，不承载推理请求和 token 流。
 | `--etcd-timeout` | `3` 秒 | etcd 操作超时 |
 | `INFINILM_CLUSTER_CONNECT_TIMEOUT` | `3` 秒 | frontend 到 worker 的建连、写请求和连接池等待超时 |
 | `INFINILM_CLUSTER_REQUEST_TIMEOUT` | `1000` 秒 | frontend 到 worker 的读超时；聚合式流式请求也使用它作为整体 deadline |
+| `INFINILM_CLUSTER_BOOTSTRAP_TIMEOUT_SECONDS` | `3` 秒 | PD prefill bootstrap `/query` 的专用总超时；失败 worker 按 `max(3 * health interval, bootstrap timeout)` 退避重试 |
 | `INFINILM_CLUSTER_HEALTH_INTERVAL_SECONDS` | `1` 秒 | frontend watcher 的 registry snapshot 轮询间隔；实际运行下限为 `0.1` 秒 |
 | `INFINILM_CLUSTER_REGISTRY_TTL_SECONDS` | `10` 秒 | worker 注册租约时长；frontend 和 worker 应使用相同配置 |
 | `INFINILM_CLUSTER_HEARTBEAT_INTERVAL_SECONDS` | `2` 秒 | worker discovery 心跳间隔；建议小于 registry TTL 的二分之一 |
@@ -80,6 +108,11 @@ etcd 客户端是可选依赖：
 ```bash
 python -m pip install -e '.[etcd]'
 ```
+
+Python 包安装后会提供 `infinilm.frontend`、`infinilm.pd-frontend`、
+`infinilm.infinilm` 和 `infinilm.cluster-launch` 入口。cluster 文档和
+`aggregated/`、`disaggregated/` 下的启动脚本也会随 package data 一起打包；
+源码部署仍可直接运行这些脚本。
 
 ### 聚合式 frontend
 
@@ -103,7 +136,7 @@ python -m pip install -e '.[etcd]'
 | `--min-decode-workers` | `1` | 模型 ready 所需最小 decode 数 |
 | `--http-host` / `--http-port` | `127.0.0.1` / `18520` | PD OpenAI API 监听地址 |
 
-PD frontend 立即监听 HTTP 端口。没有可用 P/D 模型时，进程保持 `healthy`，但 `ready=false`，推理请求返回 503。
+PD frontend 立即监听 HTTP 端口，client bootstrap 由后台 reconciler 完成。没有可用 P/D 模型时，进程保持 `healthy`，但 `ready=false`，推理请求返回 503。
 
 ### Worker
 
@@ -155,7 +188,10 @@ PD worker 必须提供 Mooncake KV connector 配置；当前 PD 部署要求 `tp
 
 ### file backend
 
-file backend 面向单机或共享同一文件系统的部署。每个 worker 一个 JSON 注册文件，写入时先创建临时文件，再原子替换为正式文件，frontend 不会读到半写记录。
+file backend 仅适合同一台机器上的 frontend 和 worker。每个 worker 一个
+JSON 注册文件，写入时先创建临时文件，再原子替换为正式文件，frontend 不会
+读到半写记录。跨节点部署必须使用 etcd：共享文件系统不能保证各机器时钟、
+本机可达性和文件锁语义满足 registry 租约要求。
 
 file backend 的时间字段是存活判断依据：
 
@@ -258,7 +294,6 @@ PD frontend：
 |---|---|---|
 | GET | `/health` | frontend 存活状态、P/D 数量和模型 ready 状态 |
 | GET | `/v1/models` | 同时存在 P/D 的模型列表 |
-| POST | `/v1/completions` | OpenAI-compatible completions API |
 | POST | `/v1/chat/completions` | OpenAI-compatible chat API |
 | POST | `/chat/completions` | 兼容路径 |
 
@@ -356,14 +391,14 @@ worker 导出 cache snapshot 和 append-only event。frontend 读取 snapshot �
 
 ```text
 PD frontend
-  -> 选择 prefill worker
-  -> 发送 do_remote_decode=true、max_tokens=1 的 prefill 请求
-  -> prefill worker 计算 prompt 并发布 KV
-  -> frontend 选择 decode worker
-  -> 发送 do_remote_prefill=true
-  -> decode worker 查询 prefill bootstrap
-  -> Mooncake 拉取 KV
-  -> decode worker 增量生成
+  -> 从 routable pool 原子选择 prefill 和 decode client
+  -> decode 请求先启动，携带 do_remote_prefill=true 并查询 bootstrap
+  -> prefill 请求发送 do_remote_decode=true、max_tokens=1
+  -> decode 的首个 chunk 先被 frontend 缓存
+  -> prefill 成功后才向客户端输出 decode chunk
+  -> 首 token 前 prefill/decode 失败则取消对端并返回真实 HTTP 错误状态
+  -> 流式响应已开始后失败则取消对端并追加 SSE 错误事件
+  -> 客户端断开则同时取消 prefill 和 decode
   -> PD frontend 返回 JSON 或 SSE
 ```
 
@@ -627,7 +662,7 @@ curl -N http://127.0.0.1:18000/v1/chat/completions \
 
 ## 10. 安全与边界
 
-- file backend 依赖同一个本机或共享文件系统；etcd backend 用于跨节点 discovery。
+- file backend 仅适合同机部署；跨节点 discovery 必须使用 etcd backend。
 - worker、etcd 和 Mooncake bootstrap 不应在未加访问控制的情况下暴露到公网。
 - prefill OpenAI surface 需要 internal header，防止绕过 PD frontend 直接调用 producer。
 - readiness 基于 registry 状态和租约，不主动探测每个 worker 的 `/health` endpoint。
@@ -645,11 +680,16 @@ cd /workspace_codex/InfiniLM
 PYTHONPATH=python python -m pytest -q \
   test/service/test_cluster.py \
   test/service/test_cluster_environment.py \
+  test/service/test_cluster_launch.py \
   test/service/test_routing_round_robin.py \
   test/service/test_routing_least_loaded.py \
   test/service/test_routing_session_affinity.py \
   test/service/test_routing_kv_aware.py \
   test/service/test_pd_cluster.py \
+  test/service/test_pd_client_reconciler.py \
+  test/service/test_pd_http_transport.py \
+  test/service/test_pd_router.py \
+  test/service/test_pd_worker_client_pool.py \
   test/service/test_etcd_registry.py
 ```
 
@@ -658,9 +698,11 @@ PYTHONPATH=python python -m pytest -q \
 - aggregated worker 注册、心跳、租约过期和 DRAINING；
 - round-robin、least-loaded、session-affinity 和 kv-aware；
 - HTTP worker 非流式与流式转发；
+- PD 后台 client reconcile、bootstrap 专用 timeout、并发初始化和原子 acquire；
 - 首 token 前重试和 worker 5xx 切换；
 - prefix hash、cache index 和实际命中指标；
-- PD 角色发现、bootstrap metadata、能力过滤和 PD monitoring；
+- PD 角色发现、bootstrap metadata、能力过滤、真实本地 HTTP P/D 链路和 PD monitoring；
 - etcd lease、注册、心跳、注销、异常记录过滤和过期删除。
 
-单元测试使用 mock transport，不加载模型、不占用 GPU。真实多副本和 PD Mooncake 链路需要另行集成验证。
+多数单元测试使用 mock transport，不加载模型、不占用 GPU。`test_pd_client_reconciler.py`
+中的集成测试会真实占用本机随机端口启动 bootstrap、prefill、decode 和 frontend，但不加载模型、不占用 GPU；真实多副本和 Mooncake KV 链路仍需要另行验证。

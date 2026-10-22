@@ -16,6 +16,8 @@ CONNECT_TIMEOUT_ENV = "INFINILM_CLUSTER_CONNECT_TIMEOUT"
 DEFAULT_CONNECT_TIMEOUT = 3.0
 REQUEST_TIMEOUT_ENV = "INFINILM_CLUSTER_REQUEST_TIMEOUT"
 DEFAULT_REQUEST_TIMEOUT = 1000.0
+BOOTSTRAP_TIMEOUT_ENV = "INFINILM_CLUSTER_BOOTSTRAP_TIMEOUT_SECONDS"
+DEFAULT_BOOTSTRAP_TIMEOUT = 3.0
 HEALTH_INTERVAL_SECONDS_ENV = "INFINILM_CLUSTER_HEALTH_INTERVAL_SECONDS"
 DEFAULT_HEALTH_INTERVAL_SECONDS = 1.0
 REGISTRY_TTL_SECONDS_ENV = "INFINILM_CLUSTER_REGISTRY_TTL_SECONDS"
@@ -141,6 +143,20 @@ def request_timeout(environ: Mapping[str, str] | None = None) -> float:
     return _positive_timeout(
         REQUEST_TIMEOUT_ENV,
         DEFAULT_REQUEST_TIMEOUT,
+        environ,
+    )
+
+
+def bootstrap_timeout_seconds(environ: Mapping[str, str] | None = None) -> float:
+    """读取 PD prefill bootstrap 查询的专用总超时；未配置时使用 3 秒。
+
+    bootstrap 只发生在后台 client 初始化阶段，不能复用推理请求的
+    ``REQUEST_TIMEOUT``；否则一个尚未就绪的 prefill 可能让 health 或新请求
+    等待接近 1000 秒。
+    """
+    return _positive_timeout(
+        BOOTSTRAP_TIMEOUT_ENV,
+        DEFAULT_BOOTSTRAP_TIMEOUT,
         environ,
     )
 

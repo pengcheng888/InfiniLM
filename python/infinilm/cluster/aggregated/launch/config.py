@@ -14,7 +14,7 @@ MODEL_PATH_ENV_VARS = ("INFINILM_MODEL_PATH", "MODEL_PATH", "MODEL")
 
 @dataclass(frozen=True)
 class DiscoveryConfig:
-    """服务发现配置；file 用于单机，etcd 用于共享注册中心。"""
+    """服务发现配置；file 仅用于同机部署，etcd 用于跨节点注册中心。"""
 
     backend: str = "file"
     file_kv: Path | None = None
