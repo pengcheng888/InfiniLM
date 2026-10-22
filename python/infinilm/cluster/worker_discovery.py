@@ -9,7 +9,7 @@ from dataclasses import replace
 from infinilm.llm import AsyncLLMEngine
 
 from .cache_index import WorkerCacheIndexExporter
-from .registry import ServiceRegistry, WorkerRecord
+from .worker_registry import WorkerRecord, WorkerRegistry
 from .worker_traffic import WorkerTrafficMetrics
 
 logger = logging.getLogger(__name__)
@@ -22,7 +22,7 @@ class WorkerDiscoveryService:
         self,
         *,
         engine: AsyncLLMEngine,
-        registry: ServiceRegistry,
+        registry: WorkerRegistry,
         record: WorkerRecord,
         heartbeat_interval: float | None = None,
         traffic_metrics: WorkerTrafficMetrics | None = None,
@@ -51,7 +51,7 @@ class WorkerDiscoveryService:
         )
 
         logger.info(
-            "Registered HTTP request-plane worker at http://%s:%s/v1",
+            "Registered HTTP worker at http://%s:%s/v1",
             self.record.host,
             self.record.port,
         )

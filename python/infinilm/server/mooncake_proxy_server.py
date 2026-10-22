@@ -34,7 +34,7 @@ async def wait_for_cluster_ready(prefill_clients, decode_clients, ready_event):
     for prefill_client in prefill_clients:
         while True:
             try:
-                response = await prefill_client["client"].get("/health")
+                response = await prefill_client["http_client"].get("/health")
                 response.raise_for_status()
             except Exception:
                 await asyncio.sleep(1)  # Wait before retrying
@@ -44,7 +44,7 @@ async def wait_for_cluster_ready(prefill_clients, decode_clients, ready_event):
                 )
                 continue
 
-            response = await prefill_client["client"].get(
+            response = await prefill_client["http_client"].get(
                 prefill_client["bootstrap_addr"] + "/query"
             )
             response.raise_for_status()
@@ -60,7 +60,7 @@ async def wait_for_cluster_ready(prefill_clients, decode_clients, ready_event):
     for decode_client in decode_clients:
         while True:
             try:
-                response = await decode_client["client"].get("/health")
+                response = await decode_client["http_client"].get("/health")
                 response.raise_for_status()
                 logger.warning("successfully handshake with decode server!")
                 break
@@ -95,14 +95,14 @@ async def lifespan(app: FastAPI):
         hostname = maybe_wrap_ipv6_address(parsed_url.hostname)
         app.state.prefill_clients.append(
             {
-                "client": httpx.AsyncClient(
+                "http_client": httpx.AsyncClient(
                     timeout=None,
                     base_url=prefill_url,
                     limits=httpx.Limits(
                         max_connections=None, max_keepalive_connections=None
                     ),
                 ),
-                "url": prefill_url,
+                "http_base_url": prefill_url,
                 "bootstrap_addr": make_http_address(hostname, bootstrap_port or 9600),
                 "dp_engine_id": {},
             }
@@ -115,13 +115,14 @@ async def lifespan(app: FastAPI):
         hostname = maybe_wrap_ipv6_address(parsed_url.hostname)
         app.state.decode_clients.append(
             {
-                "client": httpx.AsyncClient(
+                "http_client": httpx.AsyncClient(
                     timeout=None,
                     base_url=decode_url,
                     limits=httpx.Limits(
                         max_connections=None, max_keepalive_connections=None
                     ),
                 ),
+                "http_base_url": decode_url,
             }
         )
 
@@ -136,10 +137,10 @@ async def lifespan(app: FastAPI):
     yield
 
     for client_info in app.state.prefill_clients:
-        await client_info["client"].aclose()
+        await client_info["http_client"].aclose()
 
     for client_info in app.state.decode_clients:
-        await client_info["client"].aclose()
+        await client_info["http_client"].aclose()
 
 
 app = FastAPI(lifespan=lifespan)
@@ -235,7 +236,7 @@ async def forward_request(client_info: dict, api: str, req_data: dict, headers: 
     Modeled after disagg_proxy_demo.forward_request, adapted for httpx.
     """
     try:
-        async with client_info["client"].stream(
+        async with client_info["http_client"].stream(
             "POST", api, json=req_data, headers=headers
         ) as response:
             if 200 <= response.status_code < 300 or 400 <= response.status_code < 500:
@@ -249,7 +250,7 @@ async def forward_request(client_info: dict, api: str, req_data: dict, headers: 
                     error_body = error_bytes.decode(errors="replace")
                 logger.error(
                     "Backend %s%s returned status %d: %s",
-                    client_info.get("url", ""),
+                    client_info.get("http_base_url", ""),
                     api,
                     response.status_code,
                     error_body,
@@ -263,7 +264,7 @@ async def forward_request(client_info: dict, api: str, req_data: dict, headers: 
     except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError) as e:
         logger.error(
             "Connection error to %s%s: %s",
-            client_info.get("url", ""),
+            client_info.get("http_base_url", ""),
             api,
             e,
         )
@@ -273,7 +274,7 @@ async def forward_request(client_info: dict, api: str, req_data: dict, headers: 
     except httpx.HTTPStatusError as e:
         logger.error(
             "HTTP error from %s%s: %s",
-            client_info.get("url", ""),
+            client_info.get("http_base_url", ""),
             api,
             e,
         )
@@ -281,7 +282,7 @@ async def forward_request(client_info: dict, api: str, req_data: dict, headers: 
     except Exception as e:
         logger.error(
             "Unexpected error forwarding to %s%s: %s",
-            client_info.get("url", ""),
+            client_info.get("http_base_url", ""),
             api,
             e,
             exc_info=True,

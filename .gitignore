@@ -10,6 +10,11 @@ python/infinilm/lib/*.so
 .vscode/
 
 *.sh
+
+!python/infinilm/cluster/run_cluster.sh
+!python/infinilm/cluster/run_req.sh
+!python/infinilm/cluster/run_worker.sh
+
 !python/infinilm/cluster/run_pd_cluster.sh
 !python/infinilm/cluster/run_pd_discovery_cluster.sh
 !python/infinilm/cluster/run_pd_frontend.sh

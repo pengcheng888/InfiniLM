@@ -1,7 +1,7 @@
 # TCP request plane 设计存档
 
-本文保存 `--request-plane=tcp` 版本的实现思路。当前代码已收敛为
-`--request-plane=http`，TCP 请求面不再保留在运行时代码中。
+本文保存早期 TCP request plane 版本的实现思路。当前代码固定使用 HTTP
+请求面，也不再提供 `--request-plane` 参数。
 
 ## 1. 目标架构
 
@@ -21,7 +21,7 @@ data plane: raw TCP JSON lines
 ```text
 client
   -> frontend /v1/chat/completions
-  -> ClusterFrontend
+  -> AggregatedFrontend
   -> RoundRobinRouter
   -> TcpWorkerClient
   -> raw TCP JSON-lines

@@ -43,30 +43,36 @@ def prefix_hashes(token_ids: list[int], block_size: int) -> list[str]:
     result: list[str] = []
     for start in range(0, len(token_ids), block_size):
         block = token_ids[start : start + block_size]
+        # 只把完整 block 纳入前缀索引，末尾不足一个 block 的 token 不参与。
         if len(block) != block_size:
             break
+        # 每个块的哈希都包含父前缀哈希，形成从开头到当前块的链式前缀。
         parent = hash_block_tokens(block, parent)
         result.append(parent.hex())
     return result
 
 
 class PrefixHashCalculator:
-    """Caches model processors and hashes text chat prompts."""
+    """缓存多个模型的 processor，并计算文本 chat prompt 的前缀哈希。"""
 
     def __init__(self) -> None:
+        """初始化 processor 缓存和懒加载锁。"""
         self._processors: dict[str, Any] = {}
         self._lock = threading.RLock()
 
-    def _processor(self, model_path: str):
+    def _get_processor(self, model_path: str):
+        """获取指定模型 processor；首次访问时加载并写入缓存。"""
         with self._lock:
             processor = self._processors.get(model_path)
             if processor is None:
+                # processor 加载可能较慢；锁避免并发请求重复加载同一模型。
                 processor = AutoInfinilmProcessor.from_pretrained(model_path)
                 self._processors[model_path] = processor
             return processor
 
     @staticmethod
     def _input_ids(processed: Any) -> list[int]:
+        """从 processor 输出中提取一维 token id 列表。"""
         if isinstance(processed, Mapping):
             value = processed.get("input_ids")
         else:
@@ -77,6 +83,7 @@ class PrefixHashCalculator:
 
         flatten = getattr(value, "flatten", None)
         if callable(flatten):
+            # 兼容 torch/tensor-like 输出，先展平再转成 Python list。
             value = flatten()
         tolist = getattr(value, "tolist", None)
         if callable(tolist):
@@ -84,6 +91,7 @@ class PrefixHashCalculator:
         if not isinstance(value, list):
             return []
         if value and isinstance(value[0], list):
+            # processor 可能返回 batch 维度；prefix 路由只使用当前单条请求。
             value = value[0]
         return [int(token_id) for token_id in value]
 
@@ -94,31 +102,28 @@ class PrefixHashCalculator:
         model_path: str,
         block_size: int,
     ) -> dict[str, Any] | None:
-        """Hash a text-only chat request; return None when unsupported."""
+        """计算文本 chat 请求的 KV 前缀信息；不支持时返回 None。"""
         messages = payload.get("messages")
         if not isinstance(messages, list):
             return None
 
         try:
+            # KV-aware 当前只处理文本 prompt，多模态请求交由 fallback 路由。
             multimodal = resolve_multimodal_inputs(messages)
             if any(multimodal[name] for name in ("images", "videos", "audios")):
                 return None
 
-            processor = self._processor(model_path)
+            processor = self._get_processor(model_path)
+            # 先渲染 chat template，再交给 processor tokenize，保证与 worker 侧一致。
             prompt = processor.apply_chat_template(
                 conversation=messages,
-                add_generation_prompt=bool(
-                    payload.get("add_generation_prompt", True)
-                ),
+                add_generation_prompt=bool(payload.get("add_generation_prompt", True)),
                 tokenize=False,
                 **(payload.get("chat_template_kwargs") or {}),
             )
-            token_ids = self._input_ids(
-                processor(prompt, return_tensors="pt")
-            )
+            token_ids = self._input_ids(processor(prompt, return_tensors="pt"))
         except Exception:
-            # Unsupported processor/template combinations still route through
-            # the existing least-loaded or affinity policies.
+            # 前缀哈希只是路由提示；失败时不能影响推理请求继续路由。
             return None
 
         return {

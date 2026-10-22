@@ -6,8 +6,8 @@ from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
-from infinilm.cluster.launch.config import load_cluster_launch_config
-from infinilm.cluster.launch.launcher import (
+from infinilm.cluster.aggregated.launch.config import load_cluster_launch_config
+from infinilm.cluster.aggregated.launch.launcher import (
     build_launch_commands,
     parse_cuda_visible_devices,
 )
@@ -19,6 +19,7 @@ EXAMPLE_CONFIG = (
     / "python"
     / "infinilm"
     / "cluster"
+    / "aggregated"
     / "launch"
     / "configs"
     / "Qwen3-0.6B.yaml"
@@ -144,7 +145,7 @@ class ClusterLaunchConfigTest(unittest.TestCase):
             [
                 sys.executable,
                 "-m",
-                "infinilm.cluster.launch",
+                "infinilm.cluster.aggregated.launch",
                 "--config",
                 str(EXAMPLE_CONFIG),
                 "--dry-run",
@@ -155,7 +156,7 @@ class ClusterLaunchConfigTest(unittest.TestCase):
             text=True,
         )
 
-        self.assertIn("infinilm.cluster.frontend", result.stdout)
+        self.assertIn("infinilm.cluster.aggregated.frontend", result.stdout)
         self.assertEqual(result.stdout.count("infinilm.cluster.worker"), 3)
 
 

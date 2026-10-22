@@ -1,0 +1,181 @@
+"""Cluster routing configuration read from process environment variables."""
+
+from __future__ import annotations
+
+import os
+from collections.abc import Mapping
+from math import isfinite
+
+AFFINITY_TTL_SECONDS_ENV = "INFINILM_CLUSTER_AFFINITY_TTL_SECONDS"
+DEFAULT_AFFINITY_TTL_SECONDS = 300.0
+AFFINITY_CAPACITY_ENV = "INFINILM_CLUSTER_AFFINITY_CAPACITY"
+DEFAULT_AFFINITY_CAPACITY = 4096
+KV_ROUTER_MIN_TOKENS_ENV = "INFINILM_CLUSTER_KV_ROUTER_MIN_TOKENS"
+DEFAULT_KV_ROUTER_MIN_TOKENS = 1
+CONNECT_TIMEOUT_ENV = "INFINILM_CLUSTER_CONNECT_TIMEOUT"
+DEFAULT_CONNECT_TIMEOUT = 3.0
+REQUEST_TIMEOUT_ENV = "INFINILM_CLUSTER_REQUEST_TIMEOUT"
+DEFAULT_REQUEST_TIMEOUT = 1000.0
+HEALTH_INTERVAL_SECONDS_ENV = "INFINILM_CLUSTER_HEALTH_INTERVAL_SECONDS"
+DEFAULT_HEALTH_INTERVAL_SECONDS = 1.0
+REGISTRY_TTL_SECONDS_ENV = "INFINILM_CLUSTER_REGISTRY_TTL_SECONDS"
+DEFAULT_REGISTRY_TTL_SECONDS = 10.0
+HEARTBEAT_INTERVAL_SECONDS_ENV = "INFINILM_CLUSTER_HEARTBEAT_INTERVAL_SECONDS"
+DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 2.0
+DRAIN_GRACE_SECONDS_ENV = "INFINILM_CLUSTER_DRAIN_GRACE_SECONDS"
+DEFAULT_DRAIN_GRACE_SECONDS = 1.0
+
+
+def affinity_ttl_seconds(
+    environ: Mapping[str, str] | None = None,
+) -> float:
+    """读取 session-affinity 绑定 TTL；未配置或为空时使用默认值。"""
+    source = os.environ if environ is None else environ
+    raw_value = source.get(AFFINITY_TTL_SECONDS_ENV)
+    if raw_value is None or not raw_value.strip():
+        return DEFAULT_AFFINITY_TTL_SECONDS
+
+    try:
+        value = float(raw_value)
+    except ValueError as exc:
+        raise ValueError(
+            f"{AFFINITY_TTL_SECONDS_ENV} must be a number: {raw_value!r}"
+        ) from exc
+
+    if value < 0 or not isfinite(value):
+        raise ValueError(
+            f"{AFFINITY_TTL_SECONDS_ENV} must be a finite non-negative number"
+        )
+    return value
+
+
+def affinity_capacity(environ: Mapping[str, str] | None = None) -> int:
+    """读取 session-affinity LRU 容量；未配置或为空时使用默认值。"""
+    source = os.environ if environ is None else environ
+    raw_value = source.get(AFFINITY_CAPACITY_ENV)
+    if raw_value is None or not raw_value.strip():
+        return DEFAULT_AFFINITY_CAPACITY
+
+    try:
+        value = int(raw_value)
+    except ValueError as exc:
+        raise ValueError(
+            f"{AFFINITY_CAPACITY_ENV} must be an integer: {raw_value!r}"
+        ) from exc
+
+    if value <= 0:
+        raise ValueError(f"{AFFINITY_CAPACITY_ENV} must be a positive integer")
+    return value
+
+
+def kv_router_min_tokens(environ: Mapping[str, str] | None = None) -> int:
+    """读取 kv-aware 最小可复用 token 数；未配置或为空时使用默认值。"""
+    source = os.environ if environ is None else environ
+    raw_value = source.get(KV_ROUTER_MIN_TOKENS_ENV)
+    if raw_value is None or not raw_value.strip():
+        return DEFAULT_KV_ROUTER_MIN_TOKENS
+
+    try:
+        value = int(raw_value)
+    except ValueError as exc:
+        raise ValueError(
+            f"{KV_ROUTER_MIN_TOKENS_ENV} must be an integer: {raw_value!r}"
+        ) from exc
+
+    if value <= 0:
+        raise ValueError(f"{KV_ROUTER_MIN_TOKENS_ENV} must be a positive integer")
+    return value
+
+
+def _positive_timeout(
+    env_name: str,
+    default: float,
+    environ: Mapping[str, str] | None,
+) -> float:
+    source = os.environ if environ is None else environ
+    raw_value = source.get(env_name)
+    if raw_value is None or not raw_value.strip():
+        return default
+
+    try:
+        value = float(raw_value)
+    except ValueError as exc:
+        raise ValueError(f"{env_name} must be a number: {raw_value!r}") from exc
+
+    if value <= 0 or not isfinite(value):
+        raise ValueError(f"{env_name} must be a finite positive number")
+    return value
+
+
+def _non_negative_timeout(
+    env_name: str,
+    default: float,
+    environ: Mapping[str, str] | None,
+) -> float:
+    source = os.environ if environ is None else environ
+    raw_value = source.get(env_name)
+    if raw_value is None or not raw_value.strip():
+        return default
+
+    try:
+        value = float(raw_value)
+    except ValueError as exc:
+        raise ValueError(f"{env_name} must be a number: {raw_value!r}") from exc
+
+    if value < 0 or not isfinite(value):
+        raise ValueError(f"{env_name} must be a finite non-negative number")
+    return value
+
+
+def connect_timeout(environ: Mapping[str, str] | None = None) -> float:
+    """读取 frontend 到 worker 的建连超时；未配置时使用默认值。"""
+    return _positive_timeout(
+        CONNECT_TIMEOUT_ENV,
+        DEFAULT_CONNECT_TIMEOUT,
+        environ,
+    )
+
+
+def request_timeout(environ: Mapping[str, str] | None = None) -> float:
+    """读取 frontend 到 worker 的单次请求超时；未配置时使用默认值。"""
+    return _positive_timeout(
+        REQUEST_TIMEOUT_ENV,
+        DEFAULT_REQUEST_TIMEOUT,
+        environ,
+    )
+
+
+def health_interval_seconds(environ: Mapping[str, str] | None = None) -> float:
+    """读取 registry watcher 轮询间隔；未配置时使用默认值。"""
+    return _positive_timeout(
+        HEALTH_INTERVAL_SECONDS_ENV,
+        DEFAULT_HEALTH_INTERVAL_SECONDS,
+        environ,
+    )
+
+
+def registry_ttl_seconds(environ: Mapping[str, str] | None = None) -> float:
+    """读取 worker 注册租约时长；未配置时使用默认值。"""
+    return _positive_timeout(
+        REGISTRY_TTL_SECONDS_ENV,
+        DEFAULT_REGISTRY_TTL_SECONDS,
+        environ,
+    )
+
+
+def heartbeat_interval_seconds(environ: Mapping[str, str] | None = None) -> float:
+    """读取 worker discovery 心跳间隔；未配置时使用默认值。"""
+    return _positive_timeout(
+        HEARTBEAT_INTERVAL_SECONDS_ENV,
+        DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
+        environ,
+    )
+
+
+def drain_grace_seconds(environ: Mapping[str, str] | None = None) -> float:
+    """读取 worker DRAINING 宽限时间；未配置时使用默认值。"""
+    return _non_negative_timeout(
+        DRAIN_GRACE_SECONDS_ENV,
+        DEFAULT_DRAIN_GRACE_SECONDS,
+        environ,
+    )

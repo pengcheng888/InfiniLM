@@ -1,739 +1,196 @@
 # InfiniLM Cluster
 
-`infinilm.cluster` 是 InfiniLM 的多副本聚合式推理服务层。它在现有
-`InferenceServer` 和 `AsyncLLMEngine` 之上增加两层能力：
+InfiniLM Cluster 支持两种服务形态：
 
-1. **file discovery 控制面**：worker 把自己的 HTTP 地址、模型名和健康状态写入
-   本机 JSON 文件，frontend 周期性读取这些文件。
-2. **HTTP 数据面**：frontend 对外提供统一 OpenAI API，并在多个 worker 之间
-   做 round-robin / least-loaded / session-affinity / kv-aware 路由、超时控制、
-   失败切换和流式转发。
+1. **聚合式服务**：每个 worker 都能独立完成 prefill 和 decode，frontend 在多个完整推理实例之间路由请求。
+2. **PD 分离服务**：prefill worker 计算 prompt 并发布 KV，decode worker 通过 Mooncake 拉取 KV 并完成增量生成。
 
-当前运行时只支持：
-
-```text
---discovery-backend file
---request-plane http
-```
-
-每个 worker 都是一个完整的聚合式推理实例：prefill 和 decode 都在本 worker 内完成。
-集群层不做跨 worker KV cache 迁移，也不做张量切分。
+两种形态共享 worker registry 控制面。控制面支持本机 file backend 和分布式 etcd backend；frontend 到 worker 的请求面当前使用 HTTP。
 
 ## 1. 总体架构
 
+### 聚合式服务
+
 ```text
-                +---------------------------+
- client API --> | ClusterFrontend / FastAPI |
-                +---------------------------+
-                          |
-                          | OpenAI-compatible HTTP/SSE
-                          v
-                +---------------------------+
-                | ClusterRouter          |
-                | - worker 选择             |
-                | - request timeout         |
-                | - 首 token 前故障切换     |
-                | - metrics                 |
-                +---------------------------+
-                          |
-                          | HttpWorkerClientFactory
-                          |   -> HttpWorkerClient
-                          |   -> AsyncOpenAI
-                          |   -> shared httpx.AsyncClient
-                          v
-        +----------------+----------------+----------------+
-        |                |                |
-        v                v                v
- +-------------+  +-------------+  +-------------+
- | worker 0    |  | worker 1    |  | worker 2    |
- | Uvicorn API |  | Uvicorn API |  | Uvicorn API |
- | LLM engine  |  | LLM engine  |  | LLM engine  |
- +-------------+  +-------------+  +-------------+
-        |                |                |
-        +----------------+----------------+
-                         |
-                         v
-              +--------------------------+
-              | file discovery directory |
-              | namespace...instance.json |
-              +--------------------------+
+client
+  -> aggregated frontend
+  -> router
+  -> HTTP worker client
+  -> aggregated worker
+  -> inference server
+  -> LLM engine
 ```
 
-控制面和数据面是分离的：
+worker 将 HTTP 地址、模型名、健康状态和负载快照注册到 worker registry。frontend 周期读取 registry，并把请求路由给 ready 且 transport 匹配的 worker。
+
+### PD 分离服务
+
+```text
+client
+  -> PD frontend
+  -> prefill worker
+       执行 prompt prefill 并发布 KV
+  -> Mooncake KV transfer
+  -> decode worker
+       拉取 KV 并增量生成
+  -> client
+```
+
+PD frontend 分别选择 prefill 和 decode worker。prefill 请求只生成一个 token，并发布 KV；decode 请求携带 prefill bootstrap 地址和 engine ID，由 decode worker 查询 KV 传输信息。
+
+### 控制面与数据面
 
 ```text
 control plane:
-  worker -> discovery JSON -> frontend watcher
+  worker -> worker registry -> frontend watcher
 
-data plane:
-  client -> frontend -> router -> worker HTTP API -> AsyncLLMEngine
+request plane:
+  client -> frontend -> HTTP worker
+
+PD KV plane:
+  prefill worker -> Mooncake -> decode worker
 ```
 
-discovery 文件只保存服务元数据，不承载推理请求和 token 流。
+worker registry 只保存元数据，不承载推理请求和 token 流。
 
-## 2. 目录与模块
+## 2. 配置
 
-### `config.py`
-
-负责 frontend 和 worker 的 cluster 参数解析。
-
-主要公共配置：
+### 公共配置
 
 | 参数 | 默认值 | 说明 |
 |---|---:|---|
-| `--namespace` | `infinilm-agg` | discovery 命名空间，frontend 和 worker 必须一致 |
+| `--namespace` | `infinilm-agg` | frontend 和 worker 共享的 discovery namespace |
 | `--discovery-backend` | `file` | `file` 或 `etcd` |
-| `--file-kv` | `/tmp/infinilm_store_kv` | file discovery JSON 根目录 |
-| `--etcd-endpoints` | `127.0.0.1:2379` | etcd endpoint 列表，逗号分隔 |
+| `--file-kv` | `/tmp/infinilm_store_kv` | file backend 的注册目录 |
+| `--etcd-endpoints` | `127.0.0.1:2379` | 逗号分隔的 etcd endpoint |
 | `--etcd-prefix` | `/infinilm` | etcd discovery key prefix |
-| `--etcd-username` / `--etcd-password-env` | 空 / `ETCD_PASSWORD` | 可选 etcd 用户名和密码环境变量 |
+| `--etcd-username` | 空 | 可选 etcd 用户名 |
+| `--etcd-password-env` | `ETCD_PASSWORD` | 存放 etcd 密码的环境变量名 |
 | `--etcd-ca-cert` | 空 | etcd CA 证书；HTTPS endpoint 必填 |
 | `--etcd-cert-file` / `--etcd-key-file` | 空 | 可选 etcd 双向 TLS 客户端证书 |
 | `--etcd-timeout` | `3` 秒 | etcd 操作超时 |
-| `--request-plane` | `http` | 当前仅支持 HTTP |
-| `--registry-ttl` | `10` 秒 | worker 心跳租约时长 |
-| `--heartbeat-interval` | `2` 秒 | worker 心跳间隔 |
+| `INFINILM_CLUSTER_CONNECT_TIMEOUT` | `3` 秒 | frontend 到 worker 的建连、写请求和连接池等待超时 |
+| `INFINILM_CLUSTER_REQUEST_TIMEOUT` | `1000` 秒 | frontend 到 worker 的读超时；聚合式流式请求也使用它作为整体 deadline |
+| `INFINILM_CLUSTER_HEALTH_INTERVAL_SECONDS` | `1` 秒 | frontend watcher 的 registry snapshot 轮询间隔；实际运行下限为 `0.1` 秒 |
+| `INFINILM_CLUSTER_REGISTRY_TTL_SECONDS` | `10` 秒 | worker 注册租约时长；frontend 和 worker 应使用相同配置 |
+| `INFINILM_CLUSTER_HEARTBEAT_INTERVAL_SECONDS` | `2` 秒 | worker discovery 心跳间隔；建议小于 registry TTL 的二分之一 |
 
-frontend 专属参数：
-
-| 参数 | 默认值 | 说明 |
-|---|---:|---|
-| `--router-mode` | `round-robin` | 支持 `round-robin`、`least-loaded`、`session-affinity`、`kv-aware` |
-| `--kv-router-min-tokens` | `1` | `kv-aware` 模式下允许复用候选的最小预测命中 token 数 |
-| `--router-affinity-ttl-secs` | `300` 秒 | session-affinity 条目生存时间 |
-| `--router-affinity-capacity` | `4096` | session-affinity LRU 表容量 |
-| `--router-min-initial-workers` | `1` | frontend 完成启动前需要的最小 worker 数 |
-| `--http-host` | `127.0.0.1` | frontend 监听地址 |
-| `--http-port` | `18000` | frontend 监听端口 |
-| `--connect-timeout` | `3` 秒 | frontend 到 worker 的建连超时 |
-| `--request-timeout` | `1000` 秒 | 单次推理请求整体超时 |
-| `--health-interval` | `1` 秒 | discovery watcher 轮询间隔 |
-
-worker 专属参数：
-
-| 参数 | 默认值 | 说明 |
-|---|---:|---|
-| `--served-model-name` | 模型目录名 | OpenAI API 中展示的模型名 |
-| `--advertise-host` | `127.0.0.1` | 写入 discovery 的 worker 地址 |
-| `--disaggregation-mode` | `aggregated` | worker 身份的权威来源：`aggregated`、`prefill` 或 `decode` |
-| `--worker-type` | `aggregated` | 兼容别名；与 `--disaggregation-mode` 同时显式传入时必须一致 |
-| `--mooncake-bootstrap-host` | `127.0.0.1` | PD worker 写入 discovery 的 bootstrap 地址 |
-| `--mooncake-bootstrap-port` | `8998` | PD worker 写入 discovery 的 bootstrap 端口 |
-| `--host` | `BaseConfig` 默认值 | worker HTTP 服务监听地址 |
-| `--port` | `BaseConfig` 默认值 | worker HTTP 服务监听端口 |
-
-`remove_cluster_worker_args()` 会剥离 cluster 专属参数，再把剩余参数交给
-`BaseConfig` 解析原有推理配置。
-
-### `registry.py`
-
-实现文件版服务发现。
-
-核心对象：
-
-- `WorkerRecord`：一条 worker 注册记录。
-- `FileServiceRegistry`：创建、写入、心跳、注销和 snapshot discovery 记录。
-- `FileServiceWatcher`：frontend 侧周期 snapshot，维护当前可用 worker 列表。
-
-注册文件名格式：
-
-```text
-{namespace}.{component}.{endpoint}.{instance_id}.json
-```
-
-例如：
-
-```text
-qwen3.infinilm.generate.12345-abcdef123456.json
-```
-
-### `etcd_registry.py`
-
-`EtcdServiceRegistry` 提供与 file backend 相同的 `WorkerRecord` JSON 协议。
-etcd key 格式：
-
-```text
-{etcd-prefix}/discovery/{namespace}/{component}/{endpoint}/{instance_id}
-```
-
-worker 注册时创建 etcd lease，并把 JSON value 绑定到该 lease。heartbeat 会
-refresh lease 并更新 value；正常退出会 delete key 并 revoke lease；进程 crash
-后 key 随 lease 到期自动删除。因此跨节点场景不依赖各机器的系统时钟。
-
-当前 watcher 仍按 `--health-interval` 周期执行 etcd prefix range，后续可在此
-基础上增加 etcd watch 增量更新。
-
-etcd 客户端是 optional dependency：
+etcd 客户端是可选依赖：
 
 ```bash
 python -m pip install -e '.[etcd]'
 ```
 
-跨节点使用 aggregated `kv-aware` 时，还必须通过 `--cache-index-dir` 指定所有
-frontend 和 worker 都可访问的共享 cache-index 目录；否则无法保证 frontend 能
-读取 worker 导出的 prefix snapshot。未配置该目录时，frontend 会拒绝
-`etcd + kv-aware` 组合。PD frontend 不读取这些文件，因此不受该限制影响。
+### 聚合式 frontend
 
-### `kv_prefix.py`
-
-frontend 侧加载与 worker 相同的 processor，对文本 chat 请求执行 chat
-template 和 tokenize，再按 worker 的 block size 计算 chained prefix hash。
-多模态请求、无法 tokenize 的请求或 processor 异常会返回 `None`，路由回退到
-普通负载策略。
-
-### `cache_index.py`
-
-worker 侧把本地 `BlockManager` 的已发布 prefix hash 导出为本机 JSON 文件：
-
-```text
-<file-kv>/cache-index/<namespace>.<instance_id>/
-  prefix-cache.snapshot.json
-  prefix-cache.events.jsonl
-```
-
-snapshot 是权威全量状态，events 是增量 append-only 日志。事件类型包括
-`published`、`touched` 和 `evicted`。事件达到默认 `10000` 条后导出器会重写
-snapshot 并清空 event 文件；frontend 检测到 event 文件缩短后会重新加载
-snapshot。
-
-### `kv_index.py`
-
-frontend 侧维护每个 ready worker 的本地 prefix index。它读取 worker
-snapshot，tail event 文件，并在 worker 退出、DRAINING 或元数据不可用时删除
-对应索引。路由时只统计连续 prefix hash 匹配的块数。
-
-### `worker_discovery.py`
-
-`WorkerDiscoveryService` 只负责 worker 侧 discovery 生命周期：
-
-```text
-start()
-  -> registry.register(record)
-  -> create heartbeat task
-
-heartbeat loop
-  -> registry.heartbeat(...)
-  -> 刷新 heartbeat_at / lease_expires_at / engine_healthy
-
-stop()
-  -> cancel heartbeat task
-  -> registry.unregister(record)
-```
-
-它不处理推理请求。真正提供 `/v1/chat/completions` 的是 `ClusterInferenceServer`
-继承的 `InferenceServer`。
-
-### `worker.py`
-
-定义 `ClusterInferenceServer` 和 `python -m infinilm.cluster.worker` 入口。
-
-它复用现有 `InferenceServer` 的 HTTP API 和模型初始化逻辑，并在 FastAPI
-lifespan 中加入 discovery：
-
-```text
-Uvicorn startup
-  -> InferenceServer lifespan
-  -> AsyncLLMEngine 初始化和启动
-  -> ClusterInferenceServer._create_discovery_service(engine)
-  -> WorkerDiscoveryService.start()
-  -> application ready
-
-Uvicorn shutdown
-  -> WorkerDiscoveryService.stop()
-  -> AsyncLLMEngine stop
-```
-
-这样可以保证 worker 只有在 engine ready 后才被 frontend 发现。
-
-`--disaggregation-mode` 是 worker 身份的单一来源：
-
-```text
-prefill -> worker_type=prefill -> kv_role=kv_producer -> component=prefill
-decode  -> worker_type=decode  -> kv_role=kv_consumer -> component=backend
-```
-
-`--kv-transfer-config` 不需要重复填写 `kv_role`；如果显式填写，则必须与
-`--disaggregation-mode` 推导结果一致。当前 PD worker 只支持 `--tp 1`、
-`--pp 1`。PD 注册记录的 `metadata.pd` 包含 `engine_id`、`kv_role`、bootstrap
-host 和 bootstrap port。
-
-角色能力也会写入 discovery：
-
-```json
-{
-  "capabilities": ["internal-prefill"],
-  "needs": ["decode"]
-}
-```
-
-decode worker 声明 `openai-chat` 和 `internal-decode`，
-并声明 `needs=["prefill"]`。PD frontend 只选择具备对应 capability 的 worker。
-producer-only prefill worker 的 OpenAI API 会要求
-`X-InfiniLM-Internal: true`，避免绕过 frontend 直接调用。
-
-### `http_worker_client_factory.py`
-
-包含两层对象。
-
-`HttpWorkerClientFactory`：
-
-- 持有一个 frontend 共享的 `httpx.AsyncClient` 连接池；
-- 配置 connect/read/write/pool timeout；
-- 根据 `WorkerRecord` 创建 `HttpWorkerClient`；
-- 在 frontend 退出时释放自己拥有的连接池。
-
-`HttpWorkerClient`：
-
-- 绑定一个 worker 的 `http://{host}:{port}/v1`；
-- 内部创建 `AsyncOpenAI`；
-- 把 OpenAI request 转发给 worker；
-- 把 OpenAI 非流式 response 或流式 SSE 转换成 router 内部帧。
-
-OpenAI SDK 设置：
-
-```python
-max_retries=0
-```
-
-原因是 worker 级重试由 `ClusterRouter` 统一处理，避免 SDK 和 router 双层重试。
-
-### `router.py`
-
-`ClusterRouter` 是 frontend 的数据面路由核心。
-
-职责：
-
-1. 从 `FileServiceWatcher` 获取当前可用 worker；
-2. 过滤 `transport=http`、模型名匹配、engine 健康且租约未过期的 worker；
-3. 按 `round-robin`、`least-loaded`、`session-affinity` 或 `kv-aware`
-   策略选择 worker；
-4. 为本次请求创建 `HttpWorkerClient`；
-5. 对内部帧流施加整体 deadline；
-6. 记录请求数、token chunk 数、错误数和 inflight；
-7. 在安全边界内切换 worker。
-
-重试边界：
-
-```text
-未产生任何输出 token
-  -> 连接错误 / 超时 / HTTP 5xx
-  -> 尝试下一个 worker
-
-已经产生输出 token
-  -> 不再切换 worker
-  -> 直接向客户端暴露错误
-```
-这样做是为了避免客户端已经收到部分内容后，另一个 worker 重复生成同一请求。
-
-### `frontend.py`
-
-`ClusterFrontend` 对外提供统一 OpenAI API 和运维接口。
-
-API：
-
-| 方法 | 路径 | 说明 |
-|---|---|---|
-| GET | `/health` | frontend 自身健康状态和当前 worker 数 |
-| GET | `/v1/models` | OpenAI models 格式的模型列表 |
-| GET | `/v1/models/{model}/ready` | 指定模型是否满足最小副本数 |
-| GET | `/metrics` | Prometheus 文本格式指标 |
-| GET | `/monitoring` | 内置 worker 监控网页 |
-| GET | `/api/monitoring` | 监控网页使用的 JSON 状态快照 |
-| POST | `/v1/chat/completions` | OpenAI-compatible chat API |
-| POST | `/chat/completions` | 兼容旧路径 |
-
-### `pd_frontend.py`
-
-`PdClusterFrontend` 是 PD 分离集群的 discovery-aware frontend。它与
-`ClusterFrontend` 的区别是：每次请求需要分别选择 1 个 `prefill` worker 和
-1 个 `decode` worker，不能把请求直接发给任意 worker。
-
-启动流程：
-
-```text
-file discovery
-  -> FileServiceWatcher(worker_types=(prefill, decode))
-  -> 等待同一 served_model_name 同时有 P/D
-  -> 查询 prefill bootstrap /query 获取 engine_id
-  -> 启动 OpenAI API
-```
-
-请求流程：
-
-```text
-client
-  -> PdClusterFrontend
-  -> 选择 prefill worker
-  -> 异步发送 do_remote_decode=true 且 max_tokens=1
-  -> 选择 decode worker
-  -> 发送 do_remote_prefill=true 和 remote_engine_id
-  -> decode 通过 Mooncake 拉 KV
-  -> 返回 JSON 或原始 SSE
-```
-
-它支持 `round-robin` 和 `least-loaded`。`least-loaded` 会按角色独立比较
-frontend inflight、waiting requests 和 running ratio。`/metrics` 输出 P/D
-ready worker 数、按角色的选择次数和每个 worker 的 inflight。
-`/monitoring` 提供基础 PD 监控页，`/api/monitoring` 输出页面使用的 JSON
-快照，包含每个 worker 的角色、GPU、endpoint、engine_id、心跳、lease、load
-和 frontend inflight。
-
-`main()` 的启动流程：
-
-```text
-parse_frontend_args()
-  -> logging.basicConfig()
-  -> ClusterFrontend(options)
-     -> FileServiceRegistry
-     -> FileServiceWatcher
-     -> ClusterRouter
-     -> HttpWorkerClientFactory
-     -> FrontendMetrics
-  -> uvicorn.run(frontend.create_app())
-```
-
-FastAPI lifespan：
-
-```text
-refresh file discovery
-  -> while worker_count < router_min_initial_workers:
-       sleep and refresh
-  -> FileServiceWatcher.start(periodic refresh)
-  -> serve app
-  -> shutdown:
-       FileServiceWatcher.stop()
-       ClusterRouter.aclose()
-```
-
-### `metrics.py`
-
-维护内存版路由指标，并通过 `/metrics` 输出。
-
-指标：
-
-```text
-infinilm_router_workers
-infinilm_router_requests_total
-infinilm_router_errors_total
-infinilm_router_tokens_total
-infinilm_router_worker_requests_total{worker_id=...}
-infinilm_router_worker_errors_total{worker_id=...}
-infinilm_router_kv_aware_requests_total
-infinilm_router_kv_hit_requests_total
-infinilm_router_kv_miss_requests_total
-infinilm_router_kv_predicted_saved_tokens_total
-infinilm_router_kv_actual_saved_tokens_total
-infinilm_router_kv_index_entries
-```
-
-`tokens_total` 统计的是 router 输出的内部 token chunk 数，不是 tokenizer 的
-严格 usage token 数。非流式响应中的 usage 来自 worker 返回的 OpenAI usage。
-
-### `monitoring/`
-
-监控能力集中在本机 `infinilm.cluster.monitoring` 包中：
-
-```text
-monitoring/
-  __init__.py
-  snapshot.py
-  page.py
-  pd_page.py
-```
-
-`ClusterFrontend.create_app()` 会同时注册：
-
-```text
-GET /monitoring
-GET /api/monitoring
-```
-
-监控页面没有独立进程和独立端口，随 frontend 的 FastAPI/Uvicorn 生命周期一起
-启动和退出。页面使用原生 HTML/CSS/JS，不依赖 CDN、npm 包或前端构建工具，
-每 2 秒请求一次 `/api/monitoring`。
-
-`PdClusterFrontend` 使用同目录下的 `pd_page.py`，提供 PD 版本的同名接口。
-PD 页面按 prefill/decode 两组展示 worker，不展示聚合式 router 的 affinity 和
-KV-aware 指标。
-
-页面展示：
-
-- namespace、router mode、ready 状态和 worker 数；
-- requests、successful requests、streaming/non-streaming requests、errors、
-  retries、inflight、usage tokens 和 token chunks；
-- affinity requests、hits、misses、TTL/LRU 状态和活跃 affinity 条目；
-- kv-aware 请求数、预测命中、实际命中和全局 prefix index 条目；
-- worker 侧 received、active、success、failed、canceled 计数；
-- 直接访问 worker 造成的 direct / untracked 请求估计；
-- 全局 request duration、streaming TTFT 和 inter-token latency 的
-  avg/p50/p95/p99；
-- 每个 worker 的 endpoint、GPU、TP、ready/draining 状态、heartbeat 年龄、
-  load score、frontend inflight、worker active、lease 剩余时间、
-  waiting/running、KV usage、本地 cache hits/hit tokens/prefill tokens、
-  frontend 路由数、worker 收到数、direct 数、usage tokens、错误数和最近成功时间。
-
-页面提供“自动刷新”和“刷新”控制。自动刷新默认开启，页面隐藏时暂停，
-恢复可见后继续；接口失败时逐步退避，且旧响应不会覆盖新响应。
-
-指标语义：
-
-- `infinilm_router_*` 请求、错误、重试和 usage tokens 只统计经过 frontend
-  router 的请求。
-- `infinilm_worker_*` 来自 worker HTTP 进程，包含 frontend 路由请求和直接访问
-  worker 的请求。
-- direct / untracked 是按 worker 估算：
-  `max(0, worker_received_requests_total - router_worker_requests_total)`。
-- `token chunks`、TTFT 和 inter-token latency 只统计流式请求。
-- 非流式请求会更新请求数、request duration 和 worker 返回的 usage tokens。
-
-访问地址：
-
-```text
-http://127.0.0.1:18000/monitoring
-```
-
-如果 frontend 监听 `0.0.0.0`，监控页面也会暴露到对应网络。生产环境需要在
-frontend 前增加访问控制，或仅监听本机地址。
-
-### `TCP_REQUEST_PLANE_DESIGN.md`
-
-这是历史设计存档，记录早期 raw TCP JSON-lines 请求面的协议、握手、取消、
-心跳和模块设计。当前运行时代码已经移除 TCP 请求面，该文档不描述当前
-生产路径。
-
-### `run_cluster.sh`
-
-这是一个本机启动示例，当前默认启动 1 个 worker：
-
-```text
-frontend: 18000
-worker:   18081
-GPU:      0
-model:    Qwen3-0.6B
-router:   round-robin
-```
-
-默认路由模式为 `round-robin`。`ROUTER_MODE` 环境变量可以覆盖为
-`least-loaded`、`session-affinity` 或 `kv-aware`，例如：
-
-```bash
-ROUTER_MODE=least-loaded bash python/infinilm/cluster/run_cluster.sh
-ROUTER_MODE=kv-aware bash python/infinilm/cluster/run_cluster.sh
-```
-
-脚本会同时打印 OpenAI API 地址和监控网页地址。frontend 自身启动时也会
-在日志中输出：
-
-```text
-Monitoring page: http://127.0.0.1:18000/monitoring
-```
-
-如需三副本，可将脚本中的 `GPUS` 默认值恢复为 `0 1 2`，或通过环境变量
-`GPUS="0 1 2"` 覆盖。
-
-### `run_pd_cluster.sh`
-
-这是本机 1P+1D PD 分离启动示例。它不走 `ClusterFrontend` 和
-`ClusterRouter`，而是复用现有 Mooncake 路径：
-
-```text
-client -> mooncake_proxy_server -> kv_producer(prefill)
-                              \-> kv_consumer(decode)
-prefill -> Mooncake TCP/RDMA KV transfer -> decode
-```
-
-脚本默认使用 Qwen3-0.6B、TCP 传输、GPU 4/5 和端口 18500/18501/18502，
-bootstrap 端口为 18508：
-
-```bash
-bash python/infinilm/cluster/run_pd_cluster.sh
-```
-
-常用覆盖项：
-
-| 环境变量 | 默认值 | 说明 |
+| 参数 | 默认值 | 说明 |
 |---|---:|---|
-| `MODEL` | Qwen3-0.6B 路径 | P 和 D 共用的本地模型目录 |
-| `PREFILL_GPU` / `DECODE_GPU` | `4` / `5` | 两个引擎使用的 CUDA 设备 |
-| `PROXY_PORT` / `PREFILL_PORT` / `DECODE_PORT` | `18500` / `18501` / `18502` | HTTP 服务端口 |
-| `BOOTSTRAP_PORT` | `18508` | Mooncake bootstrap 端口 |
-| `MOONCAKE_PROTOCOL` | `tcp` | `tcp` 或 `rdma` |
-| `MOONCAKE_WORKERS` | `4` | Mooncake transfer worker 数 |
-| `MAX_NEW_TOKENS` | `32` | 引擎允许的最大生成 token 数 |
-| `ENABLE_GRAPH` | `1` | 设置为 `0` 可关闭 CUDA Graph |
+| `--router-mode` | `round-robin` | `round-robin`、`least-loaded`、`session-affinity` 或 `kv-aware` |
+| `--router-min-initial-workers` | `1` | frontend 启动所需最小可路由 worker 数 |
+| `INFINILM_CLUSTER_AFFINITY_TTL_SECONDS` | `300` 秒 | session affinity 条目生存时间；仅 session-affinity 模式读取，`0` 表示禁用 TTL |
+| `INFINILM_CLUSTER_AFFINITY_CAPACITY` | `4096` | session affinity LRU 容量；仅 session-affinity 模式读取 |
+| `INFINILM_CLUSTER_KV_ROUTER_MIN_TOKENS` | `1` | kv-aware 候选 worker 的最小命中 token 数；仅 kv-aware 模式读取 |
+| `--http-host` / `--http-port` | `127.0.0.1` / `18000` | OpenAI API 监听地址 |
 
-脚本会先启动 P/D，等待两者 `/health` 和 bootstrap `/query` 可用后再启动
-proxy；退出或收到 `Ctrl+C` 时会清理所有子进程。Mooncake 0.3.x 需要 CUDA 12
-runtime；如果安装了 `nvidia-cuda-runtime-cu12`，脚本会自动把对应库目录追加
-到 `LD_LIBRARY_PATH`，不会覆盖原有 Torch/InfiniCore 路径。
+聚合式 frontend 启动时等待可路由 worker 数达到 `--router-min-initial-workers`。DRAINING worker 仍可能出现在 discovery 中，但不会计入启动等待条件。
 
-当前入口保持 1 个 prefill、1 个 decode 和 TP=1。它适合作为最小兼容路径和
-对照基线。
+### PD frontend
 
-### `run_pd_discovery_cluster.sh`
+| 参数 | 默认值 | 说明 |
+|---|---:|---|
+| `--router-mode` | `round-robin` | `round-robin` 或 `least-loaded` |
+| `--min-prefill-workers` | `1` | 模型 ready 所需最小 prefill 数 |
+| `--min-decode-workers` | `1` | 模型 ready 所需最小 decode 数 |
+| `--http-host` / `--http-port` | `127.0.0.1` / `18520` | PD OpenAI API 监听地址 |
 
-这是推荐的本机 PD 分离启动入口。它启动 1 个 `PdClusterFrontend`，默认启动
-1 个 `prefill` cluster worker 和 1 个 `decode` cluster worker：
+PD frontend 立即监听 HTTP 端口。没有可用 P/D 模型时，进程保持 `healthy`，但 `ready=false`，推理请求返回 503。
+
+### Worker
+
+| 参数 | 默认值 | 说明 |
+|---|---:|---|
+| `--served-model-name` | 模型目录名 | 对外暴露的 OpenAI model id |
+| `--advertise-host` | `127.0.0.1` | 写入 registry 的可达地址 |
+| `--host` / `--port` | 引擎默认值 | worker HTTP 监听地址 |
+| `--disaggregation-mode` | `aggregated` | `aggregated`、`prefill` 或 `decode` |
+| `--worker-type` | `aggregated` | `--disaggregation-mode` 的可选别名，同时出现时必须一致 |
+| `INFINILM_CLUSTER_DRAIN_GRACE_SECONDS` | `1` 秒 | 退出前保持 DRAINING 的宽限时间；`0` 表示不等待 |
+| `--mooncake-bootstrap-host` | `127.0.0.1` | prefill 写入 registry 的 bootstrap 地址 |
+| `--mooncake-bootstrap-port` | `8998` | prefill 写入 registry 的 bootstrap 端口 |
+
+身份推导关系：
 
 ```text
-client -> PdClusterFrontend
-       -> prefill worker -> Mooncake KV -> decode worker
-
-control plane:
-  P/D worker -> discovery JSON -> PdClusterFrontend watcher
+aggregated -> aggregated worker
+prefill    -> kv producer
+decode     -> kv consumer
 ```
 
-默认端口为 frontend `18520`、prefill `18521+`、decode `18531+`、bootstrap
-`18528+`，GPU 为 prefill `4`、decode `5`，模型为 Qwen3-0.6B，Mooncake 使用
-TCP。prefill 与 decode 端口段默认相隔 10，避免多副本时相互占用：
+PD worker 必须提供 Mooncake KV connector 配置；当前 PD 部署要求 `tp=1`、`pp=1`。
 
-```bash
-bash python/infinilm/cluster/run_pd_discovery_cluster.sh
+## 3. Worker Registry
 
-# 可切换角色内负载感知选择
-ROUTER_MODE=least-loaded bash python/infinilm/cluster/run_pd_discovery_cluster.sh
+### 注册记录
 
-# 启动 2P+2D；每个 prefill 使用独立 bootstrap 端口
-PREFILL_GPUS="2 3" DECODE_GPUS="4 5" \
-  bash python/infinilm/cluster/run_pd_discovery_cluster.sh
-```
-
-除 `run_pd_cluster.sh` 的常见环境变量外，还支持：
-
-| 环境变量 | 默认值 | 说明 |
-|---|---:|---|
-| `NAMESPACE` | `infinilm-pd` | PD discovery namespace |
-| `FILE_KV` | `/tmp/infinilm-pd/discovery` | file registry 根目录 |
-| `SERVED_MODEL_NAME` | `Qwen3-0.6B` | OpenAI API model id |
-| `ROUTER_MODE` | `round-robin` | `round-robin` 或 `least-loaded` |
-| `PD_FRONTEND_PORT` | `18520` | 统一 OpenAI API 端口 |
-| `PREFILL_GPUS` / `DECODE_GPUS` | `4` / `5` | 空格分隔的 GPU 列表 |
-| `PREFILL_PORT_BASE` | `18521` | prefill HTTP 起始端口，按副本递增 |
-| `DECODE_PORT_BASE` | `18531` | decode HTTP 起始端口，按副本递增 |
-| `BOOTSTRAP_PORT_BASE` | `18528` | prefill bootstrap 起始端口，按副本递增 |
-| `PLAN_ONLY` | `0` | 设置为 `1` 时只校验依赖、模型路径、端口占用和启动计划 |
-
-frontend 会立即监听；只有同一 model id 同时发现 P 和 D，且 prefill bootstrap
-查询成功后，`/health` 才显示 `ready=true`。`/metrics` 返回 PD frontend 指标，
-`/monitoring` 返回监控页。一体化脚本会清理当前 namespace 的历史 discovery
-JSON，并在退出时停止 frontend 和所有 worker。
-
-多 prefill 会分别注册到 `BOOTSTRAP_PORT_BASE + index`，frontend 根据 discovery
-中的 bootstrap metadata 查询对应 engine；多 decode 共享这些 prefill 候选。当前
-仍要求 TP=1、PP=1，同机部署时 GPU、HTTP 端口和 bootstrap 端口都不能冲突。
-
-### `run_pd_frontend.sh` 与 `run_pd_worker.sh`
-
-`run_pd_discovery_cluster.sh` 是一体化功能测试入口，frontend 和 worker 共享
-同一个进程组。需要 P/D 独立注册、退出和扩缩容时，使用独立入口。
-
-frontend 单独启动：
-
-```bash
-NAMESPACE=infinilm-pd \
-RUN_DIR=/tmp/infinilm-pd \
-PD_FRONTEND_PORT=18520 \
-bash python/infinilm/cluster/run_pd_frontend.sh
-```
-
-frontend 不等待 worker，先立即监听。没有可用 P/D model 时：
-
-```json
-{
-  "status": "healthy",
-  "ready": false,
-  "prefill_workers": 0,
-  "decode_workers": 0
-}
-```
-
-默认 OpenAI 请求返回 503，frontend 进程持续运行。后续 P/D 通过同一 namespace
-和 file registry 动态加入即可。
-
-使用 etcd discovery 时，frontend 和 worker 必须使用相同的 namespace、
-`ETCD_ENDPOINTS` 和 `ETCD_PREFIX`：
-
-```bash
-DISCOVERY_BACKEND=etcd \
-ETCD_ENDPOINTS=127.0.0.1:2379 \
-ETCD_PREFIX=/infinilm \
-NAMESPACE=infinilm-pd \
-PD_FRONTEND_PORT=18520 \
-bash python/infinilm/cluster/run_pd_frontend.sh
-```
-
-```bash
-DISCOVERY_BACKEND=etcd \
-ETCD_ENDPOINTS=127.0.0.1:2379 \
-ETCD_PREFIX=/infinilm \
-NAMESPACE=infinilm-pd \
-GPU=4 PORT=18541 BOOTSTRAP_PORT=18548 \
-ENGINE_ID=infinilm-pd-prefill-0 \
-bash python/infinilm/cluster/run_pd_worker.sh prefill
-```
-
-启动 prefill：
-
-```bash
-NAMESPACE=infinilm-pd \
-RUN_DIR=/tmp/infinilm-pd \
-GPU=4 PORT=18541 BOOTSTRAP_PORT=18548 \
-ENGINE_ID=infinilm-pd-prefill-0 \
-bash python/infinilm/cluster/run_pd_worker.sh prefill
-```
-
-启动 decode：
-
-```bash
-NAMESPACE=infinilm-pd \
-RUN_DIR=/tmp/infinilm-pd \
-GPU=5 PORT=18551 \
-ENGINE_ID=infinilm-pd-decode-0 \
-bash python/infinilm/cluster/run_pd_worker.sh decode
-```
-
-扩容时再次运行 worker 入口，并保证同角色副本使用不同 GPU、HTTP 端口、
-bootstrap 端口和 engine id。prefill 的 bootstrap 端口会写入 discovery，
-frontend 发现新 worker 后查询对应 `/query` 并纳入路由候选。
-
-缩容时向 worker 发送 `SIGTERM` 或 `Ctrl+C`。worker 先把 discovery state 更新
-为 `draining`，独立入口默认等待 3 秒再退出；frontend watcher 观察到后不再为
-新请求选择该 worker。若所有 P/D 都退出，frontend 仍保持 `status=healthy`、
-`ready=false`，新请求返回 503。强杀 worker 需要等待 discovery lease 过期，
-存在短暂误选窗口，运维缩容应优先使用优雅退出。
-
-`*.pyc` 和 `__pycache__` 是 Python 生成产物，不属于源码模块。
-
-## 3. Discovery 数据模型
-
-`WorkerRecord` 的关键字段：
+每条注册记录包含：
 
 | 字段 | 说明 |
 |---|---|
-| `namespace` | discovery 命名空间 |
+| `namespace` | discovery namespace |
 | `component` | aggregated 为 `infinilm`，prefill 为 `prefill`，decode 为 `backend` |
-| `endpoint` | 固定为 `generate` |
+| `endpoint` | 当前固定为 `generate` |
 | `instance_id` | worker 实例唯一 ID |
 | `worker_type` | `aggregated`、`prefill` 或 `decode` |
-| `model` | 本地模型路径 |
-| `served_model_name` | OpenAI API 中的模型名 |
-| `host` | worker 对外 advertised 地址 |
-| `port` | worker HTTP 端口 |
+| `model` | worker 本地模型路径 |
+| `served_model_name` | 对外模型名 |
+| `host` / `port` | worker HTTP 地址 |
 | `registered_at` | 首次注册时间，仅用于观测 |
-| `heartbeat_at` | 最近一次心跳时间 |
-| `lease_expires_at` | 当前租约截止时间 |
-| `engine_healthy` | `AsyncLLMEngine.is_healthy()` 的结果 |
-| `transport` | 当前固定为 `http` |
-| `state` | `ready` 或 `draining`；router 只选择 `ready` |
-| `metadata` | GPU、TP、端口、batch size、`load`、capabilities、needs、PD bootstrap 等补充信息 |
+| `heartbeat_at` | 最近心跳时间 |
+| `lease_expires_at` | 记录中的租约截止时间 |
+| `engine_healthy` | engine 健康状态 |
+| `state` | `ready` 或 `draining` |
+| `metadata` | 负载、流量、能力、PD bootstrap 等扩展信息 |
 
-时间语义：
+聚合式 frontend 只读取 aggregated worker。PD frontend 只读取 prefill 和 decode worker，不会把某一种角色误当成完整推理实例。
+
+### file backend
+
+file backend 面向单机或共享同一文件系统的部署。每个 worker 一个 JSON 注册文件，写入时先创建临时文件，再原子替换为正式文件，frontend 不会读到半写记录。
+
+file backend 的时间字段是存活判断依据：
 
 ```text
 lease_expires_at = heartbeat_at + registry_ttl
 ```
 
-worker 正常心跳时会持续刷新：
+worker 停止心跳后，frontend 在下一次 snapshot 时删除过期注册文件。
+
+frontend 和 worker 都会从 `INFINILM_CLUSTER_REGISTRY_TTL_SECONDS` 读取注册租约时长；部署时应保证同一 namespace 内的进程使用一致配置。
+
+### etcd backend
+
+etcd backend 面向跨节点部署。key 格式：
+
+```text
+{etcd-prefix}/discovery/{namespace}/{component}/{endpoint}/{instance_id}
+```
+
+value 是与 file backend 相同语义的 worker JSON。worker 注册时创建 etcd lease；heartbeat 刷新 lease 并更新 value；正常退出删除 key 并 revoke lease；进程 crash 后由 etcd 自动删除过期 key。
+
+etcd backend 中，etcd key 是否存在是存活权威；记录内时间字段主要用于观测，不依赖各机器系统时钟做存活判断。
+
+frontend watcher 对 file 和 etcd 都按 `INFINILM_CLUSTER_HEALTH_INTERVAL_SECONDS`
+周期执行 snapshot，实际运行下限为 `0.1` 秒。
+
+## 4. Worker 生命周期
+
+### 注册
+
+worker 在 engine 完成初始化并进入可服务状态后才写入 registry。因此一条记录出现时，对应 HTTP 服务至少已经完成启动流程。
+
+### 心跳
+
+worker 周期刷新：
 
 ```text
 heartbeat_at
@@ -742,389 +199,74 @@ engine_healthy
 state
 metadata.load
 metadata.traffic
+metadata.kv_index
+metadata.pd
 ```
 
-`registered_at` 不会随 heartbeat 更新。
+frontend watcher 周期读取 registry，并基于最新记录维护可路由候选。
 
-`metadata.traffic` 来自 worker HTTP 进程，包含直接访问 worker 的流量：
+### DRAINING 与优雅退出
 
-```json
-{
-  "received_requests_total": 100,
-  "streaming_requests_total": 50,
-  "non_streaming_requests_total": 50,
-  "successful_requests_total": 96,
-  "failed_requests_total": 2,
-  "canceled_requests_total": 2,
-  "active_requests": 3,
-  "local_cache_hit_requests_total": 20,
-  "local_cache_miss_requests_total": 80,
-  "local_cache_hit_tokens_total": 5120,
-  "local_prefill_tokens_total": 20480
-}
-```
-
-## 4. File Registry 流程
-
-### 4.1 注册
+worker 收到 `SIGTERM` 或第一次 `Ctrl+C` 后：
 
 ```text
-WorkerRecord
-  -> registry.new_record(...)
-  -> registry.register(record)
-  -> _write(record)
-  -> discovery/*.json
+state: ready -> draining
+等待 drain grace
+完成存量请求并停止接收新请求
+注销 registry
+退出进程
 ```
 
-写入方式：
-
-1. 先写同目录临时 `.tmp` 文件；
-2. 调用 `os.replace()` 原子替换正式 JSON；
-3. frontend 只读取 `*.json`。
-
-因此 frontend 不会读到半截 JSON。
-
-### 4.2 心跳
-
-```text
-WorkerDiscoveryService._heartbeat()
-  -> sleep(heartbeat_interval)
-  -> registry.heartbeat(record, engine_healthy=engine.is_healthy())
-  -> 原子重写 discovery JSON
-```
-
-如果 `engine_healthy=false`，记录仍可能存在，但 router 会把它从可用候选中过滤掉。
-
-### 4.3 DRAINING 与优雅下线
-
-worker 收到 `SIGTERM` 或 `SIGINT` 后，`DrainingUvicornServer` 会先执行：
-
-```text
-WorkerDiscoveryService.start_draining()
-  -> WorkerRecord.state = draining
-  -> 原子写入 discovery
-  -> frontend watcher 观察到 draining
-  -> ClusterRouter 不再选择该 worker
-```
-
-随后 worker 等待 `--drain-grace-seconds`，默认 1 秒。该宽限时间用于覆盖
-frontend watcher 轮询间隔，让在途路由决策有时间收敛；宽限期结束后 Uvicorn
-进入正常 shutdown，完成存量请求后 unregister。第二次退出信号会跳过宽限，
-用于运维强制中断。
-
-### 4.4 Snapshot 与过期删除
-
-frontend watcher 周期性执行：
-
-```text
-FileServiceWatcher.run()
-  -> registry.snapshot(namespace)
-  -> FileServiceRegistry._snapshot()
-```
-
-snapshot 时会：
-
-1. 读取所有 `*.json`；
-2. 忽略 malformed JSON；
-3. 过滤 namespace / endpoint / worker type / engine health；
-4. 如果 `lease_expires_at < now`，删除过期 JSON；
-5. 按 `instance_id` 排序返回 worker 列表。
-
-默认 `registry.snapshot(namespace)` 只返回 `aggregated`，因此聚合式
-frontend 不会误把 PD worker 当成完整推理 worker。`PdClusterFrontend` 创建
-watcher 时显式传入 `worker_types=("prefill", "decode")`。
-
-如果 worker 被 `kill -9`，没有机会 unregister，注册文件会暂时残留。
-frontend 后续 snapshot 到租约过期时会删除它。
-
-## 5. 请求流程
-
-### 5.1 非流式请求
-
-```text
-client
-  POST /v1/chat/completions
-    -> ClusterFrontend.chat_completions()
-    -> validate JSON and messages
-    -> resolve model
-    -> generate request_id
-    -> ClusterRouter.stream_chat()
-    -> HttpWorkerClient.stream_chat()
-    -> AsyncOpenAI.chat.completions.create(stream=False)
-    -> worker /v1/chat/completions
-    -> InferenceServer._chat()
-    -> AsyncLLMEngine
-    -> OpenAI chat.completion response
-    -> internal finish frame
-    -> frontend OpenAI JSON response
-```
-
-HTTP worker 非流式响应会被转换成内部帧：
-
-```json
-{
-  "type": "finish",
-  "content": "Ready.",
-  "finish_reason": "stop",
-  "usage": {
-    "prompt_tokens": 3,
-    "completion_tokens": 2,
-    "total_tokens": 5
-  }
-}
-```
-
-### 5.2 流式请求
-
-```text
-client
-  POST /v1/chat/completions with stream=true
-    -> ClusterFrontend
-    -> StreamingResponse(_stream_response)
-    -> ClusterRouter.stream_chat()
-    -> HttpWorkerClient.stream_chat()
-    -> AsyncOpenAI.chat.completions.create(stream=True)
-    -> worker SSE
-    -> InferenceServer._stream_chat()
-    -> AsyncLLMEngine.stream_request()
-    -> internal delta/finish frames
-    -> frontend OpenAI chat.completion.chunk SSE
-    -> [DONE]
-```
-
-内部帧：
-
-```json
-{"type": "delta", "content": "Ready"}
-{"type": "delta", "content": "."}
-{"type": "finish", "finish_reason": "stop", "usage": {}}
-```
-
-frontend 输出：
-
-```text
-data: {"object":"chat.completion.chunk", ...}
-
-data: [DONE]
-```
-
-### 5.3 客户端取消
-
-流式取消链路：
-
-```text
-client disconnect
-  -> frontend StreamingResponse cancelled
-  -> router internal stream closed
-  -> HttpWorkerClient closes AsyncOpenAI stream
-  -> worker HTTP connection disconnect
-  -> InferenceServer detects request disconnect
-  -> engine.add_aborted_req(...)
-```
-
-因此 HTTP/SSE 断开就是数据面的取消信号。
-
-### 5.4 PD 请求流程
-
-`PdClusterFrontend` 不使用 `ClusterRouter`，因为一次请求需要两个角色：
-
-```text
-prefill worker
-  -> do_remote_prefill=false
-  -> do_remote_decode=true
-  -> stream=false / max_tokens=1
-  -> 发布 KV
-
-decode worker
-  -> do_remote_prefill=true
-  -> do_remote_decode=false
-  -> remote_engine_id=<selected prefill engine>
-  -> 从 bootstrap 查询 prefill transfer address
-  -> Mooncake 拉 KV
-  -> 增量 decode 并返回输出
-```
-
-prefill 调用由 frontend 异步发出；decode 请求则持有本次对客户端的 streaming
-response。这个阶段不跨 P 重试 decode 请求，避免同一 transfer_id 被重复消费。
-
-## 6. Worker 选择与故障切换
+frontend 观察到 DRAINING 后不再选择该 worker。第二次退出信号会跳过宽限等待，用于运维强制中断。
 
-router 每次请求都会从 watcher 获取可用 worker：
-
-```text
-transport == http
-served_model_name == requested model
-engine_healthy == true
-lease not expired
-worker_type == aggregated
-```
-
-以上是 `ClusterRouter` 的聚合式候选条件。PD frontend 使用独立的角色候选集，
-并要求 prefill 和 decode 的 `served_model_name` 一致。
-
-### 6.1 least-loaded
-
-`least-loaded` 是可显式选择的负载感知路由模式。frontend 为每个 worker
-维护当前在本
-frontend 上的在途请求数；worker heartbeat 会调用
-`AsyncLLMEngine.get_load_stats()`，把近似负载快照写入 discovery：
-
-```json
-{
-  "waiting_requests": 2,
-  "running_requests": 3,
-  "max_batch_size": 32,
-  "kv_capacity": 500,
-  "kv_used": 120,
-  "kv_usage_ratio": 0.24
-}
-```
-
-frontend 综合评分：
-
-```text
-score =
-  0.90 * frontend inflight
-+ 0.05 * waiting_requests
-+ 0.03 * running_requests / max_batch_size
-+ 0.02 * kv_usage_ratio
-```
-
-同样选择 score 最小者，平局时轮询。队列和 cache 数值来自 scheduler 的周期性
-近似快照，用于路由倾向控制，不作为精确计费或强一致性状态。
-
-### 6.2 round-robin
-
-`round-robin` 不使用负载评分，按当前可用 worker 的稳定顺序轮询：
-
-```python
-index = cursor % len(workers)
-cursor += 1
-```
-
-例如三个 worker 连续六次选择：
-
-```text
-A B C A B C
-```
-
-该模式适合作为对照基线，或在负载数据不可信、希望请求计数严格均匀时使用。
-
-### 6.3 session-affinity
-
-`session-affinity` 用于尽量把相同会话或相同对话前缀路由到同一个 worker，以
-提高该 worker 本地 prefix cache 的复用机会。
-
-affinity key 的来源优先级：
-
-1. `X-InfiniLM-Session-ID` request header；
-2. `X-Session-ID` request header；
-3. OpenAI request 的 `user` 字段；
-4. `model + 首个 system message + 首个 user message` 的稳定前缀指纹。
-
-key 只保存 SHA-256 指纹，不在 frontend 内存或日志中保存原始 session ID。
-
-路由规则：
-
-```text
-affinity worker 存在且 ready
-  -> 若其 load score 不高于当前最小值 + 1.0，则复用该 worker
-
-affinity worker 不存在、已退出、DRAINING、或明显过载
-  -> 回退 least-loaded
-  -> 更新 affinity 表
-```
-
-affinity 表是每个 frontend 进程内的 LRU：
-
-```text
-TTL: --router-affinity-ttl-secs，默认 300 秒
-容量: --router-affinity-capacity，默认 4096 条
-```
-
-worker 从 discovery 中消失或进入 DRAINING 后，对应 affinity 条目会被清理。
-该模式不迁移 KV cache；它只通过稳定路由提高本地 prefix cache 命中概率。
-
-### 6.4 kv-aware
-
-`kv-aware` 面向文本 chat 请求的本地 prefix cache 复用。它不迁移 KV cache，
-而是让 frontend 知道每个 worker 已经发布过哪些连续 prefix hash，然后把相同
-前缀的新请求发给最可能命中且没有明显过载的 worker。
-
-请求流程：
-
-```text
-frontend resolve model
-  -> 读取 worker metadata 中的 model path / block size
-  -> PrefixHashCalculator tokenize prompt
-  -> 计算 namespace + chained block hashes
-  -> ClusterRouter.refresh_kv_index()
-  -> 每个 worker 连续匹配 hash block
-  -> 选择 matched_tokens 最大且负载可接受的 worker
-  -> 移除内部 __infinilm_kv_prefix__ 字段后转发
-```
-
-worker 必须启用 paged attention、prefix caching，并提供 cache index 文件。
-frontend 和 worker 使用相同的模型目录、processor 配置和 block size；namespace
-由模型/tokenizer 关键配置文件和 block size 计算得到。
-
-选择规则：
-
-```text
-预测 matched_tokens >= --kv-router-min-tokens
-且 worker load score <= 当前最小 load score + 1.0
-  -> 选择 matched_tokens 最大者，平局按 worker_id 稳定排序
-
-无有效匹配、hash 计算失败、多模态请求、index 不可用或候选 worker 过载
-  -> 回退 least-loaded
-```
-
-因此 `kv-aware` 是负载感知之上的 cache 倾斜策略，不是绝对亲和。KV cache
-可能被 scheduler 淘汰，event tail 和 discovery 心跳也存在短暂延迟；路由决策
-是预测性的，最终以 worker 返回的实际 cache 统计为准。
-
-worker 响应中的实际观测值：
-
-```json
-{
-  "cache": {
-    "matched_tokens": 512,
-    "prefill_tokens": 18,
-    "prompt_tokens": 530
-  }
-}
-```
-
-`matched_tokens` 用于 `infinilm_router_kv_actual_saved_tokens_total` 和
-worker cache counters；frontend 预测值对应
-`infinilm_router_kv_predicted_saved_tokens_total`。两者接近说明前端索引与
-worker 本地 cache 状态一致。
-
-故障切换只发生在首个输出帧之前。对于 HTTP：
-
-- connect error 可重试；
-- timeout 可重试；
-- worker 返回 5xx 可重试；
-worker 返回 4xx 通常表示请求本身不合法，不切换 worker。
-
-如果所有候选 worker 都失败，router 抛出：
-
-```text
-all workers failed for request ...
-```
-
-frontend 将其转换为服务端错误响应。
-
-## 7. 直接访问单个 worker
-
-frontend 不是 worker 推理的必要依赖。`ClusterInferenceServer` 继承了
-`InferenceServer`，因此单独启动 worker 后可以直接访问：
-
-```text
-http://127.0.0.1:18081/v1
-```
-
-可用接口：
+### Crash 与租约过期
+
+优雅退出会删除注册记录；进程 crash 或被 `kill -9` 时没有注销机会。file backend 等待记录时间过期，etcd backend 等待 lease 过期。过期前 frontend 可能短暂看到该 worker，请求失败后按安全重试边界切换候选。
+
+### 扩缩容
+
+worker 可以独立加入或退出集群。新增 worker 在下一次 watcher 轮询中进入候选；进入 DRAINING 后，frontend 停止为其分发新请求。PD frontend 支持独立扩缩 prefill 和 decode 两组 worker。
+
+## 5. 模型解析与 API
+
+### 模型名规则
+
+chat completions 请求中的 `model` 规则：
+
+1. 缺失或为 `null`：返回 HTTP 400。
+2. 为空字符串：表示未指定模型，选择第一个可路由 worker 的 `served_model_name`。
+3. 为非空字符串：按 `served_model_name` 精确匹配。
+4. 指定模型没有可路由 worker：聚合式服务返回 404。
+
+frontend 会把解析后的模型名写回请求体，下游 worker 看到的是确定的 served model name。
+
+### API
+
+聚合式 frontend：
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/health` | frontend 存活状态和 worker 数量 |
+| GET | `/v1/models` | 可用模型列表 |
+| GET | `/v1/models/{model}/ready` | 指定模型是否满足最小可路由副本数 |
+| POST | `/v1/chat/completions` | OpenAI-compatible chat API |
+| POST | `/chat/completions` | 兼容路径 |
+
+PD frontend：
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/health` | frontend 存活状态、P/D 数量和模型 ready 状态 |
+| GET | `/v1/models` | 同时存在 P/D 的模型列表 |
+| POST | `/v1/completions` | OpenAI-compatible completions API |
+| POST | `/v1/chat/completions` | OpenAI-compatible chat API |
+| POST | `/chat/completions` | 兼容路径 |
+
+两种 frontend 都支持流式与非流式响应。
+
+### 直接访问 worker
+
+worker 自身提供：
 
 ```text
 GET  /health
@@ -1133,74 +275,324 @@ POST /v1/chat/completions
 POST /chat/completions
 ```
 
-单 worker 适合调试模型加载、chat template 和引擎输出。多副本统一入口、
-round-robin / least-loaded / session-affinity / kv-aware 路由、故障切换和集中指标
-仍然由 frontend 提供。
+直接访问适合调试模型加载、chat template 和 engine 输出，但会绕过统一路由、重试、集中指标和监控。
 
-## 8. 启动示例
-
-### 8.1 启动 frontend
-
-```bash
-cd /workspace_codex/InfiniLM
-
-PYTHONPATH="$PWD/python" \
-python -m infinilm.cluster.frontend \
-  --namespace qwen3-agg \
-  --discovery-backend file \
-  --file-kv /tmp/infinilm-agg/discovery \
-  --request-plane http \
-  --router-mode session-affinity \
-  --router-affinity-ttl-secs 300 \
-  --router-affinity-capacity 4096 \
-  --router-min-initial-workers 3 \
-  --http-host 127.0.0.1 \
-  --http-port 18000
-```
-
-### 8.2 启动三个 worker
-
-下面是第 0 个 worker 的示例；第 1、2 个 worker 分别使用 GPU `1/2` 和端口
-`18082/18083`。
-
-```bash
-cd /workspace_codex/InfiniLM
-
-mkdir -p /tmp/infinilm-agg/discovery
-
-CUDA_VISIBLE_DEVICES=0 \
-PYTHONPATH="$PWD/python" \
-python -m infinilm.cluster.worker \
-  --model /data-aisoft/mechdancer/models/Qwen3-0.6B \
-  --served-model-name Qwen3-0.6B \
-  --namespace qwen3-agg \
-  --discovery-backend file \
-  --file-kv /tmp/infinilm-agg/discovery \
-  --request-plane http \
-  --advertise-host 127.0.0.1 \
-  --host 127.0.0.1 \
-  --port 18081 \
-  --device nvidia \
-  --tp 1 \
-  --block-size 256 \
-  --max-new-tokens 2644 \
-  --num-blocks 500 \
-  --max-batch-size 32 \
-  --log-level INFO \
-  --enable-paged-attn \
-  --attn flash-attn \
-  --enable-graph
-```
-
-frontend 和 worker 必须满足：
+producer-only prefill worker 的 OpenAI surface 不允许外部直接调用。frontend 内部请求携带：
 
 ```text
-namespace 相同
-file-kv 相同
-request-plane 均为 http
+X-InfiniLM-Internal: true
 ```
 
-### 8.3 请求 frontend
+缺少该 header 时，prefill OpenAI 接口返回 403。
+
+## 6. 聚合式路由
+
+### 可路由候选
+
+候选 worker 必须满足：
+
+```text
+state == ready
+engine_healthy == true
+served_model_name 匹配请求模型
+```
+
+DRAINING、engine 不健康或模型不匹配的 worker 不会被路由。frontend 与 worker 之间固定使用 HTTP。
+
+### round-robin
+
+按稳定顺序轮询候选 worker，适合作为对照基线和请求计数均匀的场景。
+
+### least-loaded
+
+综合负载评分：
+
+```text
+0.90 * frontend inflight
++ 0.05 * waiting_requests
++ 0.03 * running_requests / max_batch_size
++ 0.02 * kv_usage_ratio
+```
+
+选择评分最低者，平局时轮询。frontend 本地 inflight 权重最高，因为它比 worker 周期上报的负载快照更接近当前入口压力。
+
+### session-affinity
+
+优先复用相同会话所在的 worker，以提高本地 prefix cache 命中率。routing key 依次来自：
+
+1. `X-InfiniLM-Session-ID`
+2. `X-Session-ID`
+3. 请求内部 routing key
+4. OpenAI `user`
+5. 模型名、首个 system message 和首个 user message 的稳定前缀指纹
+
+key 只保存 SHA-256 指纹，不保存原始用户内容。条目具有 TTL 和容量上限。preferred worker 过载超过 slack 时，回退 least-loaded 并重新绑定会话。
+
+### kv-aware
+
+kv-aware 根据 worker 已发布的 prefix cache 索引选择最可能复用 KV 的 worker：
+
+```text
+frontend tokenize prompt
+  -> 计算连续 prefix hash
+  -> 查询每个 worker 的 cache index
+  -> 过滤命中 token 数不足的候选
+  -> 过滤负载超出 slack 的候选
+  -> 选择命中 token 数最多者
+  -> 无有效候选时回退 least-loaded
+```
+
+worker 导出 cache snapshot 和 append-only event。frontend 读取 snapshot 并 tail event，worker 退出或 DRAINING 时删除对应索引。
+
+跨节点 etcd 部署下，frontend 无法直接读取 worker 本机 cache index 文件，因此聚合式 `etcd + kv-aware` 必须配置所有节点可访问的 `--cache-index-dir`。PD frontend 不读取这些索引，不受该限制影响。
+
+### 重试边界
+
+在尚未输出任何 token 前，连接错误、超时或 HTTP 5xx 可以切换下一个候选 worker。一旦已经向客户端输出内容，不再切换 worker，避免客户端收到重复生成。
+
+## 7. PD 请求链路
+
+一次 chat 请求的处理流程：
+
+```text
+PD frontend
+  -> 选择 prefill worker
+  -> 发送 do_remote_decode=true、max_tokens=1 的 prefill 请求
+  -> prefill worker 计算 prompt 并发布 KV
+  -> frontend 选择 decode worker
+  -> 发送 do_remote_prefill=true
+  -> decode worker 查询 prefill bootstrap
+  -> Mooncake 拉取 KV
+  -> decode worker 增量生成
+  -> PD frontend 返回 JSON 或 SSE
+```
+
+PD worker 注册的能力：
+
+```text
+prefill: internal-prefill
+decode:  openai-chat, internal-decode
+```
+
+PD frontend 只选择具备对应能力的 worker，并要求同一 `served_model_name` 同时存在 prefill 和 decode。多 prefill 时每个实例使用独立 bootstrap 端口；frontend 从 registry metadata 读取 bootstrap 信息并查询 engine ID。
+
+## 8. 健康与观测
+
+### `/health`
+
+聚合式 frontend 返回：
+
+```json
+{
+  "status": "healthy",
+  "ready": true,
+  "workers": 3,
+  "ready_workers": 3
+}
+```
+
+字段含义：
+
+- `workers`：discovery 可见 worker 数，包含 DRAINING。
+- `ready_workers`：可路由 worker 数，只包含 ready 的 worker。
+- `ready`：`ready_workers >= router_min_initial_workers`。
+- `status=healthy` 只表示 frontend 进程存活，不表示一定可服务。
+
+PD frontend 额外返回：
+
+```json
+{
+  "prefill_workers": 2,
+  "decode_workers": 2,
+  "models": ["Qwen3-0.6B"]
+}
+```
+
+### `/metrics`
+
+指标分为：
+
+- `infinilm_router_*`：经过 frontend router 的请求、重试、延迟、usage、路由命中和 worker 负载。
+- `infinilm_worker_*`：worker HTTP 进程看到的请求、成功、失败、取消、active 和 cache 指标。
+- `infinilm_pd_*`：PD frontend 的 P/D 数量、角色请求数和 per-worker inflight。
+
+常用指标包括：
+
+```text
+infinilm_router_mode
+infinilm_router_requests_total
+infinilm_router_attempts_total
+infinilm_router_errors_total
+infinilm_router_retries_total
+infinilm_router_inflight
+infinilm_router_affinity_requests_total
+infinilm_router_affinity_hits_total
+infinilm_router_kv_aware_requests_total
+infinilm_router_kv_hit_requests_total
+infinilm_router_kv_predicted_saved_tokens_total
+infinilm_router_kv_actual_saved_tokens_total
+infinilm_worker_received_requests_total
+infinilm_worker_active_requests
+infinilm_pd_workers
+infinilm_pd_frontend_requests_total
+infinilm_pd_frontend_inflight_requests
+```
+
+direct / untracked 请求按以下差值估算：
+
+```text
+max(0, worker_received_requests_total - router_worker_requests_total)
+```
+
+它表示绕过 frontend 直接访问 worker 的流量估计。
+
+### `/monitoring`
+
+聚合式 frontend 默认地址：
+
+```text
+http://127.0.0.1:18000/monitoring
+```
+
+PD frontend 默认地址：
+
+```text
+http://127.0.0.1:18520/monitoring
+```
+
+页面没有独立进程或端口，随 frontend 生命周期启动和退出。页面每 2 秒请求一次 JSON 快照，并支持手动刷新和自动刷新。
+
+聚合式页面展示 router、affinity、KV-aware、延迟分位数和 worker 负载。PD 页面按 prefill / decode 分组展示 worker、engine ID、状态、load 和 frontend inflight。
+
+如果 frontend 监听 `0.0.0.0`，监控页面会暴露到对应网络。生产环境需要加访问控制，或仅监听本机地址。
+
+## 9. 部署
+
+### 聚合式集群
+
+默认启动 1 个 frontend 和 3 个 aggregated worker，router 为 `kv-aware`，discovery 为 file：
+
+```bash
+cd /workspace_codex/InfiniLM
+bash python/infinilm/cluster/aggregated/run_cluster.sh
+```
+
+默认值：
+
+```text
+frontend: 18000
+workers:  18091、18092、18093
+GPUs:     0、1、2
+router:   kv-aware
+```
+
+常用覆盖：
+
+```bash
+# 单 worker round-robin
+GPUS=0 ROUTER_MODE=round-robin \
+  bash python/infinilm/cluster/aggregated/run_cluster.sh
+
+# 三 worker least-loaded
+ROUTER_MODE=least-loaded \
+  bash python/infinilm/cluster/aggregated/run_cluster.sh
+```
+
+启动后访问：
+
+```text
+API:       http://127.0.0.1:18000/v1
+Monitoring: http://127.0.0.1:18000/monitoring
+Metrics:   http://127.0.0.1:18000/metrics
+```
+
+### PD 集群
+
+一体化 PD 启动器默认启动 1 个 PD frontend、1 个 prefill worker 和 1 个 decode worker：
+
+```bash
+cd /workspace_codex/InfiniLM
+bash python/infinilm/cluster/disaggregated/run_pd_discovery_cluster.sh
+```
+
+默认值：
+
+```text
+frontend:      18520
+prefill:       18521，GPU 4
+decode:        18531，GPU 5
+bootstrap:     18528
+router:        round-robin
+KV transfer:   Mooncake TCP
+```
+
+启动 2P+2D：
+
+```bash
+PREFILL_GPUS="2 3" DECODE_GPUS="4 5" \
+  bash python/infinilm/cluster/disaggregated/run_pd_discovery_cluster.sh
+```
+
+`PLAN_ONLY=1` 只校验依赖、模型路径、端口占用和启动计划，不启动服务。
+
+### 独立 PD frontend 和 worker
+
+frontend：
+
+```bash
+NAMESPACE=infinilm-pd \
+RUN_DIR=/tmp/infinilm-pd \
+PD_FRONTEND_PORT=18520 \
+bash python/infinilm/cluster/disaggregated/run_pd_frontend.sh
+```
+
+prefill：
+
+```bash
+NAMESPACE=infinilm-pd \
+RUN_DIR=/tmp/infinilm-pd \
+GPU=4 PORT=18541 BOOTSTRAP_PORT=18548 \
+ENGINE_ID=infinilm-pd-prefill-0 \
+bash python/infinilm/cluster/disaggregated/run_pd_worker.sh prefill
+```
+
+decode：
+
+```bash
+NAMESPACE=infinilm-pd \
+RUN_DIR=/tmp/infinilm-pd \
+GPU=5 PORT=18551 \
+ENGINE_ID=infinilm-pd-decode-0 \
+bash python/infinilm/cluster/disaggregated/run_pd_worker.sh decode
+```
+
+扩容时再次运行 worker 入口，并保证同角色副本使用不同 GPU、HTTP 端口、bootstrap 端口和 engine ID。
+
+### 使用 etcd
+
+frontend 和 worker 必须使用相同 namespace、etcd endpoints 和 etcd prefix：
+
+```bash
+DISCOVERY_BACKEND=etcd \
+ETCD_ENDPOINTS=127.0.0.1:2379 \
+ETCD_PREFIX=/infinilm \
+  bash python/infinilm/cluster/disaggregated/run_pd_frontend.sh
+```
+
+```bash
+DISCOVERY_BACKEND=etcd \
+ETCD_ENDPOINTS=127.0.0.1:2379 \
+ETCD_PREFIX=/infinilm \
+  bash python/infinilm/cluster/disaggregated/run_pd_worker.sh prefill
+```
+
+跨节点聚合式 `kv-aware` 还需要：
+
+```bash
+CACHE_INDEX_DIR=/shared/infinilm/cache-index
+```
+
+### 请求示例
 
 非流式：
 
@@ -1210,9 +602,9 @@ curl http://127.0.0.1:18000/v1/chat/completions \
   -d '{
     "model": "Qwen3-0.6B",
     "messages": [
-      {"role": "user", "content": "请最后单独输出一行：READY"}
+      {"role": "user", "content": "请输出 READY"}
     ],
-    "max_tokens": 256,
+    "max_tokens": 32,
     "temperature": 0
   }'
 ```
@@ -1225,173 +617,50 @@ curl -N http://127.0.0.1:18000/v1/chat/completions \
   -d '{
     "model": "Qwen3-0.6B",
     "messages": [
-      {"role": "user", "content": "请最后单独输出一行：READY"}
+      {"role": "user", "content": "请输出 READY"}
     ],
-    "max_tokens": 256,
+    "max_tokens": 32,
     "temperature": 0,
     "stream": true
   }'
 ```
 
-readiness：
+## 10. 安全与边界
 
-```bash
-curl http://127.0.0.1:18000/v1/models/Qwen3-0.6B/ready
-```
+- file backend 依赖同一个本机或共享文件系统；etcd backend 用于跨节点 discovery。
+- worker、etcd 和 Mooncake bootstrap 不应在未加访问控制的情况下暴露到公网。
+- prefill OpenAI surface 需要 internal header，防止绕过 PD frontend 直接调用 producer。
+- readiness 基于 registry 状态和租约，不主动探测每个 worker 的 `/health` endpoint。
+- 聚合式服务不跨 worker 迁移 KV；PD 服务通过 Mooncake 传输 prefill KV。
+- 集群层不聚合多个 worker 的 batch，各 worker 内部独立调度。
+- 当前 PD 部署要求 `tp=1`、`pp=1`。
+- 多模型通过 `served_model_name` 区分。
 
-指标：
+## 11. 测试
 
-```bash
-curl http://127.0.0.1:18000/metrics
-```
-
-监控网页：
-
-```text
-http://127.0.0.1:18000/monitoring
-```
-
-主要指标包括：
-
-```text
-infinilm_router_mode
-infinilm_router_metrics_source
-infinilm_router_requests_total
-infinilm_router_attempts_total
-infinilm_router_successful_requests_total
-infinilm_router_streaming_requests_total
-infinilm_router_non_streaming_requests_total
-infinilm_router_errors_total
-infinilm_router_retries_total
-infinilm_router_tokens_total
-infinilm_router_usage_prompt_tokens_total
-infinilm_router_usage_completion_tokens_total
-infinilm_router_usage_total_tokens_total
-infinilm_router_inflight
-infinilm_router_affinity_requests_total
-infinilm_router_affinity_hits_total
-infinilm_router_affinity_misses_total
-infinilm_router_affinity_expired_total
-infinilm_router_affinity_evictions_total
-infinilm_router_affinity_unkeyed_requests_total
-infinilm_router_affinity_entries
-infinilm_router_kv_aware_requests_total
-infinilm_router_kv_hit_requests_total
-infinilm_router_kv_miss_requests_total
-infinilm_router_kv_predicted_saved_tokens_total
-infinilm_router_kv_actual_saved_tokens_total
-infinilm_router_kv_index_entries
-infinilm_router_request_duration_seconds
-infinilm_router_ttft_seconds
-infinilm_router_inter_token_latency_seconds
-infinilm_router_worker_requests_total
-infinilm_router_worker_usage_prompt_tokens_total
-infinilm_router_worker_usage_completion_tokens_total
-infinilm_router_worker_usage_total_tokens_total
-infinilm_router_worker_errors_total
-infinilm_router_worker_retries_total
-infinilm_router_worker_inflight
-infinilm_router_worker_load_score
-infinilm_router_worker_waiting_requests
-infinilm_router_worker_running_requests
-infinilm_router_worker_kv_usage_ratio
-infinilm_router_worker_last_success_timestamp
-infinilm_router_worker_ttft_seconds
-infinilm_router_worker_request_duration_seconds
-infinilm_worker_state
-infinilm_worker_received_requests_total
-infinilm_worker_streaming_requests_total
-infinilm_worker_non_streaming_requests_total
-infinilm_worker_successful_requests_total
-infinilm_worker_failed_requests_total
-infinilm_worker_canceled_requests_total
-infinilm_worker_active_requests
-infinilm_worker_untracked_requests_total
-infinilm_worker_cache_hit_requests_total
-infinilm_worker_cache_miss_requests_total
-infinilm_worker_cache_hit_tokens_total
-infinilm_worker_prefill_tokens_total
-```
-
-## 9. 测试
-
-运行 cluster 单元测试：
+运行集群相关单元测试：
 
 ```bash
 cd /workspace_codex/InfiniLM
-PYTHONPATH=python python -m pytest -q test/service/test_cluster.py
+PYTHONPATH=python python -m pytest -q \
+  test/service/test_cluster.py \
+  test/service/test_cluster_environment.py \
+  test/service/test_routing_round_robin.py \
+  test/service/test_routing_least_loaded.py \
+  test/service/test_routing_session_affinity.py \
+  test/service/test_routing_kv_aware.py \
+  test/service/test_pd_cluster.py \
+  test/service/test_etcd_registry.py
 ```
 
 测试覆盖：
 
-- file registry 注册、snapshot、租约过期和文件删除；
-- 默认接受 `round-robin`，显式接受 `least-loaded`，拒绝 `least-inflight`；
-- round-robin 三 worker 分配；
-- least-loaded 在并发在途请求下避开忙 worker；
-- least-loaded 使用 waiting / running / KV pressure 元数据选择轻载 worker；
-- session-affinity 的 key 派生、TTL 过期、LRU 淘汰、worker 退出回退和过载回退；
-- frontend 与 worker 的 prefix hash 一致性、cache snapshot/event 导出和
-  `kv-aware` 最长连续前缀选择；
-- frontend 从 `X-Session-ID` 提取 affinity key，且不会把内部 routing key 转发给 worker；
-- `AsyncLLMEngine.get_load_stats()` 读取 scheduler 队列与 cache 状态；
-- `WorkerDiscoveryService` 注册、心跳和退出清理；
-- worker 侧请求计数、直接访问 worker 流量估算；
-- worker `DRAINING` 状态和 Uvicorn 优雅下线；
-- frontend 到 HTTP worker 的非流式请求；
-- OpenAI SSE 到内部 `delta/finish` 帧的转换；
-- worker 5xx 后切换下一个 worker。
-- TTFT、token 间隔、请求耗时和 retry 指标。
-- KV-aware 预测命中、worker 实际命中和 Prometheus 文本格式解析。
-- `/monitoring` 页面和 `/api/monitoring` JSON 快照。
+- aggregated worker 注册、心跳、租约过期和 DRAINING；
+- round-robin、least-loaded、session-affinity 和 kv-aware；
+- HTTP worker 非流式与流式转发；
+- 首 token 前重试和 worker 5xx 切换；
+- prefix hash、cache index 和实际命中指标；
+- PD 角色发现、bootstrap metadata、能力过滤和 PD monitoring；
+- etcd lease、注册、心跳、注销、异常记录过滤和过期删除。
 
-单元测试使用 `httpx.MockTransport` 模拟 worker 网络层，不加载模型、不占用 GPU。
-真实三副本部署需要另行启动 frontend 和 worker 进行集成验证。
-
-## 10. 设计边界
-
-当前设计面向单机多 GPU / 单机多进程部署：
-
-- file discovery 依赖同一个本机文件系统；
-- frontend 和 worker 需要能通过 `advertise-host:port` 互相访问；
-- worker API 没有 frontend 级鉴权，生产暴露端口时需要外部访问控制；
-- 集群层不聚合多个 worker 的 batch，每个 worker 内部独立调度；
-- 集群层不迁移 KV cache；
-- pipeline parallel 当前要求 `pp=1`；
-- 如果启动多个模型，模型名由 `served_model_name` 区分；
-- frontend readiness 只反映 discovery 和租约状态，不主动探测每个 worker 的
-  `/health` endpoint。
-
-## 11. 关键类关系
-
-```text
-FrontendOptions
-  -> ClusterFrontend
-       -> FileServiceRegistry
-       -> FileServiceWatcher
-       -> ClusterRouter
-            -> HttpWorkerClientFactory
-                 -> HttpWorkerClient
-                      -> AsyncOpenAI
-                      -> httpx.AsyncClient
-            -> PrefixHashCalculator
-            -> KvIndexStore
-       -> FrontendMetrics
-
-WorkerOptions
-  -> ClusterInferenceServer(InferenceServer)
-       -> AsyncLLMEngine
-       -> FileServiceRegistry
-       -> WorkerDiscoveryService
-       -> WorkerCacheIndexExporter
-```
-
-运行时对象关系：
-
-```text
-FileServiceRegistry
-  -> WorkerRecord list
-  -> FileServiceWatcher.workers
-  -> ClusterRouter.available_workers()
-  -> HttpWorkerClientFactory.create(worker)
-  -> HttpWorkerClient
-```
+单元测试使用 mock transport，不加载模型、不占用 GPU。真实多副本和 PD Mooncake 链路需要另行集成验证。

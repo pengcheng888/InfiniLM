@@ -11,7 +11,7 @@ class WorkerTrafficMetrics:
     """Counts every request observed by this worker HTTP process.
 
     These counters include traffic routed by a frontend and traffic sent directly
-    to the worker endpoint, unlike ClusterRouter metrics.
+    to the worker endpoint, unlike AggregatedRouter metrics.
     """
 
     received_requests_total: int = 0
