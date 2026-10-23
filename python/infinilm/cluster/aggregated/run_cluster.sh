@@ -21,6 +21,7 @@ GPUS=(${GPUS:-0 1 2})
 
 FRONTEND_PORT="${FRONTEND_PORT:-18000}"
 WORKER_HTTP_BASE_PORT="${WORKER_HTTP_BASE_PORT:-18081}"
+GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.85}"
 
 discovery_args=(
   --discovery-backend "$DISCOVERY_BACKEND"
@@ -94,7 +95,7 @@ for i in "${!GPUS[@]}"; do
     --tp 1 \
     --block-size 256 \
     --max-new-tokens 2644 \
-    --num-blocks 500 \
+    --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
     --max-batch-size 32 \
     --log-level INFO \
     --enable-paged-attn \

@@ -18,7 +18,7 @@ MOONCAKE_WORKERS="${MOONCAKE_WORKERS:-4}"
 ENGINE_ID_PREFIX="${ENGINE_ID_PREFIX:-pd}"
 STARTUP_TIMEOUT="${STARTUP_TIMEOUT:-300}"
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-32}"
-NUM_BLOCKS="${NUM_BLOCKS:-500}"
+GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.85}"
 MAX_BATCH_SIZE="${MAX_BATCH_SIZE:-32}"
 LOG_LEVEL="${LOG_LEVEL:-INFO}"
 ENABLE_GRAPH="${ENABLE_GRAPH:-1}"
@@ -137,7 +137,7 @@ start_engine() {
     --tp 1 \
     --block-size 256 \
     --max-new-tokens "$MAX_NEW_TOKENS" \
-    --num-blocks "$NUM_BLOCKS" \
+    --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
     --max-batch-size "$MAX_BATCH_SIZE" \
     --log-level "$LOG_LEVEL" \
     --enable-paged-attn \

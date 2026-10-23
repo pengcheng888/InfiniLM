@@ -38,7 +38,8 @@ engine:
   tp: 1
   block_size: 256
   max_new_tokens: 2644
-  num_blocks: 500
+  # KV blocks 由该显存比例自动推导；不再支持 num_blocks。
+  gpu_memory_utilization: 0.85
   max_batch_size: 32
   log_level: INFO
   enable_paged_attn: true

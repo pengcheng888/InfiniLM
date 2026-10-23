@@ -1,6 +1,7 @@
 cd /workspace_codex/InfiniLM
 
 RUN_DIR=/tmp/infinilm-single-worker
+GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.85}"
 mkdir -p "$RUN_DIR/discovery"
 
 CUDA_VISIBLE_DEVICES=0 \
@@ -18,7 +19,7 @@ python -m infinilm.cluster.worker \
   --tp 1 \
   --block-size 256 \
   --max-new-tokens 2644 \
-  --num-blocks 100 \
+  --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
   --max-batch-size 32 \
   --log-level INFO \
   --enable-paged-attn \

@@ -54,6 +54,13 @@ registry，frontend 通过服务发现读取地址。
 file backend 仅适合同机 frontend 与 worker。跨节点部署必须使用 etcd，并保证
 所有角色使用相同 namespace、endpoints、prefix 和认证配置。
 
+## 自动 KV 显存
+
+KV cache 容量统一由 `engine.gpu_memory_utilization` 推导，默认 `0.85`。
+prefill/decode worker 会先用 probe KV cache 和全量 graph profiling 估算
+显存，再重新分配最终 KV cache 并重新 compile。Mooncake 注册的是最终 KV
+cache 地址。旧 `engine.num_blocks` 字段不再允许。
+
 ## Dry Run
 
 ```bash

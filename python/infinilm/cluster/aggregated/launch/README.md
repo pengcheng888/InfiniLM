@@ -92,3 +92,19 @@ python -m infinilm.cluster.aggregated.launch \
 ```
 
 file discovery 仅适合同机部署；跨节点 frontend 与 worker 必须使用 etcd。
+
+## 自动 KV 显存
+
+KV cache 容量统一由 `engine.gpu_memory_utilization` 推导，默认 `0.85`：
+
+```text
+1. 先用 2 个 probe blocks 创建 engine
+2. 加载权重并做全量 graph profiling
+3. 销毁 profiling graph 并释放显存
+4. 根据目标显存比例重新分配 KV cache
+5. 重新完整 compile graph
+6. 把最终 num_blocks 回填给 scheduler 和 Mooncake
+```
+
+因此 graph exec、graph inputs、block table、workspace 和模型权重都会进入
+显存预算。`engine.num_blocks` 已移除，出现旧字段时配置解析会直接报错。

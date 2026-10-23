@@ -1,4 +1,6 @@
+import inspect
 import unittest
+from dataclasses import fields
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -8,6 +10,8 @@ from infinilm.cluster.aggregated.launch.launcher import build_launch_commands
 from infinilm.cluster.disaggregated.launch.config import load_pd_launch_config
 from infinilm.cluster.disaggregated.launch.launcher import build_pd_launch_commands
 from infinilm.config.engine_config import EngineConfig
+from infinilm.llm.llm import LLM, AsyncLLMEngine
+from infinilm.server.inference_server import InferenceServer
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 AGGREGATED_CONFIG = (
@@ -39,16 +43,42 @@ class GpuMemoryConfigTest(unittest.TestCase):
 
         self.assertEqual(config.gpu_memory_utilization, 0.85)
 
-    def test_base_config_rejects_num_blocks(self):
-        """旧 --num-blocks 参数必须显式失败并指向新参数。"""
-        with self.assertRaisesRegex(ValueError, "--gpu-memory-utilization"):
-            BaseConfig(
+    def test_base_config_treats_num_blocks_as_unknown(self):
+        """旧 --num-blocks 不做专门拒绝，只走普通 unrecognized warning。"""
+        with self.assertWarnsRegex(UserWarning, "Unrecognized arguments"):
+            config = BaseConfig(
                 [
                     "--model",
                     "/models/qwen",
                     "--num-blocks",
                     "500",
                 ]
+            )
+
+        self.assertIn("--num-blocks", config.extra)
+        self.assertEqual(config.gpu_memory_utilization, 0.85)
+
+    def test_utilization_replaces_num_blocks_position(self):
+        """新参数保持原 num_blocks 的位置，避免位置参数整体错位。"""
+        engine_fields = [field.name for field in fields(EngineConfig)]
+        signatures = {
+            cls: [
+                parameter.name
+                for parameter in inspect.signature(cls).parameters.values()
+            ]
+            for cls in (LLM, AsyncLLMEngine, InferenceServer)
+        }
+
+        for names, predecessor in (
+            (engine_fields, "max_tokens"),
+            (signatures[LLM], "max_tokens"),
+            (signatures[AsyncLLMEngine], "max_tokens"),
+            (signatures[InferenceServer], "max_batch_size"),
+        ):
+            start = names.index(predecessor) + 1
+            self.assertEqual(
+                names[start : start + 2],
+                ["gpu_memory_utilization", "block_size"],
             )
 
     def test_engine_config_has_no_user_capacity(self):
