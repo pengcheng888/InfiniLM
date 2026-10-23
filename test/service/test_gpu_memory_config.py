@@ -81,6 +81,13 @@ class GpuMemoryConfigTest(unittest.TestCase):
                 ["gpu_memory_utilization", "block_size"],
             )
 
+        server_attributes = list(InferenceServer(model_path="/models/qwen").__dict__)
+        start = server_attributes.index("max_batch_size") + 1
+        self.assertEqual(
+            server_attributes[start : start + 2],
+            ["gpu_memory_utilization", "block_size"],
+        )
+
     def test_engine_config_has_no_user_capacity(self):
         """EngineConfig 不再暴露用户输入的 num_blocks。"""
         config = EngineConfig(model_path="/models/qwen")
@@ -127,6 +134,7 @@ class GpuMemoryConfigTest(unittest.TestCase):
             command.argv[command.argv.index("--gpu-memory-utilization") + 1],
             "0.85",
         )
+        self._assert_gpu_memory_argument_order(command.argv)
 
     def test_pd_yaml_rejects_num_blocks(self):
         """PD YAML 同样拒绝固定 blocks。"""
@@ -155,6 +163,16 @@ class GpuMemoryConfigTest(unittest.TestCase):
             command.argv[command.argv.index("--gpu-memory-utilization") + 1],
             "0.85",
         )
+        self._assert_gpu_memory_argument_order(command.argv)
+
+    def _assert_gpu_memory_argument_order(self, argv: list[str]) -> None:
+        """新 CLI 参数保持原 --num-blocks 在启动命令中的位置。"""
+        max_new_tokens_index = argv.index("--max-new-tokens")
+        gpu_memory_index = argv.index("--gpu-memory-utilization")
+        max_batch_size_index = argv.index("--max-batch-size")
+
+        self.assertEqual(gpu_memory_index, max_new_tokens_index + 2)
+        self.assertEqual(max_batch_size_index, gpu_memory_index + 2)
 
 
 if __name__ == "__main__":

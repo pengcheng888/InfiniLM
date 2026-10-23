@@ -95,14 +95,14 @@ class LLMEngine:
             if "text_config" in llm_config:
                 llm_config = llm_config["text_config"]
 
-            max_position_embeddings = llm_config.get(
-                "max_position_embeddings", config.max_cache_len
-            )
-            num_mamba_cache_blocks = max(2, config.num_blocks // 4)
+            # max_position_embeddings 不参与 scheduler 初始化；paged 容量以
+            # BlockManager 的 num_blocks 为准，static 模式使用 max_cache_len。
+            effective_num_blocks = config.effective_num_blocks
+            num_mamba_cache_blocks = max(2, effective_num_blocks // 4)
 
             self.scheduler = Scheduler(
                 max_batch_size=config.max_batch_size,
-                num_blocks=config.num_blocks,
+                num_blocks=effective_num_blocks,
                 block_size=config.block_size,
                 max_num_batched_tokens=config.max_num_batched_tokens,
                 connector=connector,
@@ -110,7 +110,9 @@ class LLMEngine:
                 num_mamba_cache_blocks=num_mamba_cache_blocks,
                 enable_prefix_caching=config.enable_prefix_caching,
             )
-            logger.info(f"Using Paged KV Cache with num_blocks={config.num_blocks}")
+            logger.info(
+                f"Using Paged KV Cache with num_blocks={effective_num_blocks}"
+            )
             if has_mamba_cache:
                 logger.info(
                     "Using Mamba cache with num_blocks=%s, zero_state_index=0",
@@ -351,7 +353,7 @@ class LLM:
         cache_type: str = "paged",
         max_batch_size: int = 16,
         max_tokens: int = 4096,
-        num_blocks: int = 512,
+        gpu_memory_utilization: float = 0.85,
         block_size: int = 256,
         max_cache_len: int = 4096,
         temperature: float = 1.0,
@@ -378,7 +380,7 @@ class LLM:
             cache_type: Cache type ('paged' or 'static').
             max_batch_size: Maximum batch size (only for paged cache).
             max_tokens: Default maximum tokens to generate.
-            num_blocks: Number of KV cache blocks (only for paged cache).
+            gpu_memory_utilization: Fraction of device memory used to size KV cache.
             block_size: Size of each KV cache block (only for paged cache).
             max_cache_len: Maximum sequence length (only for static cache).
             temperature: Default sampling temperature.
@@ -407,7 +409,7 @@ class LLM:
             cache_type=cache_type,
             max_batch_size=max_batch_size,
             max_tokens=max_tokens,
-            num_blocks=num_blocks,
+            gpu_memory_utilization=gpu_memory_utilization,
             block_size=block_size,
             max_cache_len=max_cache_len,
             temperature=temperature,
@@ -584,7 +586,7 @@ class AsyncLLMEngine:
         cache_type: str = "paged",
         max_batch_size: int = 16,
         max_tokens: int = 512,
-        num_blocks: int = 512,
+        gpu_memory_utilization: float = 0.85,
         block_size: int = 256,
         max_cache_len: int = 4096,
         temperature: float = 1.0,
@@ -612,7 +614,7 @@ class AsyncLLMEngine:
             cache_type: Cache type ('paged' or 'static').
             max_batch_size: Maximum batch size (only for paged cache).
             max_tokens: Default maximum tokens to generate.
-            num_blocks: Number of KV cache blocks (only for paged cache).
+            gpu_memory_utilization: Fraction of device memory used to size KV cache.
             block_size: Size of each KV cache block (only for paged cache).
             max_cache_len: Maximum sequence length (only for static cache).
             temperature: Default sampling temperature.
@@ -645,7 +647,7 @@ class AsyncLLMEngine:
             cache_type=cache_type,
             max_batch_size=max_batch_size,
             max_tokens=max_tokens,
-            num_blocks=num_blocks,
+            gpu_memory_utilization=gpu_memory_utilization,
             block_size=block_size,
             max_cache_len=max_cache_len,
             temperature=temperature,
