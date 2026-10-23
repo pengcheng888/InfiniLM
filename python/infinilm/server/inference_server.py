@@ -121,7 +121,7 @@ class InferenceServer:
         cache_type: str = "paged",
         max_tokens: int = 4096,
         max_batch_size: int = 16,
-        num_blocks: int = 512,
+        gpu_memory_utilization: float = 0.85,
         block_size: int = 256,
         max_cache_len: int = 4096,
         temperature: float = 1.0,
@@ -154,7 +154,7 @@ class InferenceServer:
             cache_type: Cache type ('paged' or 'static').
             max_tokens: Default maximum tokens to generate.
             max_batch_size: Maximum batch size for inference (only for paged cache).
-            num_blocks: Number of KV cache blocks (only for paged cache).
+            gpu_memory_utilization: Fraction of device memory used to size KV cache.
             block_size: Size of each KV cache block (only for paged cache).
             max_cache_len: Maximum sequence length (only for static cache).
             temperature: Default sampling temperature.
@@ -188,7 +188,7 @@ class InferenceServer:
         self.cache_type = cache_type
         self.max_tokens = max_tokens
         self.max_batch_size = max_batch_size
-        self.num_blocks = num_blocks
+        self.gpu_memory_utilization = gpu_memory_utilization
         self.block_size = block_size
         self.max_cache_len = max_cache_len
         self.temperature = temperature
@@ -237,7 +237,7 @@ class InferenceServer:
                 cache_type=self.cache_type,
                 max_batch_size=self.max_batch_size,
                 max_tokens=self.max_tokens,
-                num_blocks=self.num_blocks,
+                gpu_memory_utilization=self.gpu_memory_utilization,
                 block_size=self.block_size,
                 max_cache_len=self.max_cache_len,
                 temperature=self.temperature,
@@ -716,7 +716,7 @@ def main():
         cache_type="paged" if cfg.enable_paged_attn else "static",
         max_tokens=cfg.max_new_tokens,
         max_batch_size=cfg.max_batch_size,
-        num_blocks=cfg.num_blocks,
+        gpu_memory_utilization=cfg.gpu_memory_utilization,
         block_size=cfg.block_size,
         max_cache_len=cfg.max_cache_len,
         temperature=cfg.temperature,

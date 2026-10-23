@@ -52,6 +52,15 @@ void StaticBatchingCompiler::compile() {
     }
 }
 
+void StaticBatchingCompiler::clear() {
+    // CompiledResult 同时持有 graph 和 graph input；先清 map 才会释放两者。
+    compiled_map_.clear();
+    auto &forward_context = infinilm::global_state::get_forward_context();
+    // 清掉最后一组 graph input 引用，确保 profiling 后显存可以完整释放。
+    forward_context.attn_metadata = global_state::AttentionMetadata{};
+    forward_context.workspace_manager.reset_runtime_buffers();
+}
+
 StaticBatchingCompiler::Compiled StaticBatchingCompiler::get_compiled(
     const InfinilmModel::Input &input) {
     if (model_->get_cache_config() != nullptr && dynamic_cast<const cache::StaticKVCacheConfig *>(model_->get_cache_config())) {

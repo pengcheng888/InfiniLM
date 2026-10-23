@@ -10,6 +10,8 @@ public:
     StaticBatchingCompiler(const std::shared_ptr<InfinilmModel> &model, RankBarrier *barrier);
 
     void compile() override;
+    // 清空 static graph 与对应 input tensors，释放 profile graph 的资源。
+    void clear() override;
 
     Compiled get_compiled(const InfinilmModel::Input &input) override;
 
