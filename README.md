@@ -69,10 +69,10 @@
 
       ```bash
       # Terminal 1: stage 0 / coordinator (--node-rank=0)
-      CUDA_VISIBLE_DEVICES=0 python examples/test_infer.py --device=nvidia --model=<path/to/model> --tp=1 --pp=2 --node-rank=0 --master-addr=127.0.0.1 --master-port=29500 --enable-paged-attn --attn=flash-attn --num-blocks=128
+      CUDA_VISIBLE_DEVICES=0 python examples/test_infer.py --device=nvidia --model=<path/to/model> --tp=1 --pp=2 --node-rank=0 --master-addr=127.0.0.1 --master-port=29500 --enable-paged-attn --attn=flash-attn --gpu-memory-utilization=0.85
 
       # Terminal 2: stage 1 / worker
-      CUDA_VISIBLE_DEVICES=1 python examples/test_infer.py --device=nvidia --model=<path/to/model> --tp=1 --pp=2 --node-rank=1 --master-addr=127.0.0.1 --master-port=29500 --enable-paged-attn --attn=flash-attn --num-blocks=128
+      CUDA_VISIBLE_DEVICES=1 python examples/test_infer.py --device=nvidia --model=<path/to/model> --tp=1 --pp=2 --node-rank=1 --master-addr=127.0.0.1 --master-port=29500 --enable-paged-attn --attn=flash-attn --gpu-memory-utilization=0.85
       ```
 
       跨节点运行时，每个节点的命令中的 `--master-addr` 和 `--master-port` 设置为 stage 0 节点的 IP 地址和通信端口。
@@ -105,10 +105,10 @@
 
       ```bash
       # Terminal 1: stage 0 / coordinator and HTTP server
-      python python/infinilm/server/inference_server.py --device=nvidia --model=<path/to/model> --tp=1 --pp=2 --node-rank=0 --master-addr=<HOST.IP> --master-port=29500 --enable-paged-attn --attn=flash-attn --num-blocks=128 --max-batch-size=32 --port=8000
+      python python/infinilm/server/inference_server.py --device=nvidia --model=<path/to/model> --tp=1 --pp=2 --node-rank=0 --master-addr=<HOST.IP> --master-port=29500 --enable-paged-attn --attn=flash-attn --gpu-memory-utilization=0.85 --max-batch-size=32 --port=8000
 
       # Terminal 2: stage 1 / worker
-      python python/infinilm/server/inference_server.py --device=nvidia --model=<path/to/model> --tp=1 --pp=2 --node-rank=1 --master-addr=<HOST.IP> --master-port=29500 --enable-paged-attn --attn=flash-attn --num-blocks=128 --max-batch-size=32 --port=8000
+      python python/infinilm/server/inference_server.py --device=nvidia --model=<path/to/model> --tp=1 --pp=2 --node-rank=1 --master-addr=<HOST.IP> --master-port=29500 --enable-paged-attn --attn=flash-attn --gpu-memory-utilization=0.85 --max-batch-size=32 --port=8000
       ```
     
     - 测试推理服务性能：

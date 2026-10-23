@@ -525,6 +525,10 @@ CUDA_VISIBLE_DEVICES=0 python -m infinilm.cluster.aggregated.launch \
 示例 YAML 的 worker HTTP 端口为 `0`，由 OS 自动分配；三副本部署应重复执行
 三次 worker 命令，并把 `frontend.router_min_initial_workers` 配置为 3。
 
+`engine.gpu_memory_utilization` 是唯一 KV 容量配置，默认 `0.85`。启动时会
+先创建 probe KV，加载权重后完整 profiling decode graphs，销毁 profiling
+graph，再按目标显存重新分配 KV 并重新 compile。`engine.num_blocks` 已移除。
+
 legacy shell 仍可作为一体化本地启动入口：
 
 默认启动 1 个 frontend 和 3 个 aggregated worker，router 为 `kv-aware`，discovery 为 file：

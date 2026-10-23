@@ -50,7 +50,7 @@ def run_infinilm(
     max_cache_len=1024,
     cache_type="paged",
     attn_backend="flash-attn",
-    num_blocks=64,
+    gpu_memory_utilization=0.85,
     block_size=256,
 ):
     from infinilm.llm.llm import LLM
@@ -69,7 +69,7 @@ def run_infinilm(
         # default; raise --max-cache-len for video. default 4096 (224 MB) exceeds
         # free VRAM on C500.
         max_cache_len=max_cache_len,
-        num_blocks=num_blocks,
+        gpu_memory_utilization=gpu_memory_utilization,
         block_size=block_size,
         temperature=1.0,
         top_k=1,  # greedy
@@ -221,7 +221,7 @@ def main():
         "--cache-type",
         choices=("paged", "static"),
         default="paged",
-        help="KV cache implementation. The validated report configuration uses paged.",
+        help="Compatibility option; auto KV sizing currently requires paged.",
     )
     ap.add_argument(
         "--attn",
@@ -229,10 +229,10 @@ def main():
         help="Attention backend. The validated report configuration uses flash-attn.",
     )
     ap.add_argument(
-        "--num-blocks",
-        type=int,
-        default=64,
-        help="Number of paged KV-cache blocks.",
+        "--gpu-memory-utilization",
+        type=float,
+        default=0.85,
+        help="Target fraction of device memory used for KV cache.",
     )
     ap.add_argument(
         "--block-size",
@@ -283,7 +283,7 @@ def main():
             max_cache_len=args.max_cache_len,
             cache_type=args.cache_type,
             attn_backend=args.attn,
-            num_blocks=args.num_blocks,
+            gpu_memory_utilization=args.gpu_memory_utilization,
             block_size=args.block_size,
         )
         print(f"[InfiniLM] {infinilm_out}")
