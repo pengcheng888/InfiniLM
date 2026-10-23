@@ -138,6 +138,74 @@ class PdDiscoveryTest(unittest.TestCase):
             # PD worker 不导出聚合式 KV-aware 的本地 prefix index。
             self.assertIsNone(discovery.cache_index_exporter)
 
+    def test_pd_worker_resolves_zero_ports_before_discovery_registration(self):
+        """HTTP/bootstrap 配置为 0 时，registry 必须写入绑定后的真实端口。"""
+        with TemporaryDirectory() as temporary:
+            server = ClusterInferenceServer.__new__(ClusterInferenceServer)
+            server.cluster_options = WorkerOptions(
+                namespace="pd-test",
+                file_kv=Path(temporary),
+                served_model_name="qwen",
+                advertise_host="127.0.0.1",
+                worker_type="prefill",
+                mooncake_bootstrap_port=0,
+            )
+            server.registry = FileWorkerRegistry(Path(temporary))
+            server.worker_discovery = None
+            server.model_path = "/models/qwen"
+            server.host = "127.0.0.1"
+            server.port = 0
+            server.tensor_parallel_size = 1
+            server.max_batch_size = 8
+            server.worker_traffic = WorkerTrafficMetrics()
+            server.kv_transfer_config = KVTransferConfig(
+                kv_connector="MooncakeConnector",
+                kv_role="kv_producer",
+                engine_id="prefill-auto",
+            )
+            actual_bootstrap_port = 49152
+            engine = SimpleNamespace(
+                is_healthy=lambda: True,
+                engine=SimpleNamespace(
+                    model_runner=SimpleNamespace(
+                        kv_connector=SimpleNamespace(
+                            bootstrap_port=actual_bootstrap_port,
+                        )
+                    )
+                )
+            )
+            server.engine = engine
+
+            discovery = server._create_discovery_service(
+                engine,
+                http_port=49153,
+            )
+
+            self.assertEqual(discovery.record.port, 49153)
+            self.assertEqual(
+                discovery.record.metadata["http_port"],
+                49153,
+            )
+            self.assertEqual(
+                discovery.record.metadata["pd"]["bootstrap_port"],
+                actual_bootstrap_port,
+            )
+
+            asyncio.run(server.start_discovery(http_port=49153))
+            try:
+                registered = asyncio.run(server.registry.snapshot(
+                    "pd-test",
+                    worker_types=(WorkerType.PREFILL,),
+                ))
+                self.assertEqual(len(registered), 1)
+                self.assertEqual(registered[0].port, 49153)
+                self.assertEqual(
+                    registered[0].metadata["pd"]["bootstrap_port"],
+                    actual_bootstrap_port,
+                )
+            finally:
+                asyncio.run(server.worker_discovery.stop())
+
     def test_pd_frontend_model_and_load_selection(self):
         """验证 PD 模型 ready 判断和 least-loaded 对重负载 worker 的避让。"""
         with TemporaryDirectory() as temporary:
@@ -209,6 +277,68 @@ class PdDiscoveryTest(unittest.TestCase):
                     await request_task
 
             self.assertTrue(internal_canceled.is_set())
+            snapshot = server.worker_traffic.snapshot()
+            self.assertEqual(snapshot["canceled_requests_total"], 1)
+            self.assertEqual(snapshot["active_requests"], 0)
+
+        asyncio.run(run())
+
+    def test_stream_external_cancellation_closes_active_internal_step(self):
+        """外层 streaming task 被取消时不能遗留内部 __anext__ task。
+
+        真实 Uvicorn 在客户端断开时会直接取消 StreamingResponse 的外层
+        迭代 task。此时 ``internal_stream.__anext__()`` 可能仍在运行；
+        如果先直接 ``aclose()`` 内层 generator，会触发 "asynchronous
+        generator is already running"。本测试固定该竞态的期望行为。
+        """
+
+        async def run():
+            second_step_started = asyncio.Event()
+            internal_cleanup_called = asyncio.Event()
+
+            class ConnectedRequest:
+                async def is_disconnected(self) -> bool:
+                    # 外部取消由 reader.cancel() 模拟，不依赖轮询断开。
+                    return False
+
+            async def slow_inference_stream(
+                self,
+                request_id,
+                data,
+                http_request,
+            ):
+                try:
+                    # 先返回一个 chunk，让下一次 __anext__() 进入长等待。
+                    yield "data: {\"ok\":true}\\n\\n"
+                    # yield 点会让控制权回到外层；下一次 __anext__() 从这里
+                    # 继续执行。先让出一次调度，确保事件确实属于第二步。
+                    await asyncio.sleep(0)
+                    second_step_started.set()
+                    await asyncio.sleep(10)
+                finally:
+                    # 取消传播到内部 generator 时必须执行清理。
+                    internal_cleanup_called.set()
+
+            server = ClusterInferenceServer.__new__(ClusterInferenceServer)
+            server.worker_traffic = WorkerTrafficMetrics()
+            with patch.object(InferenceServer, "_stream_chat", slow_inference_stream):
+                outer_stream = server._stream_chat(
+                    "test-request",
+                    {},
+                    ConnectedRequest(),
+                )
+                first_chunk = await anext(outer_stream)
+                self.assertIn('"ok":true', first_chunk)
+
+                reader = asyncio.create_task(anext(outer_stream))
+                await asyncio.wait_for(second_step_started.wait(), timeout=1)
+                reader.cancel()
+
+                # 修复前的典型失败是这里收到 RuntimeError，而不是取消。
+                with self.assertRaises(asyncio.CancelledError):
+                    await reader
+
+            self.assertTrue(internal_cleanup_called.is_set())
             snapshot = server.worker_traffic.snapshot()
             self.assertEqual(snapshot["canceled_requests_total"], 1)
             self.assertEqual(snapshot["active_requests"], 0)
@@ -853,6 +983,22 @@ class PdDiscoveryTest(unittest.TestCase):
         self.assertIn('wait_for_pd_ready "PD frontend"', source)
         self.assertIn('.get("ready") is True', source)
         self.assertNotIn('wait_for_url "PD frontend"', source)
+
+    def test_pd_launch_scripts_support_zero_ports(self):
+        """port base 配置为 0 时启动脚本应把 0 原样传给 worker。"""
+        cluster_script = (
+            Path(__file__).resolve().parents[2]
+            / "python/infinilm/cluster/disaggregated/run_pd_discovery_cluster.sh"
+        ).read_text(encoding="utf-8")
+        worker_script = (
+            Path(__file__).resolve().parents[2]
+            / "python/infinilm/cluster/disaggregated/run_pd_worker.sh"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("planned_port()", cluster_script)
+        self.assertIn('[[ "$prefill_http_port" == 0 ]]', cluster_script)
+        self.assertIn('elif [[ "$PORT" == 0 ]]; then', worker_script)
+        self.assertIn('ENGINE_ID="${NAMESPACE}-${MODE}-auto-$$"', worker_script)
 
     def test_frontend_filters_workers_without_required_api_route(self):
         """验证缺少必需 API route 的 worker 不会进入 PD 路由候选。"""

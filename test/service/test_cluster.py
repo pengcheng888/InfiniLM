@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import httpx
+from fastapi import FastAPI
 from infinilm.cluster.aggregated.frontend import AggregatedFrontend
 from infinilm.cluster.aggregated.frontend import main as frontend_main
 from infinilm.cluster.aggregated.http_worker_client_factory import (
@@ -233,6 +234,53 @@ class WorkerDrainingTest(unittest.TestCase):
         self.assertEqual(runtime.http_server.config.port, 18091)
         self.assertEqual(runtime.http_server.drain_grace_seconds, 7)
         self.assertIs(runtime.http_server.on_drain_start, start_draining)
+        self.assertIs(
+            runtime.http_server.on_ready.__func__,
+            ClusterWorkerRuntime._on_http_server_ready,
+        )
+
+    def test_runtime_registers_discovery_after_port_zero_is_bound(self):
+        """port=0 必须先由 OS 绑定，再用真实端口注册 discovery。"""
+
+        async def run():
+            class FakeClusterWorker:
+                def __init__(self):
+                    self.host = "127.0.0.1"
+                    self.port = 0
+                    self.registered_ports = []
+
+                def _create_app(self):
+                    return FastAPI()
+
+                async def start_draining(self):
+                    return None
+
+                async def start_discovery(self, *, http_port):
+                    self.registered_ports.append(http_port)
+
+            inference_server = FakeClusterWorker()
+            runtime = ClusterWorkerRuntime(inference_server)
+            runtime.http_server.config.timeout_graceful_shutdown = 0.01
+
+            server_task = asyncio.create_task(runtime.http_server.serve())
+            try:
+                for _ in range(100):
+                    if runtime.http_server.started:
+                        break
+                    await asyncio.sleep(0.01)
+                self.assertEqual(len(inference_server.registered_ports), 1)
+                actual_port = inference_server.registered_ports[0]
+                self.assertGreater(actual_port, 0)
+                self.assertEqual(inference_server.port, actual_port)
+                self.assertEqual(
+                    runtime._listening_port(runtime.http_server),
+                    actual_port,
+                )
+            finally:
+                runtime.http_server.should_exit = True
+                await server_task
+
+        asyncio.run(run())
 
 
 class FileRegistryTest(unittest.TestCase):

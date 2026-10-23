@@ -282,13 +282,15 @@ def load_cluster_launch_config(
         "session-affinity",
     }:
         raise ValueError(f"unsupported frontend.router_mode: {router_mode}")
-    min_workers_raw = frontend_raw.get("router_min_initial_workers")
-    if min_workers_raw is not None and (
-        isinstance(min_workers_raw, bool)
-        or not isinstance(min_workers_raw, int)
-        or min_workers_raw < 1
-    ):
-        raise ValueError("frontend.router_min_initial_workers must be an integer >= 1")
+    # 每次 launcher 只启动一个角色；默认只需 1 个 worker 即可提供服务。
+    # 三副本等部署应在 YAML 中显式写 3，由外部重复执行 worker 命令实现。
+    min_workers = _integer(
+        "frontend",
+        frontend_raw,
+        "router_min_initial_workers",
+        1,
+        minimum=1,
+    )
 
     workers_raw = _mapping("workers", root.get("workers", {}))
     _reject_unknown(
@@ -297,10 +299,9 @@ def load_cluster_launch_config(
         {"host", "advertise_host", "base_http_port", "port_offset", "replicas"},
     )
     if "replicas" in workers_raw:
-        # 副本数唯一来源是 CUDA_VISIBLE_DEVICES，避免 YAML 与环境冲突。
+        # 副本数由重复执行 worker 命令决定，避免 YAML 与实际进程数冲突。
         raise ValueError(
-            "workers.replicas is not supported; worker count comes from "
-            "CUDA_VISIBLE_DEVICES"
+            "workers.replicas is not supported; run the worker command once per replica"
         )
     worker_host = workers_raw.get("host", "127.0.0.1")
     advertise_host = workers_raw.get("advertise_host", "127.0.0.1")
@@ -385,13 +386,14 @@ def load_cluster_launch_config(
             host=frontend_host,
             port=_integer("frontend", frontend_raw, "port", 18000, minimum=1),
             router_mode=router_mode,
-            router_min_initial_workers=min_workers_raw,
+            router_min_initial_workers=min_workers,
         ),
         workers=WorkerConfig(
             host=worker_host,
             advertise_host=advertise_host,
+            # base_http_port=0 表示所有 worker 都传 --port 0，由 OS 分配端口。
             base_http_port=_integer(
-                "workers", workers_raw, "base_http_port", 18081, minimum=1
+                "workers", workers_raw, "base_http_port", 18081, minimum=0
             ),
             port_offset=_integer("workers", workers_raw, "port_offset", 10, minimum=0),
         ),

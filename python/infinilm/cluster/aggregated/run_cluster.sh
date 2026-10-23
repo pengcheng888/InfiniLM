@@ -74,7 +74,12 @@ pids+=("$!")
 
 for i in "${!GPUS[@]}"; do
   gpu="${GPUS[$i]}"
-  http_port=$((WORKER_HTTP_BASE_PORT + i + 10))
+  # base port 为 0 时，每个 worker 传 --port 0，由 OS 分配未占用端口。
+  if [[ "$WORKER_HTTP_BASE_PORT" == 0 ]]; then
+    http_port=0
+  else
+    http_port=$((WORKER_HTTP_BASE_PORT + i + 10))
+  fi
 
   CUDA_VISIBLE_DEVICES="$gpu" \
   python -m infinilm.cluster.worker \

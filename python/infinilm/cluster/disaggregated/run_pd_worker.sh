@@ -42,7 +42,14 @@ case "$MODE" in
     ;;
 esac
 
-ENGINE_ID="${ENGINE_ID:-${NAMESPACE}-${MODE}-${PORT}}"
+if [[ -n "${ENGINE_ID:-}" ]]; then
+  :
+elif [[ "$PORT" == 0 ]]; then
+  # port=0 时不能用固定端口号构造 engine ID；加入当前脚本 PID 保证多实例唯一。
+  ENGINE_ID="${NAMESPACE}-${MODE}-auto-$$"
+else
+  ENGINE_ID="${NAMESPACE}-${MODE}-${PORT}"
+fi
 
 command -v "$PYTHON" >/dev/null 2>&1 || {
   echo "run_pd_worker: Python interpreter not found: $PYTHON" >&2
@@ -113,7 +120,11 @@ kv_transfer_config="$(
     "$ENGINE_ID" "$MOONCAKE_PROTOCOL" "$MOONCAKE_WORKERS"
 )"
 
-echo "[$MODE] gpu=$GPU http=${HOST}:${PORT} bootstrap=${HOST}:${BOOTSTRAP_PORT} engine_id=$ENGINE_ID" >&2
+http_display="${HOST}:auto"
+bootstrap_display="${HOST}:auto"
+[[ "$PORT" == 0 ]] || http_display="${HOST}:${PORT}"
+[[ "$BOOTSTRAP_PORT" == 0 ]] || bootstrap_display="${HOST}:${BOOTSTRAP_PORT}"
+echo "[$MODE] gpu=$GPU http=${http_display} bootstrap=${bootstrap_display} engine_id=$ENGINE_ID" >&2
 echo "[$MODE] discovery=$DISCOVERY_BACKEND namespace=$NAMESPACE model=$SERVED_MODEL_NAME" >&2
 exec env \
   CUDA_VISIBLE_DEVICES="$GPU" \

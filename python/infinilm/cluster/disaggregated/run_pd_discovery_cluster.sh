@@ -78,6 +78,16 @@ wait_for_url() {
   fail "timed out waiting for $name at $url"
 }
 
+planned_port() {
+  local base="$1"
+  local index="$2"
+  if (( base == 0 )); then
+    echo 0
+  else
+    echo "$((base + index))"
+  fi
+}
+
 wait_for_pd_ready() {
   local name="$1"
   local url="$2"
@@ -184,7 +194,9 @@ start_engine() {
       "$engine_id" "$MOONCAKE_PROTOCOL" "$MOONCAKE_WORKERS"
   )"
 
-  echo "[$role] gpu=$gpu http=${HOST}:${port} engine_id=$engine_id mode=$disaggregation_mode" >&2
+  http_display="${HOST}:auto"
+  [[ "$port" == 0 ]] || http_display="${HOST}:${port}"
+  echo "[$role] gpu=$gpu http=${http_display} engine_id=$engine_id mode=$disaggregation_mode" >&2
   CUDA_VISIBLE_DEVICES="$gpu" \
   "$PYTHON" -m infinilm.cluster.worker \
     --model "$MODEL" \
@@ -221,11 +233,17 @@ read -r -a DECODE_GPU_ARRAY <<< "$DECODE_GPUS"
 
 port_checks=("frontend" "$PROXY_PORT")
 for i in "${!PREFILL_GPU_ARRAY[@]}"; do
-  port_checks+=("prefill-$i-http" "$((PREFILL_PORT_BASE + i))")
-  port_checks+=("prefill-$i-bootstrap" "$((BOOTSTRAP_PORT_BASE + i))")
+  prefill_http_port="$(planned_port "$PREFILL_PORT_BASE" "$i")"
+  prefill_bootstrap_port="$(planned_port "$BOOTSTRAP_PORT_BASE" "$i")"
+  [[ "$prefill_http_port" == 0 ]] ||
+    port_checks+=("prefill-$i-http" "$prefill_http_port")
+  [[ "$prefill_bootstrap_port" == 0 ]] ||
+    port_checks+=("prefill-$i-bootstrap" "$prefill_bootstrap_port")
 done
 for i in "${!DECODE_GPU_ARRAY[@]}"; do
-  port_checks+=("decode-$i-http" "$((DECODE_PORT_BASE + i))")
+  decode_http_port="$(planned_port "$DECODE_PORT_BASE" "$i")"
+  [[ "$decode_http_port" == 0 ]] ||
+    port_checks+=("decode-$i-http" "$decode_http_port")
 done
 "$PYTHON" - "$HOST" "${port_checks[@]}" <<'PY'
 import socket
@@ -248,7 +266,13 @@ for name, port in checks:
         sock.close()
 PY
 if [[ "$PLAN_ONLY" == 1 || "$PLAN_ONLY" == true || "$PLAN_ONLY" == yes ]]; then
-  echo "PD plan validated: frontend=${HOST}:${PROXY_PORT} prefill=${PREFILL_GPU_ARRAY[*]}@${PREFILL_PORT_BASE}+ decode=${DECODE_GPU_ARRAY[*]}@${DECODE_PORT_BASE}+ bootstrap=${BOOTSTRAP_PORT_BASE}+"
+  prefill_plan="auto"
+  decode_plan="auto"
+  bootstrap_plan="auto"
+  [[ "$PREFILL_PORT_BASE" == 0 ]] || prefill_plan="${PREFILL_PORT_BASE}+"
+  [[ "$DECODE_PORT_BASE" == 0 ]] || decode_plan="${DECODE_PORT_BASE}+"
+  [[ "$BOOTSTRAP_PORT_BASE" == 0 ]] || bootstrap_plan="${BOOTSTRAP_PORT_BASE}+"
+  echo "PD plan validated: frontend=${HOST}:${PROXY_PORT} prefill=${PREFILL_GPU_ARRAY[*]}@${prefill_plan} decode=${DECODE_GPU_ARRAY[*]}@${decode_plan} bootstrap=${bootstrap_plan}"
   exit 0
 fi
 
@@ -264,8 +288,8 @@ frontend_pid="$!"
 
 for i in "${!PREFILL_GPU_ARRAY[@]}"; do
   gpu="${PREFILL_GPU_ARRAY[$i]}"
-  port=$((PREFILL_PORT_BASE + i))
-  bootstrap_port=$((BOOTSTRAP_PORT_BASE + i))
+  port="$(planned_port "$PREFILL_PORT_BASE" "$i")"
+  bootstrap_port="$(planned_port "$BOOTSTRAP_PORT_BASE" "$i")"
   engine_id="${NAMESPACE}-prefill-${i}"
   start_engine "prefill-$i" prefill "$gpu" "$port" "$bootstrap_port" "$engine_id"
   prefill_pids+=("$engine_pid")
@@ -273,23 +297,25 @@ done
 
 for i in "${!DECODE_GPU_ARRAY[@]}"; do
   gpu="${DECODE_GPU_ARRAY[$i]}"
-  port=$((DECODE_PORT_BASE + i))
+  port="$(planned_port "$DECODE_PORT_BASE" "$i")"
   engine_id="${NAMESPACE}-decode-${i}"
   start_engine "decode-$i" decode "$gpu" "$port" "$BOOTSTRAP_PORT_BASE" "$engine_id"
   decode_pids+=("$engine_pid")
 done
 
-for i in "${!prefill_pids[@]}"; do
-  port=$((PREFILL_PORT_BASE + i))
-  bootstrap_port=$((BOOTSTRAP_PORT_BASE + i))
-  wait_for_url "prefill-$i server" "http://${HOST}:${port}/health" "${prefill_pids[$i]}"
-  wait_for_url "prefill-$i bootstrap" "http://${HOST}:${bootstrap_port}/query" "${prefill_pids[$i]}"
-done
+if (( PREFILL_PORT_BASE != 0 && BOOTSTRAP_PORT_BASE != 0 && DECODE_PORT_BASE != 0 )); then
+  for i in "${!prefill_pids[@]}"; do
+    port="$(planned_port "$PREFILL_PORT_BASE" "$i")"
+    bootstrap_port="$(planned_port "$BOOTSTRAP_PORT_BASE" "$i")"
+    wait_for_url "prefill-$i server" "http://${HOST}:${port}/health" "${prefill_pids[$i]}"
+    wait_for_url "prefill-$i bootstrap" "http://${HOST}:${bootstrap_port}/query" "${prefill_pids[$i]}"
+  done
 
-for i in "${!decode_pids[@]}"; do
-  port=$((DECODE_PORT_BASE + i))
-  wait_for_url "decode-$i server" "http://${HOST}:${port}/health" "${decode_pids[$i]}"
-done
+  for i in "${!decode_pids[@]}"; do
+    port="$(planned_port "$DECODE_PORT_BASE" "$i")"
+    wait_for_url "decode-$i server" "http://${HOST}:${port}/health" "${decode_pids[$i]}"
+  done
+fi
 
 wait_for_pd_ready "PD frontend" "$frontend_url" "$frontend_pid"
 
@@ -298,9 +324,9 @@ PD API:       $frontend_url/v1
 Monitoring:   $frontend_url/monitoring
 Discovery:    $DISCOVERY_BACKEND
 Transfer:     mooncake/$MOONCAKE_PROTOCOL
-Prefill:      ${PREFILL_GPU_ARRAY[*]} @ ${HOST}:${PREFILL_PORT_BASE}+
-Decode:       ${DECODE_GPU_ARRAY[*]} @ ${HOST}:${DECODE_PORT_BASE}+
-Bootstrap:    ${HOST}:${BOOTSTRAP_PORT_BASE}+
+Prefill:      ${PREFILL_GPU_ARRAY[*]} @ ${HOST}:$([[ "$PREFILL_PORT_BASE" == 0 ]] && echo auto || echo "${PREFILL_PORT_BASE}+")
+Decode:       ${DECODE_GPU_ARRAY[*]} @ ${HOST}:$([[ "$DECODE_PORT_BASE" == 0 ]] && echo auto || echo "${DECODE_PORT_BASE}+")
+Bootstrap:    ${HOST}:$([[ "$BOOTSTRAP_PORT_BASE" == 0 ]] && echo auto || echo "${BOOTSTRAP_PORT_BASE}+")
 Press Ctrl+C to stop all services.
 EOF
 

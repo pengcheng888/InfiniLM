@@ -110,7 +110,8 @@ python -m pip install -e '.[etcd]'
 ```
 
 Python 包安装后会提供 `infinilm.frontend`、`infinilm.pd-frontend`、
-`infinilm.infinilm` 和 `infinilm.cluster-launch` 入口。cluster 文档和
+`infinilm.infinilm`、`infinilm.cluster-launch` 和
+`infinilm.pd-cluster-launch` 入口。cluster 文档、示例 YAML 和
 `aggregated/`、`disaggregated/` 下的启动脚本也会随 package data 一起打包；
 源码部署仍可直接运行这些脚本。
 
@@ -145,11 +146,13 @@ PD frontend 立即监听 HTTP 端口，client bootstrap 由后台 reconciler 完
 | `--served-model-name` | 模型目录名 | 对外暴露的 OpenAI model id |
 | `--advertise-host` | `127.0.0.1` | 写入 registry 的可达地址 |
 | `--host` / `--port` | 引擎默认值 | worker HTTP 监听地址 |
+| `--port 0` | 自动端口 | 由 OS 分配未使用端口；worker 在 socket 绑定后把真实端口写入 registry |
 | `--disaggregation-mode` | `aggregated` | `aggregated`、`prefill` 或 `decode` |
 | `--worker-type` | `aggregated` | `--disaggregation-mode` 的可选别名，同时出现时必须一致 |
 | `INFINILM_CLUSTER_DRAIN_GRACE_SECONDS` | `1` 秒 | 退出前保持 DRAINING 的宽限时间；`0` 表示不等待 |
 | `--mooncake-bootstrap-host` | `127.0.0.1` | prefill 写入 registry 的 bootstrap 地址 |
 | `--mooncake-bootstrap-port` | `8998` | prefill 写入 registry 的 bootstrap 端口 |
+| `--mooncake-bootstrap-port 0` | 自动端口 | 由 OS 分配 bootstrap 端口；registry 中写入绑定后的真实端口 |
 
 身份推导关系：
 
@@ -505,6 +508,25 @@ http://127.0.0.1:18520/monitoring
 
 ### 聚合式集群
 
+YAML launcher 是单角色启动器：一次调用只启动一个 frontend 或一个 worker。
+`workers.replicas` 不允许出现在 YAML 中；worker 副本数由执行多少次
+`--role worker` 决定，`CUDA_VISIBLE_DEVICES` 只表示当前进程可见的 GPU。
+
+```bash
+python -m infinilm.cluster.aggregated.launch \
+  --config python/infinilm/cluster/aggregated/launch/configs/Qwen3-0.6B.yaml \
+  --role frontend
+
+CUDA_VISIBLE_DEVICES=0 python -m infinilm.cluster.aggregated.launch \
+  --config python/infinilm/cluster/aggregated/launch/configs/Qwen3-0.6B.yaml \
+  --role worker
+```
+
+示例 YAML 的 worker HTTP 端口为 `0`，由 OS 自动分配；三副本部署应重复执行
+三次 worker 命令，并把 `frontend.router_min_initial_workers` 配置为 3。
+
+legacy shell 仍可作为一体化本地启动入口：
+
 默认启动 1 个 frontend 和 3 个 aggregated worker，router 为 `kv-aware`，discovery 为 file：
 
 ```bash
@@ -531,6 +553,10 @@ GPUS=0 ROUTER_MODE=round-robin \
 # 三 worker least-loaded
 ROUTER_MODE=least-loaded \
   bash python/infinilm/cluster/aggregated/run_cluster.sh
+
+# 三 worker 由 OS 自动分配 HTTP 端口；frontend 仍使用 18000
+WORKER_HTTP_BASE_PORT=0 \
+  bash python/infinilm/cluster/aggregated/run_cluster.sh
 ```
 
 启动后访问：
@@ -542,6 +568,26 @@ Metrics:   http://127.0.0.1:18000/metrics
 ```
 
 ### PD 集群
+
+PD YAML launcher 同样是单角色启动器，角色为 `frontend`、`prefill` 或
+`decode`。示例配置的 worker HTTP 端口和 Mooncake bootstrap 端口均为 `0`，
+重复执行 worker 命令即可扩容；自动端口模式下 engine ID 由 launcher 自动生成。
+
+```bash
+python -m infinilm.cluster.disaggregated.launch \
+  --config python/infinilm/cluster/disaggregated/launch/configs/Qwen3-0.6B.yaml \
+  --role frontend
+
+CUDA_VISIBLE_DEVICES=4 python -m infinilm.cluster.disaggregated.launch \
+  --config python/infinilm/cluster/disaggregated/launch/configs/Qwen3-0.6B.yaml \
+  --role prefill
+
+CUDA_VISIBLE_DEVICES=5 python -m infinilm.cluster.disaggregated.launch \
+  --config python/infinilm/cluster/disaggregated/launch/configs/Qwen3-0.6B.yaml \
+  --role decode
+```
+
+一体化 shell 仍适合本机快速验证：
 
 一体化 PD 启动器默认启动 1 个 PD frontend、1 个 prefill worker 和 1 个 decode worker：
 
@@ -569,6 +615,10 @@ PREFILL_GPUS="2 3" DECODE_GPUS="4 5" \
 ```
 
 `PLAN_ONLY=1` 只校验依赖、模型路径、端口占用和启动计划，不启动服务。
+
+`PREFILL_PORT_BASE`、`DECODE_PORT_BASE` 或 `BOOTSTRAP_PORT_BASE` 设置为
+`0` 时，对应每组服务都由 OS 自动分配端口。frontend 仍使用固定
+`PD_FRONTEND_PORT`，并等待 `/health` 返回 `ready=true` 后才宣布集群可用。
 
 ### 独立 PD frontend 和 worker
 
@@ -601,7 +651,18 @@ ENGINE_ID=infinilm-pd-decode-0 \
 bash python/infinilm/cluster/disaggregated/run_pd_worker.sh decode
 ```
 
-扩容时再次运行 worker 入口，并保证同角色副本使用不同 GPU、HTTP 端口、bootstrap 端口和 engine ID。
+独立 worker 也可以使用随机端口：
+
+```bash
+GPU=4 PORT=0 BOOTSTRAP_PORT=0 ENGINE_ID=infinilm-pd-prefill-auto-1 \
+bash python/infinilm/cluster/disaggregated/run_pd_worker.sh prefill
+```
+
+使用 `PORT=0` 扩容时不再需要手工区分 HTTP 端口，但 prefill 的 bootstrap
+端口若也要随机化，应同时设置 `BOOTSTRAP_PORT=0`；所有 PD worker 仍必须拥有
+唯一 `ENGINE_ID`。
+
+扩容时再次运行 worker 入口，并保证同角色副本使用不同 GPU 和 engine ID；固定端口模式下还需要不同 HTTP/bootstrap 端口。
 
 ### 使用 etcd
 
@@ -681,6 +742,8 @@ PYTHONPATH=python python -m pytest -q \
   test/service/test_cluster.py \
   test/service/test_cluster_environment.py \
   test/service/test_cluster_launch.py \
+  test/service/test_pd_cluster_launch.py \
+  test/service/test_mooncake_bootstrap.py \
   test/service/test_routing_round_robin.py \
   test/service/test_routing_least_loaded.py \
   test/service/test_routing_session_affinity.py \
@@ -696,6 +759,7 @@ PYTHONPATH=python python -m pytest -q \
 测试覆盖：
 
 - aggregated worker 注册、心跳、租约过期和 DRAINING；
+- worker `port=0` 延迟注册和 Mooncake bootstrap 随机端口；
 - round-robin、least-loaded、session-affinity 和 kv-aware；
 - HTTP worker 非流式与流式转发；
 - PD 后台 client reconcile、bootstrap 专用 timeout、并发初始化和原子 acquire；
