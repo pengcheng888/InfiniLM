@@ -61,7 +61,7 @@ class EngineConfig:
     tp: int = 1
     block_size: int = 256
     max_new_tokens: int = 32
-    num_blocks: int = 500
+    gpu_memory_utilization: float = 0.85
     max_batch_size: int = 32
     log_level: str = "INFO"
     enable_paged_attn: bool = True
@@ -145,6 +145,21 @@ def _integer(
     if isinstance(raw, bool) or not isinstance(raw, int) or raw < minimum:
         raise ValueError(f"{parent}.{key} must be an integer >= {minimum}")
     return raw
+
+
+def _number(
+    parent: str,
+    value: dict[str, object],
+    key: str,
+    default: float,
+    *,
+    minimum: float,
+) -> float:
+    """读取不小于 minimum 的数字字段，统一返回 float。"""
+    raw = value.get(key, default)
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)) or raw < minimum:
+        raise ValueError(f"{parent}.{key} must be a number >= {minimum}")
+    return float(raw)
 
 
 def _boolean(
@@ -324,7 +339,7 @@ def load_pd_launch_config(
             "tp",
             "block_size",
             "max_new_tokens",
-            "num_blocks",
+            "gpu_memory_utilization",
             "max_batch_size",
             "log_level",
             "enable_paged_attn",
@@ -338,6 +353,15 @@ def load_pd_launch_config(
     for field, value in (("device", device), ("attn", attn), ("log_level", log_level)):
         if not isinstance(value, str) or not value.strip():
             raise ValueError(f"engine.{field} must be a non-empty string")
+    gpu_memory_utilization = _number(
+        "engine",
+        engine_raw,
+        "gpu_memory_utilization",
+        0.85,
+        minimum=0.001,
+    )
+    if gpu_memory_utilization > 1.0:
+        raise ValueError("engine.gpu_memory_utilization must be <= 1.0")
 
     mooncake_raw = _mapping("mooncake", root.get("mooncake", {}))
     _reject_unknown("mooncake", mooncake_raw, {"protocol", "workers"})
@@ -414,7 +438,7 @@ def load_pd_launch_config(
             max_new_tokens=_integer(
                 "engine", engine_raw, "max_new_tokens", 32, minimum=1
             ),
-            num_blocks=_integer("engine", engine_raw, "num_blocks", 500, minimum=1),
+            gpu_memory_utilization=gpu_memory_utilization,
             max_batch_size=_integer(
                 "engine", engine_raw, "max_batch_size", 32, minimum=1
             ),

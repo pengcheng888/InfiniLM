@@ -57,7 +57,7 @@ class EngineConfig:
     tp: int = 1
     block_size: int = 256
     max_new_tokens: int = 2644
-    num_blocks: int = 500
+    gpu_memory_utilization: float = 0.85
     max_batch_size: int = 32
     log_level: str = "INFO"
     enable_paged_attn: bool = True
@@ -319,6 +319,7 @@ def load_cluster_launch_config(
             "block_size",
             "max_new_tokens",
             "num_blocks",
+            "gpu_memory_utilization",
             "max_batch_size",
             "log_level",
             "enable_paged_attn",
@@ -332,6 +333,16 @@ def load_cluster_launch_config(
     for field, value in (("device", device), ("attn", attn), ("log_level", log_level)):
         if not isinstance(value, str) or not value.strip():
             raise ValueError(f"engine.{field} must be a non-empty string")
+
+    gpu_memory_utilization = _number(
+        "engine",
+        engine_raw,
+        "gpu_memory_utilization",
+        0.85,
+        minimum=0.001,
+    )
+    if gpu_memory_utilization > 1.0:
+        raise ValueError("engine.gpu_memory_utilization must be <= 1.0")
 
     config_dir = config_path.parent
     # run_dir 是本次集群运行时文件根目录；file 注册目录默认放在其中。
@@ -404,7 +415,7 @@ def load_cluster_launch_config(
             max_new_tokens=_integer(
                 "engine", engine_raw, "max_new_tokens", 2644, minimum=1
             ),
-            num_blocks=_integer("engine", engine_raw, "num_blocks", 500, minimum=1),
+            gpu_memory_utilization=gpu_memory_utilization,
             max_batch_size=_integer(
                 "engine", engine_raw, "max_batch_size", 32, minimum=1
             ),
