@@ -35,7 +35,8 @@ public:
         const std::string &weight_load_mode = "async",
         bool pre_transpose = false,
         bool enable_workspace_manager = false,
-        size_t max_num_batched_tokens = 0);
+        size_t max_num_batched_tokens = 0,
+        double gpu_memory_utilization = 0.85);
 
     // Load a parameter to all workers (each can extract its shard inside RankWorker)
     void load_param(const std::string &name, const infinicore::Tensor &param);
@@ -68,6 +69,13 @@ public:
     const cache::CacheConfig *get_cache_config() const { return cache_config_.get(); }
 
 protected:
+    // auto memory 模式：先全量 profiling graph，再按目标显存重建 KV cache。
+    void resize_cache_for_gpu_memory_utilization();
+
+    // 安装候选 num_blocks 并完整 compile，返回 compile 后各 rank 显存快照。
+    std::vector<RankWorker::DeviceMemoryInfo> install_cache_and_compile(
+        size_t num_blocks);
+
     std::vector<std::unique_ptr<RankWorker>> workers_;
     std::unique_ptr<RankBarrier> barrier_;
     distributed::CommunicationGroup communication_group_;
@@ -79,6 +87,8 @@ protected:
     bool use_mla_{false};
     bool enable_workspace_manager_{false};
     size_t max_num_batched_tokens_{0};
+    double gpu_memory_utilization_{0.85};
+    bool enable_graph_compiling_{false};
 };
 
 } // namespace infinilm::engine
