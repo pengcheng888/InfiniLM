@@ -167,6 +167,7 @@ class InferEngine(_infinilm.InferEngine):
         pre_transpose=False,
         enable_workspace_manager=True,
         max_num_batched_tokens=9216,
+        gpu_memory_utilization=0.85,
     ):
         self.hf_config = read_hf_config(model_path)
         self.hf_generation_config = read_hf_generation_config(model_path)
@@ -211,6 +212,7 @@ class InferEngine(_infinilm.InferEngine):
             pre_transpose,
             enable_workspace_manager,
             max_num_batched_tokens,
+            gpu_memory_utilization,
         )
         self.use_cache = False
 

@@ -1,4 +1,4 @@
-"""Cluster routing configuration read from process environment variables."""
+"""Cluster runtime and test configuration read from environment variables."""
 
 from __future__ import annotations
 
@@ -16,6 +16,8 @@ CONNECT_TIMEOUT_ENV = "INFINILM_CLUSTER_CONNECT_TIMEOUT"
 DEFAULT_CONNECT_TIMEOUT = 3.0
 REQUEST_TIMEOUT_ENV = "INFINILM_CLUSTER_REQUEST_TIMEOUT"
 DEFAULT_REQUEST_TIMEOUT = 1000.0
+BOOTSTRAP_TIMEOUT_ENV = "INFINILM_CLUSTER_BOOTSTRAP_TIMEOUT_SECONDS"
+DEFAULT_BOOTSTRAP_TIMEOUT = 3.0
 HEALTH_INTERVAL_SECONDS_ENV = "INFINILM_CLUSTER_HEALTH_INTERVAL_SECONDS"
 DEFAULT_HEALTH_INTERVAL_SECONDS = 1.0
 REGISTRY_TTL_SECONDS_ENV = "INFINILM_CLUSTER_REGISTRY_TTL_SECONDS"
@@ -24,6 +26,15 @@ HEARTBEAT_INTERVAL_SECONDS_ENV = "INFINILM_CLUSTER_HEARTBEAT_INTERVAL_SECONDS"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 2.0
 DRAIN_GRACE_SECONDS_ENV = "INFINILM_CLUSTER_DRAIN_GRACE_SECONDS"
 DEFAULT_DRAIN_GRACE_SECONDS = 1.0
+CLUSTER_COMMUNICATION_TEST_ENV = "INFINILM_CLUSTER_COMMUNICATION_TEST"
+CLUSTER_COMMUNICATION_TEST_TOKEN_ID_ENV = (
+    "INFINILM_CLUSTER_COMMUNICATION_TEST_TOKEN_ID"
+)
+DEFAULT_CLUSTER_COMMUNICATION_TEST_TOKEN_ID = 1
+CLUSTER_COMMUNICATION_TEST_KV_BLOCKS_ENV = (
+    "INFINILM_CLUSTER_COMMUNICATION_TEST_KV_BLOCKS"
+)
+DEFAULT_CLUSTER_COMMUNICATION_TEST_KV_BLOCKS = 2048
 
 
 def affinity_ttl_seconds(
@@ -87,6 +98,84 @@ def kv_router_min_tokens(environ: Mapping[str, str] | None = None) -> int:
     return value
 
 
+def cluster_communication_test(
+    environ: Mapping[str, str] | None = None,
+) -> bool:
+    """读取是否启用轻量集群通信测试模式。"""
+    source = os.environ if environ is None else environ
+    raw_value = source.get(CLUSTER_COMMUNICATION_TEST_ENV)
+    if raw_value is None or not raw_value.strip():
+        return False
+
+    normalized_value = raw_value.strip().lower()
+    if normalized_value in {"1", "true", "yes", "on"}:
+        return True
+    if normalized_value in {"0", "false", "no", "off"}:
+        return False
+
+    raise ValueError(
+        f"{CLUSTER_COMMUNICATION_TEST_ENV} must be a boolean: {raw_value!r}"
+    )
+
+
+def cluster_communication_test_token_id(
+    environ: Mapping[str, str] | None = None,
+) -> int:
+    """读取轻量通信测试模式返回的常数 sampled token id。"""
+    source = os.environ if environ is None else environ
+    raw_value = source.get(
+        CLUSTER_COMMUNICATION_TEST_TOKEN_ID_ENV,
+        str(DEFAULT_CLUSTER_COMMUNICATION_TEST_TOKEN_ID),
+    )
+    if raw_value is None or not raw_value.strip():
+        return DEFAULT_CLUSTER_COMMUNICATION_TEST_TOKEN_ID
+
+    try:
+        value = int(raw_value)
+    except ValueError as exc:
+        raise ValueError(
+            f"{CLUSTER_COMMUNICATION_TEST_TOKEN_ID_ENV} "
+            f"must be an integer: {raw_value!r}"
+        ) from exc
+
+    if value < 0:
+        raise ValueError(
+            f"{CLUSTER_COMMUNICATION_TEST_TOKEN_ID_ENV} must be >= 0"
+        )
+    return value
+
+
+def cluster_communication_test_kv_blocks(
+    environ: Mapping[str, str] | None = None,
+) -> int:
+    """读取轻量通信测试模式分配并注册的 KV block 数。
+
+    该值只影响通信测试专用的 KV tensor，不影响正常推理的显存自动规划；
+    未配置时默认分配 2048 个 block，保证 P/D 拉取测试有足够容量。
+    """
+    source = os.environ if environ is None else environ
+    raw_value = source.get(
+        CLUSTER_COMMUNICATION_TEST_KV_BLOCKS_ENV,
+        str(DEFAULT_CLUSTER_COMMUNICATION_TEST_KV_BLOCKS),
+    )
+    if raw_value is None or not raw_value.strip():
+        return DEFAULT_CLUSTER_COMMUNICATION_TEST_KV_BLOCKS
+
+    try:
+        value = int(raw_value)
+    except ValueError as exc:
+        raise ValueError(
+            f"{CLUSTER_COMMUNICATION_TEST_KV_BLOCKS_ENV} "
+            f"must be an integer: {raw_value!r}"
+        ) from exc
+
+    if value <= 0:
+        raise ValueError(
+            f"{CLUSTER_COMMUNICATION_TEST_KV_BLOCKS_ENV} must be a positive integer"
+        )
+    return value
+
+
 def _positive_timeout(
     env_name: str,
     default: float,
@@ -141,6 +230,20 @@ def request_timeout(environ: Mapping[str, str] | None = None) -> float:
     return _positive_timeout(
         REQUEST_TIMEOUT_ENV,
         DEFAULT_REQUEST_TIMEOUT,
+        environ,
+    )
+
+
+def bootstrap_timeout_seconds(environ: Mapping[str, str] | None = None) -> float:
+    """读取 PD prefill bootstrap 查询的专用总超时；未配置时使用 3 秒。
+
+    bootstrap 只发生在后台 client 初始化阶段，不能复用推理请求的
+    ``REQUEST_TIMEOUT``；否则一个尚未就绪的 prefill 可能让 health 或新请求
+    等待接近 1000 秒。
+    """
+    return _positive_timeout(
+        BOOTSTRAP_TIMEOUT_ENV,
+        DEFAULT_BOOTSTRAP_TIMEOUT,
         environ,
     )
 

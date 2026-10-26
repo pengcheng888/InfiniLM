@@ -14,6 +14,7 @@ from infinilm.cluster.config import (
 from infinilm.cluster.disaggregated.frontend import (
     DisaggregatedFrontend,
     DisaggregatedFrontendOptions,
+    _PrefetchedAsyncIterator,
     parse_disaggregated_frontend_args,
 )
 from infinilm.cluster.worker import (
@@ -29,6 +30,7 @@ from infinilm.cluster.worker_registry import (
 )
 from infinilm.cluster.worker_traffic import WorkerTrafficMetrics
 from infinilm.config import KVTransferConfig
+from infinilm.server.inference_server import InferenceServer
 
 
 class FakeEngine:
@@ -136,6 +138,74 @@ class PdDiscoveryTest(unittest.TestCase):
             # PD worker 不导出聚合式 KV-aware 的本地 prefix index。
             self.assertIsNone(discovery.cache_index_exporter)
 
+    def test_pd_worker_resolves_zero_ports_before_discovery_registration(self):
+        """HTTP/bootstrap 配置为 0 时，registry 必须写入绑定后的真实端口。"""
+        with TemporaryDirectory() as temporary:
+            server = ClusterInferenceServer.__new__(ClusterInferenceServer)
+            server.cluster_options = WorkerOptions(
+                namespace="pd-test",
+                file_kv=Path(temporary),
+                served_model_name="qwen",
+                advertise_host="127.0.0.1",
+                worker_type="prefill",
+                mooncake_bootstrap_port=0,
+            )
+            server.registry = FileWorkerRegistry(Path(temporary))
+            server.worker_discovery = None
+            server.model_path = "/models/qwen"
+            server.host = "127.0.0.1"
+            server.port = 0
+            server.tensor_parallel_size = 1
+            server.max_batch_size = 8
+            server.worker_traffic = WorkerTrafficMetrics()
+            server.kv_transfer_config = KVTransferConfig(
+                kv_connector="MooncakeConnector",
+                kv_role="kv_producer",
+                engine_id="prefill-auto",
+            )
+            actual_bootstrap_port = 49152
+            engine = SimpleNamespace(
+                is_healthy=lambda: True,
+                engine=SimpleNamespace(
+                    model_runner=SimpleNamespace(
+                        kv_connector=SimpleNamespace(
+                            bootstrap_port=actual_bootstrap_port,
+                        )
+                    )
+                )
+            )
+            server.engine = engine
+
+            discovery = server._create_discovery_service(
+                engine,
+                http_port=49153,
+            )
+
+            self.assertEqual(discovery.record.port, 49153)
+            self.assertEqual(
+                discovery.record.metadata["http_port"],
+                49153,
+            )
+            self.assertEqual(
+                discovery.record.metadata["pd"]["bootstrap_port"],
+                actual_bootstrap_port,
+            )
+
+            asyncio.run(server.start_discovery(http_port=49153))
+            try:
+                registered = asyncio.run(server.registry.snapshot(
+                    "pd-test",
+                    worker_types=(WorkerType.PREFILL,),
+                ))
+                self.assertEqual(len(registered), 1)
+                self.assertEqual(registered[0].port, 49153)
+                self.assertEqual(
+                    registered[0].metadata["pd"]["bootstrap_port"],
+                    actual_bootstrap_port,
+                )
+            finally:
+                asyncio.run(server.worker_discovery.stop())
+
     def test_pd_frontend_model_and_load_selection(self):
         """验证 PD 模型 ready 判断和 least-loaded 对重负载 worker 的避让。"""
         with TemporaryDirectory() as temporary:
@@ -166,6 +236,114 @@ class PdDiscoveryTest(unittest.TestCase):
                 ).instance_id,
                 decode.instance_id,
             )
+
+    def test_worker_chat_cancels_internal_request_on_client_disconnect(self):
+        async def run():
+            disconnected = asyncio.Event()
+            internal_canceled = asyncio.Event()
+
+            class DisconnectingRequest:
+                async def is_disconnected(self) -> bool:
+                    # Event 让测试精确控制“客户端何时断开”。
+                    return disconnected.is_set()
+
+            async def slow_inference_chat(
+                self,
+                request_id,
+                data,
+                http_request,
+            ):
+                # 模拟 InferenceServer 内部请求正在等待 engine 返回。
+                # 若取消传播正确，sleep 会被 CancelledError 打断。
+                    try:
+                        await asyncio.sleep(10)
+                    except asyncio.CancelledError:
+                        internal_canceled.set()
+                        raise
+
+            server = ClusterInferenceServer.__new__(ClusterInferenceServer)
+            server.worker_traffic = WorkerTrafficMetrics()
+            with patch.object(InferenceServer, "_chat", slow_inference_chat):
+                # 外层 ClusterInferenceServer._chat() 会每 100ms 检查
+                # DisconnectingRequest；这里不需要真实 HTTP 连接。
+                request_task = asyncio.create_task(
+                    server._chat("test-request", {}, DisconnectingRequest())
+                )
+                await asyncio.sleep(0.02)
+                # 触发客户端断开，内部推理任务应随之取消。
+                disconnected.set()
+
+                with self.assertRaises(asyncio.CancelledError):
+                    await request_task
+
+            self.assertTrue(internal_canceled.is_set())
+            snapshot = server.worker_traffic.snapshot()
+            self.assertEqual(snapshot["canceled_requests_total"], 1)
+            self.assertEqual(snapshot["active_requests"], 0)
+
+        asyncio.run(run())
+
+    def test_stream_external_cancellation_closes_active_internal_step(self):
+        """外层 streaming task 被取消时不能遗留内部 __anext__ task。
+
+        真实 Uvicorn 在客户端断开时会直接取消 StreamingResponse 的外层
+        迭代 task。此时 ``internal_stream.__anext__()`` 可能仍在运行；
+        如果先直接 ``aclose()`` 内层 generator，会触发 "asynchronous
+        generator is already running"。本测试固定该竞态的期望行为。
+        """
+
+        async def run():
+            second_step_started = asyncio.Event()
+            internal_cleanup_called = asyncio.Event()
+
+            class ConnectedRequest:
+                async def is_disconnected(self) -> bool:
+                    # 外部取消由 reader.cancel() 模拟，不依赖轮询断开。
+                    return False
+
+            async def slow_inference_stream(
+                self,
+                request_id,
+                data,
+                http_request,
+            ):
+                try:
+                    # 先返回一个 chunk，让下一次 __anext__() 进入长等待。
+                    yield "data: {\"ok\":true}\\n\\n"
+                    # yield 点会让控制权回到外层；下一次 __anext__() 从这里
+                    # 继续执行。先让出一次调度，确保事件确实属于第二步。
+                    await asyncio.sleep(0)
+                    second_step_started.set()
+                    await asyncio.sleep(10)
+                finally:
+                    # 取消传播到内部 generator 时必须执行清理。
+                    internal_cleanup_called.set()
+
+            server = ClusterInferenceServer.__new__(ClusterInferenceServer)
+            server.worker_traffic = WorkerTrafficMetrics()
+            with patch.object(InferenceServer, "_stream_chat", slow_inference_stream):
+                outer_stream = server._stream_chat(
+                    "test-request",
+                    {},
+                    ConnectedRequest(),
+                )
+                first_chunk = await anext(outer_stream)
+                self.assertIn('"ok":true', first_chunk)
+
+                reader = asyncio.create_task(anext(outer_stream))
+                await asyncio.wait_for(second_step_started.wait(), timeout=1)
+                reader.cancel()
+
+                # 修复前的典型失败是这里收到 RuntimeError，而不是取消。
+                with self.assertRaises(asyncio.CancelledError):
+                    await reader
+
+            self.assertTrue(internal_cleanup_called.is_set())
+            snapshot = server.worker_traffic.snapshot()
+            self.assertEqual(snapshot["canceled_requests_total"], 1)
+            self.assertEqual(snapshot["active_requests"], 0)
+
+        asyncio.run(run())
 
     def test_concurrent_client_reconcile_initializes_worker_once(self):
         async def run():
@@ -200,9 +378,10 @@ class PdDiscoveryTest(unittest.TestCase):
                     side_effect=create_client_info,
                 ):
                     await asyncio.gather(
-                        frontend._reconcile_worker_clients_for_model("qwen"),
-                        frontend._reconcile_worker_clients_for_model("qwen"),
+                        frontend.worker_client_pool_manager.reconcile_records([decode]),
+                        frontend.worker_client_pool_manager.reconcile_records([decode]),
                     )
+                    await frontend.worker_client_pool_manager.wait_for_creates()
 
                 self.assertEqual(created, 1)
                 self.assertEqual(
@@ -214,7 +393,7 @@ class PdDiscoveryTest(unittest.TestCase):
 
         asyncio.run(run())
 
-    def test_completion_request_reconciles_clients_once_and_selects_both_roles(self):
+    def test_completion_request_selects_both_roles_without_bootstrap(self):
         async def run():
             with TemporaryDirectory() as temporary:
                 frontend = DisaggregatedFrontend(
@@ -238,9 +417,9 @@ class PdDiscoveryTest(unittest.TestCase):
                     "record": decode,
                 }
 
-                def select_client(role, model_name, api_route=None):
+                async def select_clients(model_name, api_route):
                     self.assertEqual(model_name, "qwen")
-                    return prefill_info if role is WorkerType.PREFILL else decode_info
+                    return prefill_info, decode_info
 
                 async def stream_decode(*args, **kwargs):
                     yield b'{"ok":true}'
@@ -248,14 +427,9 @@ class PdDiscoveryTest(unittest.TestCase):
                 with (
                     patch.object(
                         frontend,
-                        "_reconcile_worker_clients_for_model",
-                        new=AsyncMock(),
-                    ) as reconcile_clients,
-                    patch.object(
-                        frontend,
-                        "_select_worker_client",
-                        side_effect=select_client,
-                    ) as select_client,
+                        "_select_worker_clients",
+                        side_effect=select_clients,
+                    ) as select_clients,
                     patch.object(frontend, "_send_prefill_background", new=AsyncMock()),
                     patch.object(
                         frontend,
@@ -271,8 +445,280 @@ class PdDiscoveryTest(unittest.TestCase):
 
                 self.assertEqual(response.status_code, 200)
                 self.assertEqual(response.json(), {"ok": True})
-                reconcile_clients.assert_awaited_once_with("qwen")
-                self.assertEqual(select_client.call_count, 2)
+                select_clients.assert_awaited_once_with("qwen", "/v1/chat/completions")
+
+        asyncio.run(run())
+
+    def test_streaming_response_uses_sse_media_type(self):
+        async def run():
+            with TemporaryDirectory() as temporary:
+                frontend = DisaggregatedFrontend(
+                    DisaggregatedFrontendOptions(
+                        namespace="pd-test",
+                        discovery_root=Path(temporary),
+                        router_mode="round-robin",
+                        http_host="127.0.0.1",
+                        http_port=18520,
+                    )
+                )
+                prefill = make_record(frontend.registry, "prefill")
+                decode = make_record(frontend.registry, "decode")
+                frontend.watcher = SimpleNamespace(
+                    worker_records=[prefill, decode]
+                )
+                prefill_info = {"instance_id": "prefill", "record": object()}
+                decode_info = {"instance_id": "decode", "record": object()}
+
+                async def select_clients(model_name, api_route):
+                    return prefill_info, decode_info
+
+                async def stream_decode(*args, **kwargs):
+                    # 返回标准 SSE bytes，让测试只关注 frontend 的
+                    # Content-Type 处理，而不依赖真实 decode worker。
+                    yield b'data: {"ok":true}\n\n'
+
+                with (
+                    patch.object(
+                        frontend,
+                        "_select_worker_clients",
+                        side_effect=select_clients,
+                    ),
+                    patch.object(frontend, "_send_prefill_background", new=AsyncMock()),
+                    patch.object(
+                        frontend,
+                        "_stream_decode",
+                        side_effect=stream_decode,
+                    ),
+                ):
+                    client = TestClient(frontend.create_app())
+                    response = client.post(
+                        "/v1/chat/completions",
+                        json={
+                            "model": "qwen",
+                            "messages": [],
+                            "stream": True,
+                        },
+                    )
+
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(
+                    response.headers["content-type"].split(";", 1)[0],
+                    "text/event-stream",
+                )
+                self.assertIn(b'"ok":true', response.content)
+
+        asyncio.run(run())
+
+    def test_initial_pd_error_returns_real_http_status(self):
+        """首个正常 chunk 前，backend 错误不能伪装成 HTTP 200。"""
+
+        async def run():
+            with TemporaryDirectory() as temporary:
+                frontend = DisaggregatedFrontend(
+                    DisaggregatedFrontendOptions(
+                        namespace="pd-test",
+                        discovery_root=Path(temporary),
+                        router_mode="round-robin",
+                        http_host="127.0.0.1",
+                        http_port=18520,
+                    )
+                )
+                prefill = make_record(frontend.registry, "prefill")
+                decode = make_record(frontend.registry, "decode")
+                frontend.watcher = SimpleNamespace(
+                    worker_records=[prefill, decode]
+                )
+                decode_closed = asyncio.Event()
+
+                async def select_clients(model_name, api_route):
+                    return (
+                        {"instance_id": prefill.instance_id, "record": prefill},
+                        {"instance_id": decode.instance_id, "record": decode},
+                    )
+
+                async def failing_prefill(*args, **kwargs):
+                    raise HTTPException(
+                        status_code=429,
+                        detail="prefill overloaded",
+                    )
+
+                async def decode_stream(*args, **kwargs):
+                    try:
+                        yield b'{"ok":true}'
+                    finally:
+                        decode_closed.set()
+
+                with (
+                    patch.object(
+                        frontend,
+                        "_select_worker_clients",
+                        side_effect=select_clients,
+                    ),
+                    patch.object(
+                        frontend,
+                        "_send_prefill_background",
+                        side_effect=failing_prefill,
+                    ),
+                    patch.object(
+                        frontend,
+                        "_stream_decode",
+                        side_effect=decode_stream,
+                    ),
+                ):
+                    client = TestClient(frontend.create_app())
+                    response = client.post(
+                        "/v1/chat/completions",
+                        json={"model": "qwen", "messages": [], "stream": True},
+                    )
+
+                self.assertEqual(response.status_code, 429)
+                self.assertEqual(
+                    response.json(),
+                    {"detail": "prefill overloaded"},
+                )
+                self.assertNotIn(b'"ok":true', response.content)
+                self.assertTrue(decode_closed.is_set())
+
+        asyncio.run(run())
+
+    def test_prefill_failure_is_propagated_and_cancels_decode(self):
+        async def run():
+            with TemporaryDirectory() as temporary:
+                frontend = DisaggregatedFrontend(
+                    DisaggregatedFrontendOptions(
+                        namespace="pd-test",
+                        discovery_root=Path(temporary),
+                        router_mode="round-robin",
+                        http_host="127.0.0.1",
+                        http_port=18520,
+                    )
+                )
+                decode_closed = asyncio.Event()
+
+                async def failing_prefill():
+                    # 模拟 prefill worker 返回明确的 HTTP 错误。
+                    # 该异常必须穿透 P/D 编排层，不能被后台任务吞掉。
+                    raise HTTPException(
+                        status_code=502,
+                        detail="injected prefill failure",
+                    )
+
+                async def successful_decode():
+                    # decode 先产生一个“成功 chunk”再长时间挂起。
+                    # 若 prefill 失败，该 chunk 不允许发送给客户端，
+                    # 且 decode generator 必须被 aclose()。
+                    try:
+                        yield b'{"ok":true}'
+                        await asyncio.sleep(10)
+                    finally:
+                        decode_closed.set()
+
+                prefill_task = asyncio.create_task(failing_prefill())
+                decode_stream = successful_decode()
+                with self.assertRaises(HTTPException) as raised:
+                    async for _chunk in frontend._generate_pd_stream(
+                        prefill_task,
+                        decode_stream,
+                        "test-request",
+                        streaming=True,
+                    ):
+                        pass
+
+                self.assertEqual(raised.exception.status_code, 502)
+                self.assertEqual(
+                    raised.exception.detail,
+                    "injected prefill failure",
+                )
+                self.assertTrue(decode_closed.is_set())
+
+        asyncio.run(run())
+
+    def test_prefetch_closing_response_still_closes_pd_stream(self):
+        """StreamingResponse 未继续迭代时也必须触发内层资源清理。"""
+
+        async def run():
+            cleanup_called = asyncio.Event()
+
+            async def source():
+                try:
+                    yield b'{"ok":true}'
+                    await asyncio.sleep(10)
+                finally:
+                    cleanup_called.set()
+
+            from infinilm.cluster.disaggregated.frontend import (
+                _CancellationSafeAsyncIterator,
+            )
+            inner = _CancellationSafeAsyncIterator(source())
+            first_chunk = await inner.__anext__()
+            iterator = _PrefetchedAsyncIterator(first_chunk, inner)
+
+            self.assertEqual(await iterator.__anext__(), first_chunk)
+            await iterator.aclose()
+
+            self.assertTrue(cleanup_called.is_set())
+
+        asyncio.run(run())
+
+    def test_client_disconnect_cancels_prefill_and_decode(self):
+        async def run():
+            with TemporaryDirectory() as temporary:
+                frontend = DisaggregatedFrontend(
+                    DisaggregatedFrontendOptions(
+                        namespace="pd-test",
+                        discovery_root=Path(temporary),
+                        router_mode="round-robin",
+                        http_host="127.0.0.1",
+                        http_port=18520,
+                    )
+                )
+                prefill_started = asyncio.Event()
+                decode_started = asyncio.Event()
+                prefill_canceled = asyncio.Event()
+                decode_canceled = asyncio.Event()
+
+                async def slow_prefill():
+                    # 模拟 prefill 正在远端计算，客户端断开时应被取消。
+                    prefill_started.set()
+                    try:
+                        await asyncio.sleep(10)
+                    except asyncio.CancelledError:
+                        prefill_canceled.set()
+                        raise
+
+                async def slow_decode():
+                    # decode 首 chunk 可先就绪，但 prefill 成功前不得输出；
+                    # 后续长时间挂起用于模拟仍在等待远端 KV/生成。
+                    decode_started.set()
+                    try:
+                        yield b'{"ok":true}'
+                        await asyncio.sleep(10)
+                    except (asyncio.CancelledError, GeneratorExit):
+                        decode_canceled.set()
+                        raise
+
+                prefill_task = asyncio.create_task(slow_prefill())
+                decode_stream = slow_decode()
+                generator = frontend._generate_pd_stream(
+                    prefill_task,
+                    decode_stream,
+                    "test-request",
+                )
+                # reader 模拟 StreamingResponse 外层迭代任务；取消它
+                # 等价于 Starlette 在客户端断开时取消响应迭代。
+                reader = asyncio.create_task(anext(generator))
+
+                await asyncio.wait_for(
+                    asyncio.gather(prefill_started.wait(), decode_started.wait()),
+                    timeout=1,
+                )
+                # 在 prefill 未成功、任何 decode chunk 尚未暴露给客户端前断开。
+                reader.cancel()
+                await asyncio.gather(reader, return_exceptions=True)
+                await generator.aclose()
+
+                self.assertTrue(prefill_canceled.is_set())
+                self.assertTrue(decode_canceled.is_set())
 
         asyncio.run(run())
 
@@ -290,6 +736,7 @@ class PdDiscoveryTest(unittest.TestCase):
                         http_port=18520,
                     )
                 )
+                initialized_prefill = make_record(frontend.registry, "prefill")
                 initialized = make_record(frontend.registry, "decode")
                 registry_only = make_record(frontend.registry, "decode")
                 frontend.watcher = SimpleNamespace(
@@ -311,10 +758,12 @@ class PdDiscoveryTest(unittest.TestCase):
                     "_create_client_info",
                     side_effect=create_client_info,
                 ):
-                    await frontend._reconcile_worker_clients_for_model("qwen")
+                    await frontend.worker_client_pool_manager.reconcile_records(
+                        [initialized_prefill, initialized]
+                    )
+                    await frontend.worker_client_pool_manager.wait_for_creates()
 
-                info = frontend._select_worker_client(
-                    WorkerType.DECODE,
+                _, info = await frontend._select_worker_clients(
                     "qwen",
                     "/v1/chat/completions",
                 )
@@ -325,8 +774,7 @@ class PdDiscoveryTest(unittest.TestCase):
                     initialized.instance_id
                 ]["routable"] = False
                 with self.assertRaises(HTTPException):
-                    frontend._select_worker_client(
-                        WorkerType.DECODE,
+                    await frontend._select_worker_clients(
                         "qwen",
                         "/v1/chat/completions",
                     )
@@ -524,6 +972,34 @@ class PdDiscoveryTest(unittest.TestCase):
             self.assertFalse(health["ready"])
             self.assertEqual(request.status_code, 503)
 
+    def test_discovery_launch_script_waits_for_frontend_ready_flag(self):
+        """启动脚本不能把 /health 200 误当成 PD 模型已经 ready。"""
+        script = (
+            Path(__file__).resolve().parents[2]
+            / "python/infinilm/cluster/disaggregated/run_pd_discovery_cluster.sh"
+        )
+        source = script.read_text(encoding="utf-8")
+
+        self.assertIn('wait_for_pd_ready "PD frontend"', source)
+        self.assertIn('.get("ready") is True', source)
+        self.assertNotIn('wait_for_url "PD frontend"', source)
+
+    def test_pd_launch_scripts_support_zero_ports(self):
+        """port base 配置为 0 时启动脚本应把 0 原样传给 worker。"""
+        cluster_script = (
+            Path(__file__).resolve().parents[2]
+            / "python/infinilm/cluster/disaggregated/run_pd_discovery_cluster.sh"
+        ).read_text(encoding="utf-8")
+        worker_script = (
+            Path(__file__).resolve().parents[2]
+            / "python/infinilm/cluster/disaggregated/run_pd_worker.sh"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("planned_port()", cluster_script)
+        self.assertIn('[[ "$prefill_http_port" == 0 ]]', cluster_script)
+        self.assertIn('elif [[ "$PORT" == 0 ]]; then', worker_script)
+        self.assertIn('ENGINE_ID="${NAMESPACE}-${MODE}-auto-$$"', worker_script)
+
     def test_frontend_filters_workers_without_required_api_route(self):
         """验证缺少必需 API route 的 worker 不会进入 PD 路由候选。"""
         with TemporaryDirectory() as temporary:
@@ -554,7 +1030,7 @@ class PdDiscoveryTest(unittest.TestCase):
             )
 
     def test_frontend_does_not_route_unadvertised_completions_api(self):
-        """验证未声明的 /v1/completions 不会进入 PD 路由候选。"""
+        """验证当前不暴露未实现的 legacy completions API。"""
         with TemporaryDirectory() as temporary:
             registry = FileWorkerRegistry(Path(temporary))
             decode = make_record(registry, "decode")
@@ -578,6 +1054,13 @@ class PdDiscoveryTest(unittest.TestCase):
                 ),
                 [],
             )
+
+            with TestClient(frontend.create_app()) as client:
+                response = client.post(
+                    "/v1/completions",
+                    json={"model": "qwen", "prompt": "hello"},
+                )
+            self.assertEqual(response.status_code, 404)
 
 
 def replace_load(record):

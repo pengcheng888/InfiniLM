@@ -1,0 +1,51 @@
+version: 1
+
+model:
+  path: /data-aisoft/mechdancer/models/Qwen3-0.6B
+  served_model_name: Qwen3-0.6B
+  # 启动时可依次用 INFINILM_MODEL_PATH、MODEL_PATH 或 MODEL 覆盖 path。
+
+cluster:
+  namespace: infinilm-pd
+  run_dir: /tmp/infinilm-pd
+
+discovery:
+  backend: file
+  file_kv: /tmp/infinilm-pd/discovery
+  # 跨节点部署必须使用 etcd；file 仅适合同机 frontend 与 worker。
+  # etcd:
+  #   endpoints: 127.0.0.1:2379
+  #   prefix: /infinilm
+
+frontend:
+  host: 127.0.0.1
+  port: 18520
+  router_mode: round-robin
+  min_prefill_workers: 1
+  min_decode_workers: 1
+
+workers:
+  host: 127.0.0.1
+  advertise_host: 127.0.0.1
+  bootstrap_host: 127.0.0.1
+  # 0 表示由 OS 分配端口；重复启动 prefill/decode 时不会冲突。
+  base_http_port: 0
+  base_bootstrap_port: 0
+  # 不允许配置 replicas；每次执行一个 worker 角色只启动一个进程。
+
+engine:
+  device: nvidia
+  tp: 1
+  block_size: 256
+  max_new_tokens: 32
+  # KV blocks 由该显存比例自动推导；不再支持 num_blocks。
+  gpu_memory_utilization: 0.85
+  max_batch_size: 32
+  log_level: INFO
+  enable_paged_attn: true
+  enable_graph: true
+  attn: flash-attn
+
+mooncake:
+  protocol: tcp
+  workers: 4

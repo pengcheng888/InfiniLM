@@ -24,7 +24,8 @@ class EngineConfig:
         cache_type: Cache type ('paged' or 'static').
         max_batch_size: Maximum batch size for inference (only for paged cache).
         max_tokens: Default maximum tokens to generate.
-        num_blocks: Number of KV cache blocks (only for paged cache).
+        gpu_memory_utilization: Target fraction of device memory used to
+            size paged KV cache after profiling graph compilation.
         block_size: Size of each KV cache block (only for paged cache).
         max_cache_len: Maximum sequence length (only for static cache).
         enable_prefix_caching: Whether to reuse KV cache across requests.
@@ -39,6 +40,8 @@ class EngineConfig:
         weight_load_mode: Weight loading mode across tensor-parallel workers.
         skip_load: Whether to skip loading model weights (for testing).
         use_legacy_moe: Whether to use the legacy Qwen3 MoE implementation.
+        effective_num_blocks: Runtime-only capacity resolved by the C++ engine.
+            It is not a user-facing CLI/API option.
     """
 
     model_path: str
@@ -56,7 +59,7 @@ class EngineConfig:
     cache_type: str = "paged"  # "paged" or "static"
     max_batch_size: int = 16
     max_tokens: int = 4096
-    num_blocks: int = 512
+    gpu_memory_utilization: float = 0.85
     block_size: int = 256
     max_cache_len: int = 4096
     temperature: float = 1.0
@@ -73,6 +76,7 @@ class EngineConfig:
     use_legacy_moe: bool = False
     kv_transfer_config: Optional[KVTransferConfig] = None
     enable_prefix_caching: bool = True
+    effective_num_blocks: int = 0
 
     def __post_init__(self) -> None:
         if self.num_draft_tokens < 1:
@@ -88,6 +92,10 @@ class EngineConfig:
 
         if self.weight_load_mode not in {"async", "sync"}:
             raise ValueError("weight_load_mode must be either 'async' or 'sync'")
+        if not 0.0 < self.gpu_memory_utilization <= 1.0:
+            raise ValueError("gpu_memory_utilization must be in (0, 1]")
+        if self.effective_num_blocks < 0:
+            raise ValueError("effective_num_blocks must be >= 0")
         if self.max_num_batched_tokens < 1:
             raise ValueError("max_num_batched_tokens must be positive")
 

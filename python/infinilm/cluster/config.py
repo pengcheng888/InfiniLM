@@ -89,9 +89,9 @@ class WorkerOptions:
 class FrontendOptions:
     """frontend 启动和运行所需的不可变配置。"""
 
-    # file discovery 的命名空间；frontend 只查找相同 namespace 下的 worker。
+    # discovery 的命名空间；frontend 只查找相同 namespace 下的 worker。
     namespace: str
-    # file discovery 根目录，frontend 从这里周期性读取 worker JSON 记录。
+    # file backend 根目录；该配置仅适合同机部署，跨节点应使用 etcd。
     file_kv: Path
     # 路由策略名；支持 round-robin、least-loaded、session-affinity、kv-aware。
     router_mode: str

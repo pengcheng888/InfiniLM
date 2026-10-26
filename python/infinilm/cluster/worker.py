@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import os
@@ -67,13 +68,30 @@ class DrainingUvicornServer(uvicorn.Server):
         config: uvicorn.Config,
         *,
         drain_grace_seconds: float,
+        on_ready=None,
     ) -> None:
         super().__init__(config)
         self.drain_grace_seconds = max(0.0, drain_grace_seconds)
         # 该回调由 ClusterWorkerRuntime 绑定为推理服务的 start_draining 方法。
         self.on_drain_start = None
+        # Uvicorn lifespan startup 先于 socket bind；此回调在两者都完成后执行。
+        self.on_ready = on_ready
         # 区分第一次优雅退出和第二次运维强制退出。
         self._exit_requested = False
+
+    async def startup(self, sockets=None) -> None:
+        """socket bind 完成后触发 worker discovery 注册回调。"""
+        await super().startup(sockets=sockets)
+        if not self.started or self.should_exit or self.on_ready is None:
+            return
+
+        try:
+            await self.on_ready(self)
+        except Exception:
+            # 让 Uvicorn _serve() 统一进入 shutdown，避免 engine lifespan、
+            # listener socket 或 registry 资源因 startup 异常而泄漏。
+            logger.exception("Worker ready callback failed; stopping server")
+            self.should_exit = True
 
     def handle_exit(self, sig, frame) -> None:
         # 第二次信号跳过 drain 宽限期，交给 Uvicorn 原生逻辑立即退出。
@@ -129,13 +147,105 @@ class ClusterInferenceServer(InferenceServer):
             return
         await self.worker_discovery.start_draining()
 
+    async def start_discovery(self, *, http_port: int) -> None:
+        """HTTP socket 绑定完成后注册 discovery。
+
+        FastAPI/Uvicorn lifespan startup 发生在 socket bind 之前，因此
+        ``port=0`` 分配出的真实端口必须由 runtime 回调后传入这里。
+        """
+        if self.worker_discovery is not None:
+            return
+        discovery = self._create_discovery_service(
+            self.engine,
+            http_port=http_port,
+        )
+        self.worker_discovery = discovery
+        try:
+            await discovery.start()
+        except Exception:
+            self.worker_discovery = None
+            raise
+
+    @staticmethod
+    async def _client_disconnected(http_request) -> bool:
+        """读取 HTTP 客户端是否断开，兼容异步和同步两种测试 fake。
+
+        Starlette Request.is_disconnected() 返回 coroutine；部分单元测试
+        注入的是同步 callable。两种形态都统一转换成 bool，避免包装层
+        依赖具体测试对象类型。
+        """
+        is_disconnected = getattr(http_request, "is_disconnected", None)
+        if not callable(is_disconnected):
+            # 没有 disconnect API 时视为仍连接，交由正常超时/完成路径处理。
+            return False
+        result = is_disconnected()
+        if inspect.isawaitable(result):
+            # 异步实现必须 await 后才能得到真实连接状态。
+            result = await result
+        return bool(result)
+
+    async def _wait_for_request(
+        self,
+        request_task: asyncio.Task,
+        http_request,
+    ):
+        """等待内部 InferenceServer 任务完成，并把断开转换为任务取消。
+
+        ``request_task`` 包住真正的 ``_chat()`` 或 ``__anext__()``。
+        使用任务而不是直接 await，是为了每 100ms 有机会检查客户端是否
+        断开；一旦断开，就取消内部任务，让 InferenceServer 的 finally
+        调用 add_aborted_req() 终止 engine 请求。
+        """
+        try:
+            while not request_task.done():
+                # 0.1 秒是断开检测频率，不是请求超时；任务可以持续运行很久。
+                done, _pending = await asyncio.wait(
+                    {request_task},
+                    timeout=0.1,
+                )
+                if done:
+                    break
+                if await self._client_disconnected(http_request):
+                    # 对外统一抛 CancelledError；下方 except 会统一取消
+                    # 内部任务并传播取消信号。
+                    raise asyncio.CancelledError
+        except asyncio.CancelledError:
+            # 这里有两个取消来源：
+            # 1. worker 轮询发现 HTTP 客户端断开；
+            # 2. Uvicorn/Starlette 直接取消外层 streaming task。
+            # 无论来源如何，都不能把 request_task 遗留在 pending 状态；
+            # 否则流式路径稍后调用 internal_stream.aclose() 时，内部
+            # generator 仍在一个 __anext__() task 中运行，会触发
+            # "aclose(): asynchronous generator is already running"。
+            await self._cancel_request_task(request_task)
+            raise
+        # 任务完成或抛错都在这里恢复结果/异常。
+        return request_task.result()
+
+    @staticmethod
+    async def _cancel_request_task(request_task: asyncio.Task) -> None:
+        """取消并等待内部请求任务结束，屏蔽它的取消型异常。
+
+        ``return_exceptions=True`` 会同时收集 ``CancelledError``、
+        ``StopAsyncIteration`` 和普通异常，避免内部任务的退出异常覆盖
+        外层正在传播的取消信号。调用方仍必须重新抛出原始
+        ``CancelledError``，因此这里不能吞掉外层取消本身。
+        """
+        if not request_task.done():
+            request_task.cancel()
+        await asyncio.gather(request_task, return_exceptions=True)
+
     async def _chat(self, request_id: str, data: dict, http_request):
-        """Count non-streaming traffic before delegating to InferenceServer."""
+        """包装非流式 InferenceServer 请求，统计流量并传播客户端断开。"""
         self.worker_traffic.begin(streaming=False)
         canceled = False
         failed = False
         try:
-            response = await super()._chat(request_id, data, http_request)
+            # 内部请求放入独立 task，由 _wait_for_request() 周期检查断开。
+            response = await self._wait_for_request(
+                asyncio.create_task(super()._chat(request_id, data, http_request)),
+                http_request,
+            )
             failed = int(getattr(response, "status_code", 200)) >= 400
             if isinstance(response, dict):
                 self.worker_traffic.record_cache(response.get("cache"))
@@ -147,15 +257,33 @@ class ClusterInferenceServer(InferenceServer):
             failed = True
             raise
         finally:
+            # begin/finish 一一对应，保证 active_requests 不会因断开泄漏。
             self.worker_traffic.finish(canceled=canceled, failed=failed)
 
     async def _stream_chat(self, request_id: str, data: dict, http_request):
-        """Count streaming traffic for the full response-generator lifetime."""
+        """包装流式 InferenceServer generator，统计流量并传播取消。"""
         self.worker_traffic.begin(streaming=True)
         canceled = False
         failed = False
         try:
-            async for chunk in super()._stream_chat(request_id, data, http_request):
+            # internal_stream 是原有 InferenceServer._stream_chat()；
+            # 这里逐 chunk 包装，才能在等待下一个 token 时检查断开。
+            internal_stream = super()._stream_chat(request_id, data, http_request)
+            while True:
+                try:
+                    # 每个 chunk 都通过独立 task 等待，等待期间可检测断开。
+                    chunk = await self._wait_for_request(
+                        asyncio.create_task(internal_stream.__anext__()),
+                        http_request,
+                    )
+                except StopAsyncIteration:
+                    # 正常结束，进入 traffic finish 统计。
+                    break
+                except asyncio.CancelledError:
+                    # 客户端断开时显式关闭内层 generator，触发原有
+                    # engine abort 和资源释放逻辑。
+                    await internal_stream.aclose()
+                    raise
                 if "finish_reason" in chunk and (
                     '"error"' in chunk or '"timeout"' in chunk
                 ):
@@ -177,22 +305,36 @@ class ClusterInferenceServer(InferenceServer):
             failed = True
             raise
         finally:
+            # 流式请求的 active 状态必须覆盖整个响应 generator 生命周期。
             self.worker_traffic.finish(canceled=canceled, failed=failed)
 
     def _create_discovery_service(
         self,
         engine: object,
+        *,
+        http_port: int | None = None,
     ) -> WorkerDiscoveryService:
-        """在 engine ready 后构造 worker 的 file discovery 服务。"""
+        """在 engine ready 后构造 worker 的 registry discovery 服务。"""
+        actual_http_port = self.port if http_port is None else int(http_port)
+        if actual_http_port <= 0:
+            raise ValueError(
+                "worker HTTP port must be resolved before discovery registration"
+            )
         served_model_name = (
             self.cluster_options.served_model_name
             or os.path.basename(os.path.normpath(self.model_path))
             or "model"
         )
         kv_config = self.kv_transfer_config
+        bootstrap_port = self.cluster_options.mooncake_bootstrap_port
+        if (
+            self.cluster_options.worker_type is WorkerType.PREFILL
+            and bootstrap_port == 0
+        ):
+            bootstrap_port = self._actual_bootstrap_port(engine)
         metadata = {
             "http_host": self.host,
-            "http_port": self.port,
+            "http_port": actual_http_port,
             "cuda_visible_devices": os.getenv("CUDA_VISIBLE_DEVICES"),
             "tp": self.tensor_parallel_size,
             "max_batch_size": self.max_batch_size,
@@ -206,7 +348,7 @@ class ClusterInferenceServer(InferenceServer):
                 "engine_id": kv_config.engine_id,
                 "kv_role": kv_config.kv_role,
                 "bootstrap_host": self.cluster_options.mooncake_bootstrap_host,
-                "bootstrap_port": self.cluster_options.mooncake_bootstrap_port,
+                "bootstrap_port": bootstrap_port,
             }
         record = self.registry.new_record(
             namespace=self.cluster_options.namespace,
@@ -216,7 +358,7 @@ class ClusterInferenceServer(InferenceServer):
             model=self.model_path,
             served_model_name=served_model_name,
             host=self.cluster_options.advertise_host,
-            port=self.port,
+            port=actual_http_port,
             engine_healthy=True,
             metadata=metadata,
         )
@@ -229,6 +371,20 @@ class ClusterInferenceServer(InferenceServer):
             traffic_metrics=self.worker_traffic,
             cache_index_exporter=cache_exporter,
         )
+
+    def _actual_bootstrap_port(self, engine: object) -> int:
+        """读取 prefill Mooncake bootstrap server 绑定后的真实端口。"""
+        connector = getattr(
+            getattr(getattr(engine, "engine", None), "model_runner", None),
+            "kv_connector",
+            None,
+        )
+        port = getattr(connector, "bootstrap_port", None)
+        if port is None or int(port) <= 0:
+            raise RuntimeError(
+                "Mooncake bootstrap port=0 requires a bound bootstrap server"
+            )
+        return int(port)
 
     def _create_cache_index_exporter(
         self,
@@ -291,14 +447,12 @@ class ClusterInferenceServer(InferenceServer):
         @asynccontextmanager
         async def cluster_lifespan(app: FastAPI):
             async with engine_lifespan(app):
-                discovery = self._create_discovery_service(self.engine)
-                self.worker_discovery = discovery
-                await discovery.start()
                 try:
                     yield
                 finally:
-                    await discovery.stop()
-                    self.worker_discovery = None
+                    if self.worker_discovery is not None:
+                        await self.worker_discovery.stop()
+                        self.worker_discovery = None
                     await self.registry.aclose()
 
         app.router.lifespan_context = cluster_lifespan
@@ -318,6 +472,22 @@ class ClusterWorkerRuntime:
         self.inference_server = inference_server
         self.http_server = self._create_http_server()
 
+    @staticmethod
+    def _listening_port(http_server: uvicorn.Server) -> int:
+        """从 asyncio listener socket 读取 OS 分配的真实 TCP 端口。"""
+        for listener in http_server.servers or []:
+            for sock in listener.sockets or []:
+                sockname = sock.getsockname()
+                if len(sockname) >= 2:
+                    return int(sockname[1])
+        raise RuntimeError("worker HTTP server has no TCP listener")
+
+    async def _on_http_server_ready(self, http_server: uvicorn.Server) -> None:
+        """HTTP socket 绑定后注册 discovery，避免 registry 记录 port=0。"""
+        actual_port = self._listening_port(http_server)
+        self.inference_server.port = actual_port
+        await self.inference_server.start_discovery(http_port=actual_port)
+
     def _create_http_server(self) -> DrainingUvicornServer:
         config = uvicorn.Config(
             self.inference_server._create_app(),
@@ -328,6 +498,7 @@ class ClusterWorkerRuntime:
             config,
             # 生产路径从环境变量读取；DrainingUvicornServer 保留显式参数便于测试。
             drain_grace_seconds=drain_grace_seconds(),
+            on_ready=self._on_http_server_ready,
         )
         http_server.on_drain_start = self.inference_server.start_draining
         return http_server
@@ -420,7 +591,7 @@ def _build_server(argv: list[str]) -> ClusterInferenceServer:
         cache_type="paged" if cfg.enable_paged_attn else "static",
         max_tokens=cfg.max_new_tokens,
         max_batch_size=cfg.max_batch_size,
-        num_blocks=cfg.num_blocks,
+        gpu_memory_utilization=cfg.gpu_memory_utilization,
         block_size=cfg.block_size,
         max_cache_len=cfg.max_cache_len,
         temperature=cfg.temperature,

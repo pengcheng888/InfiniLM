@@ -2,6 +2,8 @@
 #include "../models/model_factory.hpp"
 #include "infinicore/ops.hpp"
 #include "infinicore/ops/distributed/send_recv.hpp"
+#include "infinirt.h"
+#include <algorithm>
 #include <spdlog/spdlog.h>
 #include <stdexcept>
 
@@ -43,6 +45,25 @@ void RankWorker::wait_for_init() {
 
 RankWorker::~RankWorker() {
     close();
+}
+
+RankWorker::DeviceMemoryInfo RankWorker::read_device_memory_() const {
+    size_t free_bytes = 0;
+    size_t total_bytes = 0;
+    const auto status = infinirtGetMemInfo(
+        static_cast<infiniDevice_t>(rank_info_.device.getType()),
+        static_cast<int>(rank_info_.device.getIndex()),
+        &free_bytes,
+        &total_bytes);
+    if (status != INFINI_STATUS_SUCCESS || total_bytes < free_bytes) {
+        throw std::runtime_error("failed to read device memory info");
+    }
+
+    DeviceMemoryInfo info;
+    info.total_bytes = total_bytes;
+    info.free_bytes = free_bytes;
+    info.used_bytes = total_bytes - free_bytes;
+    return info;
 }
 
 std::string RankWorker::info() const {
@@ -228,6 +249,71 @@ void RankWorker::reset_cache(const cache::CacheConfig *new_config) {
     has_job_ = true;
     job_done_ = false;
     cv_.notify_all();
+}
+
+void RankWorker::start_profile_compile() {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (should_exit_) {
+            throw std::runtime_error("RankWorker is closing; cannot profile compile");
+        }
+
+        job_cmd_ = Command::PROFILE_COMPILE;
+        has_job_ = true;
+        job_done_ = false;
+    }
+    cv_.notify_all();
+}
+
+RankWorker::GraphCompileProfile RankWorker::wait_profile_compile() {
+    std::unique_lock<std::mutex> lk(mutex_);
+    cv_.wait(lk, [&] { return job_done_ || should_exit_; });
+
+    if (should_exit_) {
+        throw std::runtime_error("RankWorker stopped during profiling compile");
+    }
+    return profile_result_;
+}
+
+void RankWorker::clear_compiled_graphs() {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (should_exit_) {
+            throw std::runtime_error("RankWorker is closing; cannot clear graphs");
+        }
+
+        job_cmd_ = Command::CLEAR_GRAPHS;
+        has_job_ = true;
+        job_done_ = false;
+    }
+    cv_.notify_all();
+
+    std::unique_lock<std::mutex> lk(mutex_);
+    cv_.wait(lk, [&] { return job_done_ || should_exit_; });
+    if (should_exit_) {
+        throw std::runtime_error("RankWorker stopped while clearing graphs");
+    }
+}
+
+RankWorker::DeviceMemoryInfo RankWorker::get_memory_info() {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (should_exit_) {
+            throw std::runtime_error("RankWorker is closing; cannot read memory");
+        }
+
+        job_cmd_ = Command::MEMORY_INFO;
+        has_job_ = true;
+        job_done_ = false;
+    }
+    cv_.notify_all();
+
+    std::unique_lock<std::mutex> lk(mutex_);
+    cv_.wait(lk, [&] { return job_done_ || should_exit_; });
+    if (should_exit_) {
+        throw std::runtime_error("RankWorker stopped while reading memory info");
+    }
+    return memory_result_;
 }
 
 //------------------------------------------------------
@@ -575,6 +661,108 @@ void RankWorker::thread_loop() {
                     }
                     cv_.notify_all();
                     spdlog::error("[{}] exception during compile: {}\n", info(), e.what());
+                    break;
+                }
+
+            } else if (local_cmd == Command::PROFILE_COMPILE) {
+                try {
+                    GraphCompileProfile profile;
+                    // before 快照不包含 profiling graph，可作为估算 graph 增量的基线。
+                    profile.before = read_device_memory_();
+
+                    if (compiler_ != nullptr) {
+                        compiler_->compile();
+                    }
+                    infinicore::context::syncStream();
+                    profile.after = read_device_memory_();
+
+                    if (compiler_ != nullptr) {
+                        compiler_->clear();
+                    }
+                    infinicore::context::syncStream();
+                    infinicore::context::trimMemory();
+                    infinicore::context::syncStream();
+                    profile.cleared = read_device_memory_();
+
+                    for (const auto &kv_cache : forward_context_.kv_cache_vec) {
+                        if (kv_cache) {
+                            profile.kv_cache_bytes += kv_cache->nbytes();
+                        }
+                    }
+
+                    const auto *paged_config = dynamic_cast<const cache::PagedKVCacheConfig *>(
+                        model_->get_cache_config());
+                    if (paged_config != nullptr) {
+                        size_t max_batch_size = paged_config->max_batch_size();
+                        if (infinilm_config_->enable_workspace_manager) {
+                            max_batch_size = std::min(
+                                max_batch_size,
+                                infinilm_config_->max_num_batched_tokens);
+                        }
+                        profile.max_decode_batch_size = max_batch_size;
+                    }
+
+                    {
+                        std::lock_guard<std::mutex> lk(mutex_);
+                        profile_result_ = profile;
+                        job_done_ = true;
+                    }
+                    cv_.notify_all();
+
+                } catch (const std::exception &e) {
+                    {
+                        std::lock_guard<std::mutex> lk(mutex_);
+                        should_exit_ = true;
+                        job_done_ = true;
+                    }
+                    cv_.notify_all();
+                    spdlog::error("[{}] exception during profile compile: {}\n", info(), e.what());
+                    break;
+                }
+
+            } else if (local_cmd == Command::CLEAR_GRAPHS) {
+                try {
+                    if (compiler_ != nullptr) {
+                        compiler_->clear();
+                    }
+                    infinicore::context::syncStream();
+                    infinicore::context::trimMemory();
+                    infinicore::context::syncStream();
+                    {
+                        std::lock_guard<std::mutex> lk(mutex_);
+                        job_done_ = true;
+                    }
+                    cv_.notify_all();
+
+                } catch (const std::exception &e) {
+                    {
+                        std::lock_guard<std::mutex> lk(mutex_);
+                        should_exit_ = true;
+                        job_done_ = true;
+                    }
+                    cv_.notify_all();
+                    spdlog::error("[{}] exception during graph cleanup: {}\n", info(), e.what());
+                    break;
+                }
+
+            } else if (local_cmd == Command::MEMORY_INFO) {
+                try {
+                    const auto memory_info = read_device_memory_();
+                    {
+                        std::lock_guard<std::mutex> lk(mutex_);
+                        memory_result_ = memory_info;
+                        job_done_ = true;
+                    }
+                    cv_.notify_all();
+
+                } catch (const std::exception &e) {
+                    {
+                        std::lock_guard<std::mutex> lk(mutex_);
+                        should_exit_ = true;
+                        job_done_ = true;
+                    }
+                    cv_.notify_all();
+                    spdlog::error("[{}] exception during memory query: {}\n", info(), e.what());
                     break;
                 }
 

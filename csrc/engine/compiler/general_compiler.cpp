@@ -11,6 +11,11 @@ void GeneralCompiler::compile() {
     paged_compiler_->compile();
 }
 
+void GeneralCompiler::clear() {
+    static_batching_compiler_->clear();
+    paged_compiler_->clear();
+}
+
 GeneralCompiler::Compiled GeneralCompiler::get_compiled(const InfinilmModel::Input &input) {
     GeneralCompiler::Compiled result = {nullptr, nullptr};
 

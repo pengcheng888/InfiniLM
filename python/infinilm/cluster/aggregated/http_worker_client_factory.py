@@ -9,6 +9,7 @@ import httpx
 import openai
 from openai import AsyncOpenAI
 
+from ..http_url import http_url
 from ..worker_registry import WorkerRecord
 
 logger = logging.getLogger(__name__)
@@ -58,7 +59,7 @@ class HttpWorkerClient:
         request_timeout: float,
     ) -> None:
         self.worker = worker
-        base_url = f"http://{worker.host}:{worker.port}/v1"
+        base_url = f"{http_url(worker.host, worker.port)}/v1"
         # worker 本身不校验鉴权，但 OpenAI SDK 要求提供 api_key；
         # 使用固定占位值可以让集群部署不依赖外部凭据。
         self.client = AsyncOpenAI(

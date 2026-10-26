@@ -8,9 +8,11 @@ version = "0.1.0"
 description = "InfiniLM model implementations"
 readme = "README.md"
 dependencies = [
+    "fastapi>=0.110",
     "httpx>=0.27",
     "openai>=1.0",
     "PyYAML>=6.0",
+    "uvicorn>=0.29",
 ]
 requires-python = ">=3.10"
 classifiers = [
@@ -29,13 +31,20 @@ Homepage = "https://github.com/InfiniTensor/InfiniLM"
 
 [project.scripts]
 "infinilm.frontend" = "infinilm.cluster.aggregated.frontend:main"
+"infinilm.pd-frontend" = "infinilm.cluster.disaggregated.frontend:main"
 "infinilm.infinilm" = "infinilm.cluster.worker:main"
 # 聚合式集群 YAML 启动入口；安装后无需设置 PYTHONPATH。
 "infinilm.cluster-launch" = "infinilm.cluster.aggregated.launch.launcher:main"
+# PD 分离集群 YAML 启动入口；一次调用启动一个显式角色。
+"infinilm.pd-cluster-launch" = "infinilm.cluster.disaggregated.launch.launcher:main"
 
 # 把示例配置一起安装，便于安装环境直接引用 launch/configs 下的 YAML。
 [tool.setuptools.package-data]
+"infinilm.cluster" = ["readme.md"]
+"infinilm.cluster.aggregated" = ["*.sh"]
+"infinilm.cluster.disaggregated" = ["*.sh"]
 "infinilm.cluster.aggregated.launch" = ["configs/*.yaml"]
+"infinilm.cluster.disaggregated.launch" = ["configs/*.yaml", "README.md"]
 
 [tool.ruff]
 src = ["."]

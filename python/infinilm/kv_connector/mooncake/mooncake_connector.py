@@ -1,17 +1,15 @@
 import logging
-from dataclasses import dataclass
 from collections import defaultdict
+from dataclasses import dataclass
 from typing import Any, Optional
 
+import infinicore
+from infinilm.config.kv_transfer import KVTransferConfig
 from infinilm.kv_connector import (
     KVConnectorBase,
     KVConnectorMetadata,
     KVConnectorRole,
 )
-from infinilm.config.kv_transfer import KVTransferConfig
-
-import infinicore
-
 from infinilm.llm import InferenceRequest
 
 logger = logging.getLogger(__name__)
@@ -81,6 +79,7 @@ class MooncakeConnector(KVConnectorBase):
         )
 
         self.engine_id: EngineId | None = cfg.engine_id
+        self.bootstrap_port: int | None = None
 
         logger.info(
             "MooncakeConnector::__init__ kv_transfer_config=%s role=%s engine_id=%s",
@@ -106,6 +105,11 @@ class MooncakeConnector(KVConnectorBase):
             self.connector_scheduler = None
             self.connector_worker = MooncakeConnectorWorker(
                 cfg, engine_id=self.engine_id
+            )
+            self.bootstrap_port = getattr(
+                getattr(self.connector_worker, "bootstrap_server", None),
+                "port",
+                None,
             )
 
     def get_num_new_matched_tokens(

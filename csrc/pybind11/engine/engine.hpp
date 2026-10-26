@@ -82,7 +82,8 @@ inline void bind_infer_engine(py::module &m) {
                           const std::string &weight_load_mode,
                           bool pre_transpose,
                           bool enable_workspace_manager,
-                          size_t max_num_batched_tokens) {
+                          size_t max_num_batched_tokens,
+                          double gpu_memory_utilization) {
                  return std::make_shared<InferEngine>(
                      config_str,
                      dist,
@@ -95,7 +96,8 @@ inline void bind_infer_engine(py::module &m) {
                      weight_load_mode,
                      pre_transpose,
                      enable_workspace_manager,
-                     max_num_batched_tokens);
+                     max_num_batched_tokens,
+                     gpu_memory_utilization);
              }),
              py::arg("config_str"),
              py::arg("distributed_config"),
@@ -108,7 +110,8 @@ inline void bind_infer_engine(py::module &m) {
              py::arg("weight_load_mode") = "async",
              py::arg("pre_transpose") = false,
              py::arg("enable_workspace_manager") = false,
-             py::arg("max_num_batched_tokens") = 0)
+             py::arg("max_num_batched_tokens") = 0,
+             py::arg("gpu_memory_utilization") = 0.85)
         .def("load_param", &InferEngine::load_param,
              py::arg("name"), py::arg("param"),
              "Load a parameter tensor into all workers (each worker picks its shard)")

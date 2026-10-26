@@ -43,6 +43,19 @@ def parse_list(value: str):
         )
 
 
+def parse_gpu_memory_utilization(value: str) -> float:
+    """校验 GPU 显存利用率，auto KV cache 模式只接受 (0, 1]。"""
+    try:
+        utilization = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            f"gpu-memory-utilization must be a float, got: {value}"
+        ) from exc
+    if not 0.0 < utilization <= 1.0:
+        raise argparse.ArgumentTypeError("gpu-memory-utilization must be in (0, 1]")
+    return utilization
+
+
 class BaseConfig:
     """InfiniLM Unified Config - Command line argument parser"""
 
@@ -80,7 +93,8 @@ class BaseConfig:
         self.enable_prefix_caching = self.args.enable_prefix_caching
         self.use_mla = self.args.use_mla
         self.pre_transpose = self.args.pre_transpose
-        self.num_blocks = self.args.num_blocks
+        # KV 容量统一由显存比例推导；实际 num_blocks 由 C++ profiling 后回填。
+        self.gpu_memory_utilization = self.args.gpu_memory_utilization
         self.block_size = self.args.block_size
         self.max_cache_len = self.args.max_cache_len
         self.kv_cache_dtype = self.args.kv_cache_dtype
@@ -286,6 +300,7 @@ class BaseConfig:
         self.parser.add_argument(
             "--enable-paged-attn",
             action="store_true",
+            default=True,
             help="use paged cache",
         )
         self.parser.add_argument(
@@ -296,7 +311,10 @@ class BaseConfig:
             help="disable KV prefix cache reuse",
         )
         self.parser.add_argument(
-            "--num-blocks", type=int, default=512, help="number of KV cache blocks"
+            "--gpu-memory-utilization",
+            type=parse_gpu_memory_utilization,
+            default=0.85,
+            help="target fraction of device memory used to size paged KV cache",
         )
         self.parser.add_argument(
             "--block-size", type=int, default=256, help="size of each KV cache block"

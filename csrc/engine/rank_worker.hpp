@@ -11,6 +11,7 @@
 
 #include <any>
 #include <condition_variable>
+#include <cstddef>
 #include <mutex>
 #include <random>
 #include <string>
@@ -31,10 +32,29 @@ class RankWorker {
         RUN,
         RESET_CACHE,
         COMPILE,
+        PROFILE_COMPILE,
+        CLEAR_GRAPHS,
+        MEMORY_INFO,
         STOP
     };
 
 public:
+    struct DeviceMemoryInfo {
+        size_t total_bytes = 0;
+        size_t free_bytes = 0;
+        size_t used_bytes = 0;
+    };
+
+    struct GraphCompileProfile {
+        // profiling compile 前后的显存快照，用于估算 graph 的常驻开销。
+        DeviceMemoryInfo before;
+        DeviceMemoryInfo after;
+        // clear + trim 后的快照，用于得到非 graph、非 KV 的基础占用。
+        DeviceMemoryInfo cleared;
+        size_t kv_cache_bytes = 0;
+        size_t max_decode_batch_size = 0;
+    };
+
     struct Input {
         /// Token IDs tensor of shape `[batch, seq_len]`.
         std::optional<infinicore::Tensor> input_ids;
@@ -118,6 +138,19 @@ public:
     // Reset the internal cache with a new configuration
     void reset_cache(const cache::CacheConfig *new_config);
 
+    // 异步启动一次 profiling compile；所有 rank 必须先同时提交再等待，
+    // 因为 compile 内部会跨 rank barrier。
+    void start_profile_compile();
+
+    // 等待 profiling compile 完成，并返回该 rank 的显存/ KV 统计。
+    GraphCompileProfile wait_profile_compile();
+
+    // 释放当前 compiler 已捕获的全部 graph 和 graph input。
+    void clear_compiled_graphs();
+
+    // 在 worker 线程上读取当前设备显存，保证使用正确的 device context。
+    DeviceMemoryInfo get_memory_info();
+
     std::vector<infinicore::Tensor> get_kv_cache();
 
     // Compile the model graph if enabled.
@@ -135,6 +168,8 @@ public:
     std::string info() const;
 
 private:
+    DeviceMemoryInfo read_device_memory_() const;
+
     void thread_loop();
 
 private:
@@ -169,6 +204,8 @@ private:
     bool pending_params_strict_ = true;
     Input pending_args_;
     std::unique_ptr<cache::CacheConfig> pending_cache_config_;
+    GraphCompileProfile profile_result_;
+    DeviceMemoryInfo memory_result_;
 
     // Output (protected by mutex)
     Output output_;

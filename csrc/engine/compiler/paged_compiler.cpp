@@ -187,6 +187,19 @@ void PagedCompiler::compile() {
     }
 }
 
+void PagedCompiler::clear() {
+    // map 中每个 CompiledResult 都持有一个 graph exec 和一组 input tensor。
+    // 先清空 map，再 reset block_tables_holder_，保证引用按依赖顺序释放。
+    compiled_map_decode_.clear();
+    block_tables_holder_.reset();
+    auto &forward_context = infinilm::global_state::get_forward_context();
+    // forward context 会保存最后一组 graph input tensors；必须同时清空，
+    // 否则 profiling graph 销毁后这些 input 显存仍被引用而无法释放。
+    forward_context.attn_metadata = global_state::AttentionMetadata{};
+    forward_context.mamba_metadata = global_state::MambaMetadata{};
+    forward_context.workspace_manager.reset_runtime_buffers();
+}
+
 PagedCompiler::Compiled PagedCompiler::get_compiled(const InfinilmModel::Input &input) {
     if (model_->get_cache_config() != nullptr && dynamic_cast<const cache::PagedKVCacheConfig *>(model_->get_cache_config())) {
         size_t batch_size = input.block_tables.value()->size(0);

@@ -22,22 +22,24 @@ frontend:
   host: 127.0.0.1
   port: 18000
   router_mode: round-robin
-  # 未配置时自动等于 CUDA_VISIBLE_DEVICES 中的 GPU 数量。
-  # router_min_initial_workers: 3
+  # 三副本部署时保持 3；worker 数量由执行 3 次 --role worker 决定。
+  router_min_initial_workers: 3
 
 workers:
   host: 127.0.0.1
   advertise_host: 127.0.0.1
-  base_http_port: 18081
+  # 多次启动 worker 时必须使用 0，让 OS 为每个进程分配不同端口。
+  base_http_port: 0
   port_offset: 10
-  # 注意：不配置 replicas；worker 数量只来自 CUDA_VISIBLE_DEVICES。
+  # 注意：不允许配置 replicas；每次执行 --role worker 只启动一个进程。
 
 engine:
   device: nvidia
   tp: 1
   block_size: 256
   max_new_tokens: 2644
-  num_blocks: 500
+  # KV blocks 由该显存比例自动推导；不再支持 num_blocks。
+  gpu_memory_utilization: 0.85
   max_batch_size: 32
   log_level: INFO
   enable_paged_attn: true

@@ -1,4 +1,4 @@
-"""worker 的 file discovery 注册与心跳服务。"""
+"""worker 的 registry 注册与心跳服务。"""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 
 class WorkerDiscoveryService:
-    """把 worker 的实际服务地址注册到 file discovery，并维护心跳租约。"""
+    """把 worker 的实际服务地址注册到 registry，并维护心跳租约。"""
 
     def __init__(
         self,

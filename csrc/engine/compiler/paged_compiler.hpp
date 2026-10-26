@@ -10,6 +10,8 @@ public:
     PagedCompiler(const std::shared_ptr<InfinilmModel> &model, RankBarrier *barrier);
 
     void compile() override;
+    // 清空全部 decode graph、input tensor 和共享 block table holder。
+    void clear() override;
 
     Compiled get_compiled(const InfinilmModel::Input &input) override;
 

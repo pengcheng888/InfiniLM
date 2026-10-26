@@ -14,7 +14,7 @@ MODEL_PATH_ENV_VARS = ("INFINILM_MODEL_PATH", "MODEL_PATH", "MODEL")
 
 @dataclass(frozen=True)
 class DiscoveryConfig:
-    """服务发现配置；file 用于单机，etcd 用于共享注册中心。"""
+    """服务发现配置；file 仅用于同机部署，etcd 用于跨节点注册中心。"""
 
     backend: str = "file"
     file_kv: Path | None = None
@@ -57,7 +57,7 @@ class EngineConfig:
     tp: int = 1
     block_size: int = 256
     max_new_tokens: int = 2644
-    num_blocks: int = 500
+    gpu_memory_utilization: float = 0.85
     max_batch_size: int = 32
     log_level: str = "INFO"
     enable_paged_attn: bool = True
@@ -282,13 +282,15 @@ def load_cluster_launch_config(
         "session-affinity",
     }:
         raise ValueError(f"unsupported frontend.router_mode: {router_mode}")
-    min_workers_raw = frontend_raw.get("router_min_initial_workers")
-    if min_workers_raw is not None and (
-        isinstance(min_workers_raw, bool)
-        or not isinstance(min_workers_raw, int)
-        or min_workers_raw < 1
-    ):
-        raise ValueError("frontend.router_min_initial_workers must be an integer >= 1")
+    # 每次 launcher 只启动一个角色；默认只需 1 个 worker 即可提供服务。
+    # 三副本等部署应在 YAML 中显式写 3，由外部重复执行 worker 命令实现。
+    min_workers = _integer(
+        "frontend",
+        frontend_raw,
+        "router_min_initial_workers",
+        1,
+        minimum=1,
+    )
 
     workers_raw = _mapping("workers", root.get("workers", {}))
     _reject_unknown(
@@ -297,10 +299,9 @@ def load_cluster_launch_config(
         {"host", "advertise_host", "base_http_port", "port_offset", "replicas"},
     )
     if "replicas" in workers_raw:
-        # 副本数唯一来源是 CUDA_VISIBLE_DEVICES，避免 YAML 与环境冲突。
+        # 副本数由重复执行 worker 命令决定，避免 YAML 与实际进程数冲突。
         raise ValueError(
-            "workers.replicas is not supported; worker count comes from "
-            "CUDA_VISIBLE_DEVICES"
+            "workers.replicas is not supported; run the worker command once per replica"
         )
     worker_host = workers_raw.get("host", "127.0.0.1")
     advertise_host = workers_raw.get("advertise_host", "127.0.0.1")
@@ -309,6 +310,11 @@ def load_cluster_launch_config(
             raise ValueError(f"workers.{field} must be a non-empty string")
 
     engine_raw = _mapping("engine", root.get("engine", {}))
+    if "num_blocks" in engine_raw:
+        # 旧容量字段已移除；先给出迁移错误，再进入通用 unknown-field 校验。
+        raise ValueError(
+            "engine.num_blocks is not supported; use engine.gpu_memory_utilization"
+        )
     _reject_unknown(
         "engine",
         engine_raw,
@@ -317,7 +323,7 @@ def load_cluster_launch_config(
             "tp",
             "block_size",
             "max_new_tokens",
-            "num_blocks",
+            "gpu_memory_utilization",
             "max_batch_size",
             "log_level",
             "enable_paged_attn",
@@ -331,6 +337,16 @@ def load_cluster_launch_config(
     for field, value in (("device", device), ("attn", attn), ("log_level", log_level)):
         if not isinstance(value, str) or not value.strip():
             raise ValueError(f"engine.{field} must be a non-empty string")
+
+    gpu_memory_utilization = _number(
+        "engine",
+        engine_raw,
+        "gpu_memory_utilization",
+        0.85,
+        minimum=0.001,
+    )
+    if gpu_memory_utilization > 1.0:
+        raise ValueError("engine.gpu_memory_utilization must be <= 1.0")
 
     config_dir = config_path.parent
     # run_dir 是本次集群运行时文件根目录；file 注册目录默认放在其中。
@@ -385,13 +401,14 @@ def load_cluster_launch_config(
             host=frontend_host,
             port=_integer("frontend", frontend_raw, "port", 18000, minimum=1),
             router_mode=router_mode,
-            router_min_initial_workers=min_workers_raw,
+            router_min_initial_workers=min_workers,
         ),
         workers=WorkerConfig(
             host=worker_host,
             advertise_host=advertise_host,
+            # base_http_port=0 表示所有 worker 都传 --port 0，由 OS 分配端口。
             base_http_port=_integer(
-                "workers", workers_raw, "base_http_port", 18081, minimum=1
+                "workers", workers_raw, "base_http_port", 18081, minimum=0
             ),
             port_offset=_integer("workers", workers_raw, "port_offset", 10, minimum=0),
         ),
@@ -402,7 +419,7 @@ def load_cluster_launch_config(
             max_new_tokens=_integer(
                 "engine", engine_raw, "max_new_tokens", 2644, minimum=1
             ),
-            num_blocks=_integer("engine", engine_raw, "num_blocks", 500, minimum=1),
+            gpu_memory_utilization=gpu_memory_utilization,
             max_batch_size=_integer(
                 "engine", engine_raw, "max_batch_size", 32, minimum=1
             ),

@@ -504,8 +504,8 @@ snapshot: []
 
 ### 7.1 file discovery
 
-file discovery 通常是单机或共享文件系统部署，frontend 可以直接读取默认
-cache-index 目录。
+file discovery 仅适合同机部署，frontend 可以直接读取默认 cache-index
+目录；跨节点 worker registry 必须使用 etcd。
 
 ### 7.2 etcd discovery
 

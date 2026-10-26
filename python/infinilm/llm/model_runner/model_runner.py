@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any, Generator
 
 import infinicore
+
 from infinilm.cache.cache import PagedKVCacheConfig, StaticKVCacheConfig
 from infinilm.config.engine_config import EngineConfig
 from infinilm.distributed import DistConfig
@@ -60,6 +61,17 @@ class ModelRunner:
                 f"[1024, {max_position_embeddings}]"
             )
 
+        self.hf_config = hf_config
+
+        # KV 容量统一通过显存比例推导。auto sizing 依赖 paged KV、真实权重
+        # 加载和权重后处理；static cache 与 skip-load 不再作为容量配置路径。
+        if config.cache_type != "paged":
+            raise ValueError("gpu_memory_utilization requires cache_type='paged'")
+        if config.skip_load:
+            raise ValueError("gpu_memory_utilization cannot be used with skip_load")
+        if config.draft_model_path is not None:
+            raise ValueError("gpu_memory_utilization does not support draft models yet")
+
         self._init_device()
 
         # Initialize KV cache based on cache type
@@ -71,12 +83,18 @@ class ModelRunner:
                 f"Using Static KV Cache with max_cache_len={config.max_cache_len}"
             )
         elif config.cache_type == "paged":
+            # 先用 2 个 probe blocks 创建 engine；权重后处理阶段会在
+            # C++ 内 profiling graph、释放 profiling graph，再分配最终 KV cache。
+            probe_num_blocks = 2
             cache_config = PagedKVCacheConfig(
-                num_blocks=config.num_blocks,
+                num_blocks=probe_num_blocks,
                 block_size=config.block_size,
                 max_batch_size=config.max_batch_size,
             )
-            logger.info(f"Using Paged KV Cache with num_blocks={config.num_blocks}")
+            logger.info(
+                f"Using Paged KV Cache with num_blocks={probe_num_blocks} "
+                f"gpu_memory_utilization={config.gpu_memory_utilization}"
+            )
         else:
             raise ValueError(f"Unsupported cache_type: {config.cache_type}")
 
@@ -104,6 +122,7 @@ class ModelRunner:
             pre_transpose=config.pre_transpose,
             enable_workspace_manager=config.enable_workspace,
             max_num_batched_tokens=config.max_num_batched_tokens,
+            gpu_memory_utilization=config.gpu_memory_utilization,
         )
 
         if self.model_engine.model_type == "minicpm_eagle":
@@ -118,6 +137,23 @@ class ModelRunner:
             load_model_state_dict_by_file(
                 self.model_engine, config.model_path, dtype=self.model_engine.dtype
             )
+
+        # C++ 在 load/process 阶段完成 graph profiling 和二次分配。
+        # scheduler 必须使用 engine 返回的 effective blocks，而不是 probe 值。
+        resolved_config = self.model_engine.get_cache_config()
+        config.effective_num_blocks = resolved_config.num_blocks()
+        minimum_blocks = (config.max_cache_len + config.block_size - 1) // config.block_size
+        if config.effective_num_blocks < minimum_blocks:
+            raise RuntimeError(
+                "gpu_memory_utilization resolved "
+                f"{config.effective_num_blocks} blocks, but max_cache_len requires "
+                f"at least {minimum_blocks} blocks"
+            )
+        logger.info(
+            "GPU memory auto-sizing resolved num_blocks=%s utilization=%s",
+            config.effective_num_blocks,
+            config.gpu_memory_utilization,
+        )
 
         self.speculative_runner = None
         if config.draft_model_path is not None:

@@ -8,31 +8,28 @@ import logging
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+from enum import IntEnum
 
 import httpx
 import infinicore
-import numpy as np
 import msgspec
+import numpy as np
 import zmq
 import zmq.asyncio
-from dataclasses import dataclass
-
 from infinilm.kv_connector.mooncake.mooncake_connector import (
     MooncakeConnectorMetadata,
     PullReqMeta,
 )
-
 from infinilm.kv_connector.mooncake.mooncake_utils import (
+    MooncakeBootstrapServer,
+    RegisterWorkerPayload,
     get_ip,
     get_mooncake_bootstrap_addr,
     make_zmq_path,
     make_zmq_socket,
-    MooncakeBootstrapServer,
-    RegisterWorkerPayload,
     should_launch_bootstrap_server,
 )
-from enum import IntEnum
-from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -175,6 +172,17 @@ class MooncakeConnectorWorker:
                 max_workers=self.num_sender_workers,
                 thread_name_prefix="infinilm-mooncake-sender",
             )
+            # bootstrap server 必须先启动：port=0 时 sender 只有从该对象
+            # 才能拿到 OS 分配出的真实端口。
+            if should_launch_bootstrap_server(self.parallel_config):
+                bootstrap_host, bootstrap_port = get_mooncake_bootstrap_addr(
+                    self.parallel_config
+                )
+                self.bootstrap_server = MooncakeBootstrapServer(
+                    bootstrap_host,
+                    bootstrap_port,
+                )
+                self.bootstrap_server.start()
             logger.debug(
                 "Mooncake Prefiller: use %d workers to send kvcaches",
                 self.num_sender_workers,
@@ -187,16 +195,6 @@ class MooncakeConnectorWorker:
                 target=self._async_loop, args=(self.sender_loop,), daemon=True
             )
             self._sender_listener_t.start()
-
-            # Start bootstrap server on global rank 0.
-            if should_launch_bootstrap_server(self.parallel_config):
-                bootstrap_host, bootstrap_port = get_mooncake_bootstrap_addr(
-                    self.parallel_config
-                )
-                self.bootstrap_server = MooncakeBootstrapServer(
-                    bootstrap_host, bootstrap_port
-                )
-                self.bootstrap_server.start()
 
         if not self.is_kv_producer:
             self.receiver_loop = asyncio.new_event_loop()
@@ -287,7 +285,12 @@ class MooncakeConnectorWorker:
             sock.close()
 
     async def register_worker_with_bootstrap(self):
-        host, port = get_mooncake_bootstrap_addr(self.parallel_config)
+        bootstrap_server = getattr(self, "bootstrap_server", None)
+        if bootstrap_server is not None:
+            host = bootstrap_server.host
+            port = bootstrap_server.port
+        else:
+            host, port = get_mooncake_bootstrap_addr(self.parallel_config)
         logger.debug(
             "Mooncake sender register_worker_with_bootstrap start! host=%s port=%s",
             host,

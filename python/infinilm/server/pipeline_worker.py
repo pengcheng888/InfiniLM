@@ -26,7 +26,7 @@ def run_worker(cfg: BaseConfig) -> None:
         cache_type="paged" if cfg.enable_paged_attn else "static",
         max_batch_size=cfg.max_batch_size,
         max_tokens=cfg.max_new_tokens,
-        num_blocks=cfg.num_blocks,
+        gpu_memory_utilization=cfg.gpu_memory_utilization,
         block_size=cfg.block_size,
         max_cache_len=cfg.max_cache_len,
         temperature=cfg.temperature,

@@ -9,6 +9,8 @@ public:
     GeneralCompiler(const std::shared_ptr<InfinilmModel> &model, RankBarrier *barrier);
 
     void compile() override;
+    // 同时释放 static 与 paged 两条编译路径缓存的 graph。
+    void clear() override;
 
     Compiled get_compiled(const InfinilmModel::Input &input) override;
 

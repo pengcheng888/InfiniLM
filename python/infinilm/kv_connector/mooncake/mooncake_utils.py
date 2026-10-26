@@ -12,7 +12,6 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-
 import psutil
 import uvicorn
 import zmq
@@ -88,6 +87,7 @@ class MooncakeBootstrapServer:
         self._register_routes()
         self.server_thread: threading.Thread | None = None
         self.server: uvicorn.Server | None = None
+        self.requested_port = int(port)
 
     def __del__(self):
         self.shutdown()
@@ -110,7 +110,17 @@ class MooncakeBootstrapServer:
         self.server_thread.start()
         while not self.server.started:
             time.sleep(0.1)  # Wait for the server to start
+        self.port = self._listener_port()
         logger.info("Mooncake Bootstrap Server started at %s:%d", self.host, self.port)
+
+    def _listener_port(self) -> int:
+        """Read the OS-assigned port so bootstrap_port=0 is usable."""
+        for listener in self.server.servers or []:
+            for sock in listener.sockets or []:
+                sockname = sock.getsockname()
+                if len(sockname) >= 2:
+                    return int(sockname[1])
+        raise RuntimeError("Mooncake bootstrap server has no TCP listener")
 
     def shutdown(self):
         if self.server_thread is None or self.server is None or not self.server.started:

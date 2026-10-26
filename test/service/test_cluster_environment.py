@@ -18,6 +18,10 @@ from infinilm.cluster.disaggregated.frontend import (
     parse_disaggregated_frontend_args,
 )
 from infinilm.cluster.environment import (
+    bootstrap_timeout_seconds,
+    cluster_communication_test,
+    cluster_communication_test_kv_blocks,
+    cluster_communication_test_token_id,
     connect_timeout,
     drain_grace_seconds,
     health_interval_seconds,
@@ -29,6 +33,81 @@ from infinilm.cluster.worker_registry import create_worker_registry
 
 
 class ClusterTimeoutEnvironmentTest(unittest.TestCase):
+    def test_cluster_communication_test_reads_boolean_environment(self):
+        for raw_value in ("1", "true", "TRUE", "yes", "on"):
+            with self.subTest(raw_value=raw_value):
+                self.assertTrue(
+                    cluster_communication_test(
+                        {"INFINILM_CLUSTER_COMMUNICATION_TEST": raw_value}
+                    )
+                )
+
+        for raw_value in ("", "0", "false", "FALSE", "no", "off"):
+            with self.subTest(raw_value=raw_value):
+                self.assertFalse(
+                    cluster_communication_test(
+                        {"INFINILM_CLUSTER_COMMUNICATION_TEST": raw_value}
+                    )
+                )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "INFINILM_CLUSTER_COMMUNICATION_TEST must be a boolean",
+        ):
+            cluster_communication_test(
+                {"INFINILM_CLUSTER_COMMUNICATION_TEST": "maybe"}
+            )
+
+    def test_cluster_communication_test_token_id_reads_environment(self):
+        self.assertEqual(cluster_communication_test_token_id({}), 1)
+        self.assertEqual(
+            cluster_communication_test_token_id(
+                {"INFINILM_CLUSTER_COMMUNICATION_TEST_TOKEN_ID": ""}
+            ),
+            1,
+        )
+        self.assertEqual(
+            cluster_communication_test_token_id(
+                {"INFINILM_CLUSTER_COMMUNICATION_TEST_TOKEN_ID": " 7 "}
+            ),
+            7,
+        )
+
+        for raw_value in ("invalid", "-1"):
+            with self.subTest(raw_value=raw_value):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "INFINILM_CLUSTER_COMMUNICATION_TEST_TOKEN_ID",
+                ):
+                    cluster_communication_test_token_id(
+                        {"INFINILM_CLUSTER_COMMUNICATION_TEST_TOKEN_ID": raw_value}
+                    )
+
+    def test_cluster_communication_test_kv_blocks_reads_environment(self):
+        self.assertEqual(cluster_communication_test_kv_blocks({}), 2048)
+        self.assertEqual(
+            cluster_communication_test_kv_blocks(
+                {"INFINILM_CLUSTER_COMMUNICATION_TEST_KV_BLOCKS": ""}
+            ),
+            2048,
+        )
+        self.assertEqual(
+            cluster_communication_test_kv_blocks(
+                {"INFINILM_CLUSTER_COMMUNICATION_TEST_KV_BLOCKS": " 32 "}
+            ),
+            32,
+        )
+
+        for raw_value in ("invalid", "0", "-1"):
+            with self.subTest(raw_value=raw_value):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "INFINILM_CLUSTER_COMMUNICATION_TEST_KV_BLOCKS",
+                ):
+                    cluster_communication_test_kv_blocks(
+                        {"INFINILM_CLUSTER_COMMUNICATION_TEST_KV_BLOCKS": raw_value}
+                    )
+
     def test_connect_timeout_reads_environment(self):
         self.assertEqual(connect_timeout({}), 3.0)
         self.assertEqual(
@@ -58,6 +137,27 @@ class ClusterTimeoutEnvironmentTest(unittest.TestCase):
         for raw_value in ("invalid", "0", "-1", "nan", "inf"):
             with self.subTest(raw_value=raw_value), self.assertRaises(ValueError):
                 request_timeout({"INFINILM_CLUSTER_REQUEST_TIMEOUT": raw_value})
+
+    def test_bootstrap_timeout_reads_environment(self):
+        self.assertEqual(bootstrap_timeout_seconds({}), 3.0)
+        self.assertEqual(
+            bootstrap_timeout_seconds(
+                {"INFINILM_CLUSTER_BOOTSTRAP_TIMEOUT_SECONDS": ""}
+            ),
+            3.0,
+        )
+        self.assertEqual(
+            bootstrap_timeout_seconds(
+                {"INFINILM_CLUSTER_BOOTSTRAP_TIMEOUT_SECONDS": "0.5"}
+            ),
+            0.5,
+        )
+
+        for raw_value in ("invalid", "0", "-1", "nan", "inf"):
+            with self.subTest(raw_value=raw_value), self.assertRaises(ValueError):
+                bootstrap_timeout_seconds(
+                    {"INFINILM_CLUSTER_BOOTSTRAP_TIMEOUT_SECONDS": raw_value}
+                )
 
     def test_health_interval_reads_environment(self):
         self.assertEqual(health_interval_seconds({}), 1.0)
@@ -205,6 +305,7 @@ class ClusterTimeoutEnvironmentTest(unittest.TestCase):
             environment = {
                 "INFINILM_CLUSTER_CONNECT_TIMEOUT": "4",
                 "INFINILM_CLUSTER_REQUEST_TIMEOUT": "120",
+                "INFINILM_CLUSTER_BOOTSTRAP_TIMEOUT_SECONDS": "0.5",
                 "INFINILM_CLUSTER_HEALTH_INTERVAL_SECONDS": "0.1",
             }
 
@@ -213,6 +314,7 @@ class ClusterTimeoutEnvironmentTest(unittest.TestCase):
 
             self.assertEqual(frontend._connect_timeout, 4.0)
             self.assertEqual(frontend._request_timeout, 120.0)
+            self.assertEqual(frontend._bootstrap_timeout, 0.5)
             self.assertEqual(frontend._discovery_refresh_interval_seconds, 0.1)
             asyncio.run(frontend.registry.aclose())
 

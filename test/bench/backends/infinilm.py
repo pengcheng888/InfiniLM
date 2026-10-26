@@ -54,9 +54,10 @@ class InfiniLMBenchmark(BaseBenchmark):
             model_path=model_dir_path,
             device=device_name,
             tensor_parallel_size=tensor_parallel_size,
-            cache_type="paged" if enable_paged_attn else "static",
+            # KV 容量统一走 auto memory sizing，因此 benchmark 也固定 paged cache。
+            cache_type="paged",
             max_batch_size=1,
-            num_blocks=128,
+            gpu_memory_utilization=0.85,
             block_size=256,
             enable_graph=enable_graph,
             attn_backend=attn_backend,
