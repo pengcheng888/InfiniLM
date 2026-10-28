@@ -26,6 +26,7 @@ from infinilm.llm.request import (
     RequestOutput,
     TokenOutput,
 )
+from infinilm.llm.request_timing.request_timing import RequestTimingFileRecorder
 from infinilm.llm.sampling_params import SamplingParams
 from infinilm.llm.scheduler import Scheduler
 from infinilm.llm.static_scheduler import StaticScheduler
@@ -39,6 +40,7 @@ class LLMEngine:
 
     def __init__(self, config: EngineConfig):
         self.config = config
+        self.request_timing_recorder = RequestTimingFileRecorder()
         hf_config = read_hf_config(config.model_path)
         has_mamba_cache = model_uses_mamba_cache(hf_config)
         if has_mamba_cache and config.enable_prefix_caching:
@@ -136,9 +138,19 @@ class LLMEngine:
 
     def add_request(self, request: InferenceRequest):
         """Add a request to the scheduler."""
+        if request.timing_role == "aggregated":
+            # 请求进入引擎前根据 KV 角色细化 timing 标签：
+            # producer 对应 P/prefill，consumer 对应 D/decode。
+            kv_config = getattr(self.config, "kv_transfer_config", None)
+            kv_role = kv_config and kv_config.kv_role
+            if kv_role == "kv_producer":
+                request.timing_role = "prefill"
+            elif kv_role == "kv_consumer":
+                request.timing_role = "decode"
         self.scheduler.add_request(request)
 
     def close(self):
+        self.request_timing_recorder.close()
         self.model_runner.close()
 
     def step(self) -> tuple[bool, list[tuple]]:
@@ -156,8 +168,18 @@ class LLMEngine:
             return False, []
 
         runner_output = self.model_runner.execute_model(scheduler_output)
+        timing_steps = [
+            request.timing_steps[-1]
+            for request in scheduler_output.scheduled_requests
+            if request.timing_steps
+        ]
+        self.request_timing_recorder.record_steps(timing_steps)
         sampled_token_ids = runner_output.sampled_token_ids
+        # update_from_output() 会让 connector 汇报本 step 完成的 KV 事件；
+        # 随后统一取出并交给 recorder，保持 step 与传输事件的落盘顺序。
         self.scheduler.update_from_output(runner_output)
+        for timing_event in self.scheduler.pop_timing_events():
+            self.request_timing_recorder.record_event(timing_event)
         pending = self._update_requests(
             scheduler_output.scheduled_requests,
             sampled_token_ids,
@@ -189,6 +211,11 @@ class LLMEngine:
             )
         pending = []
         for req, token_ids in zip(requests, sampled_token_ids):
+            if req.is_finished():
+                # scheduler 可能在输出更新前已把请求标记为 failed/timeout。
+                self.request_timing_recorder.record_finish(req)
+                continue
+
             # The model successfully consumed the request's current logical tokens.
             # Commit this boundary before observing a concurrent client abort.
             pre_output_computed_tokens = req.get_total_length()
@@ -202,6 +229,7 @@ class LLMEngine:
                 # (status still RUNNING).
                 if not req.is_finished():
                     req.mark_canceled()
+                self.request_timing_recorder.record_finish(req)
                 continue
 
             if isinstance(token_ids, list):
@@ -233,6 +261,7 @@ class LLMEngine:
                 if req._output_queue is None:
                     if is_finished:
                         req.mark_finished(req.finish_reason)
+                        self.request_timing_recorder.record_finish(req)
 
                 else:
                     if holds_back and not is_finished:
@@ -251,6 +280,7 @@ class LLMEngine:
 
                         if is_finished:
                             req.mark_finished(req.finish_reason)
+                            self.request_timing_recorder.record_finish(req)
 
                     output = TokenOutput(
                         request_id=req.request_id,
@@ -788,6 +818,8 @@ class AsyncLLMEngine:
             else:
                 req.mark_failed(reason)
 
+            self.engine.request_timing_recorder.record_finish(req)
+
             # Put a final token to unblock stream_request.
             # If Starlette already cancelled _stream_chat, aclose() may have closed
             # the queue; put_nowait will raise and we silently ignore it.
@@ -841,6 +873,8 @@ class AsyncLLMEngine:
         prompt_token_ids: Optional[List[int]] = None,
         sampling_params: Optional[SamplingParams] = None,
         request_id: Optional[str] = None,
+        chat_template_kwargs: Optional[dict] = None,
+        server_received_at_ns: Optional[int] = None,
         # For server use
         request_data: Optional[dict] = None,
     ) -> InferenceRequest:
@@ -897,7 +931,9 @@ class AsyncLLMEngine:
             )
 
             prompt = self.engine.apply_chat_template(
-                messages, add_generation_prompt=add_generation_prompt
+                messages,
+                add_generation_prompt=add_generation_prompt,
+                chat_template_kwargs=chat_template_kwargs,
             )
 
             mm_inputs = resolve_multimodal_inputs(messages)
@@ -937,6 +973,8 @@ class AsyncLLMEngine:
             sampling_params=sampling_params,
             eos_token_ids=self.engine.eos_token_ids,
             request_data=request_data,
+            server_received_at_ns=server_received_at_ns,
+            timing_role=self._timing_role(),
         )
 
         if request_data and "kv_transfer_params" in request_data:
@@ -956,7 +994,8 @@ class AsyncLLMEngine:
         request_id: Optional[str] = None,
         request_data: Optional[dict] = None,
         add_generation_prompt: bool = True,
-        **kwargs,
+        chat_template_kwargs: Optional[dict] = None,
+        server_received_at_ns: Optional[int] = None,
     ) -> InferenceRequest:
         """Add a chat request to the engine.
 
@@ -977,7 +1016,20 @@ class AsyncLLMEngine:
             sampling_params=sampling_params,
             request_id=request_id,
             request_data=request_data,
+            chat_template_kwargs=chat_template_kwargs,
+            server_received_at_ns=server_received_at_ns,
         )
+
+    def _timing_role(self) -> str:
+        """返回当前 worker 在 timing 日志中的角色标签。"""
+        # 角色来自静态 KV 配置，而不是请求参数；同一个 worker 保持一致。
+        kv_config = getattr(self.config, "kv_transfer_config", None)
+        kv_role = kv_config and kv_config.kv_role
+        if kv_role == "kv_producer":
+            return "prefill"
+        if kv_role == "kv_consumer":
+            return "decode"
+        return "aggregated"
 
     async def stream_request(
         self,

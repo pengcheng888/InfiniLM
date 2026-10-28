@@ -1,4 +1,5 @@
 import logging
+import os
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Generator
@@ -15,6 +16,7 @@ from infinilm.kv_connector import (
     KVConnectorRole,
 )
 from infinilm.llm.model_runner.speculative_runner import SpeculativeRunner
+from infinilm.llm.request import monotonic_ns
 from infinilm.modeling_utils import load_model_state_dict_by_file
 from infinilm.processors import AutoInfinilmProcessor
 
@@ -32,7 +34,8 @@ class KVConnectorOutput:
     # IDs of externally computed KV blocks that failed to load.
     # Requests referencing these blocks should be rescheduled to recompute them
     invalid_block_ids: set[int] = field(default_factory=set)  # not used
-    kv_connector_stats = None  # not used
+    # request_id -> 本轮完成的 Mooncake 传输 timing；scheduler 会取出并清空。
+    kv_connector_stats: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -41,12 +44,25 @@ class ModelRunnerOutput:
     req_ids: list[str] = field(default_factory=list)
     sampled_token_ids: list[int | list[int]] = field(default_factory=list)
     kv_connector_output: KVConnectorOutput | None = None
+    forward_timing: "ModelForwardTiming | None" = None
+
+
+@dataclass
+class ModelForwardTiming:
+    """ModelRunner 视角的 batch forward 开始/完成时间。"""
+
+    engine_forward_started_at_ns: int
+    engine_forward_completed_at_ns: int
+    forward_batch_id: str | None = None
+    source: str = "model_runner"
 
 
 class ModelRunner:
     def __init__(self, config: EngineConfig, initialize_processor: bool = True):
         self.config = config
         self._closed = False
+        # 为同一进程内的每次物理 engine forward 生成稳定递增 ID。
+        self._forward_batch_sequence = 0
         self.kv_transfer_config = config.kv_transfer_config
         logger.info(f"kv_transfer_config: {self.kv_transfer_config}")
 
@@ -238,14 +254,31 @@ class ModelRunner:
         sampled_tokens_list = []
         kv_connector_output = None
 
+        forward_timing: ModelForwardTiming | None = None
+
         if self.kv_connector is None:
-            sampled_tokens_list = self._model_forward(scheduler_output)
+            sampled_tokens_list, forward_timing = self._model_forward(scheduler_output)
         else:
             with self.maybe_get_kv_connector_output(
                 scheduler_output,
             ) as kv_connector_output:
                 if scheduler_output.num_requests > 0:
-                    sampled_tokens_list = self._model_forward(scheduler_output)
+                    sampled_tokens_list, forward_timing = self._model_forward(
+                        scheduler_output
+                    )
+
+        # forward 是 batch 级调用，同一 batch 内所有请求共享相同时间点。
+        if forward_timing is not None:
+            for request in scheduler_output.scheduled_requests:
+                if request.timing_steps:
+                    timing = request.timing_steps[-1]
+                    timing.engine_forward_started_at_ns = (
+                        forward_timing.engine_forward_started_at_ns
+                    )
+                    timing.engine_forward_completed_at_ns = (
+                        forward_timing.engine_forward_completed_at_ns
+                    )
+                    timing.forward_batch_id = forward_timing.forward_batch_id
 
         #  model_runner_output
         req_ids = []
@@ -256,6 +289,7 @@ class ModelRunner:
             req_ids=req_ids,
             sampled_token_ids=sampled_tokens_list,
             kv_connector_output=kv_connector_output,
+            forward_timing=forward_timing,
         )
 
     def _model_forward(self, scheduler_output):
@@ -268,13 +302,25 @@ class ModelRunner:
         )
 
         if self.speculative_runner is not None:
-            return self._model_forward_with_speculative(scheduler_output, model_input)
+            # Speculative decoding may contain multiple internal forwards.
+            # 当前 timing 只定义普通 engine.forward 的边界，因此该路径
+            # 保持原有执行行为，不生成 forward timing。
+            sampled_tokens_list = self._model_forward_with_speculative(
+                scheduler_output, model_input
+            )
+            return sampled_tokens_list, None
 
         # Wake every stage before stage 0 enters forward. Each worker receives
         # the same metadata and then blocks in its model on the activation from
         # the preceding stage. Stage 0 waits for all acknowledgements afterward.
         if self.pipeline_control is not None:
             self.pipeline_control.dispatch_forward(model_input)
+        engine_forward_started_at_ns = monotonic_ns()
+        # 少量测试会用 __new__ 构造 runner；这里保持无完整 __init__ 也可用。
+        # PID 加进程内序号，保证多 worker 日志合并后 forward_batch_id 不冲突。
+        forward_sequence = getattr(self, "_forward_batch_sequence", 0) + 1
+        self._forward_batch_sequence = forward_sequence
+        forward_batch_id = f"forward-{os.getpid()}-{forward_sequence}"
         try:
             sampled_tokens = self.model_engine.forward(**model_input)
         except BaseException:
@@ -284,11 +330,16 @@ class ModelRunner:
                 # acknowledgement here would deadlock the coordinator.
                 self.pipeline_control.abort()
             raise
+        engine_forward_completed_at_ns = monotonic_ns()
         if self.pipeline_control is not None:
             self.pipeline_control.wait_forward()
         sampled_tokens_list = sampled_tokens.to_numpy().tolist()
 
-        return sampled_tokens_list
+        return sampled_tokens_list, ModelForwardTiming(
+            engine_forward_started_at_ns=engine_forward_started_at_ns,
+            engine_forward_completed_at_ns=engine_forward_completed_at_ns,
+            forward_batch_id=forward_batch_id,
+        )
 
     def _model_forward_with_speculative(self, scheduler_output, model_input):
         return self.speculative_runner.forward(scheduler_output, model_input)

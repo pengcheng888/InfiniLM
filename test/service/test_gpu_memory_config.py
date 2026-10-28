@@ -1,3 +1,4 @@
+import ast
 import inspect
 import unittest
 from dataclasses import fields
@@ -105,6 +106,24 @@ class GpuMemoryConfigTest(unittest.TestCase):
                         model_path="/models/qwen",
                         gpu_memory_utilization=utilization,
                     )
+
+    def test_examples_do_not_use_removed_base_config_capacity(self):
+        """示例脚本不得再读取 BaseConfig.num_blocks 或向 LLM 传旧参数。"""
+        for example in (REPO_ROOT / "examples").glob("*.py"):
+            with self.subTest(example=example.name):
+                source = example.read_text(encoding="utf-8")
+                self.assertNotIn("cfg.num_blocks", source)
+
+                tree = ast.parse(source, filename=str(example))
+                for node in ast.walk(tree):
+                    if not isinstance(node, ast.Call):
+                        continue
+                    function_name = getattr(node.func, "id", None)
+                    if function_name == "LLM":
+                        self.assertNotIn(
+                            "num_blocks",
+                            [keyword.arg for keyword in node.keywords],
+                        )
 
     def test_aggregated_yaml_rejects_num_blocks(self):
         """旧 engine.num_blocks 字段必须显式报错，避免被静默忽略。"""

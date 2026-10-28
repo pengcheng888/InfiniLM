@@ -18,6 +18,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from infinilm.base_config import BaseConfig
 from infinilm.config import KVTransferConfig
 from infinilm.llm import AsyncLLMEngine, FinishReason, SamplingParams
+from infinilm.llm.request import monotonic_ns
 from infinilm.moe_config import configure_moe_ep_backend
 
 logger = logging.getLogger(__name__)
@@ -298,6 +299,9 @@ class InferenceServer:
         @app.post("/chat/completions")
         @app.post("/v1/chat/completions")
         async def chat_completions(request: Request):
+            # 该时间代表 worker 应用层收到 HTTP request 的时刻，早于 body
+            # 读取、JSON 解析、tokenize 和 InferenceRequest 创建。
+            server_received_at_ns = monotonic_ns()
             try:
                 data = await request.json()
                 # logger.debug(f"Received request data: {data}")
@@ -317,15 +321,31 @@ class InferenceServer:
             data["messages"] = data.get("messages", [])
 
             stream = data.get("stream", False)
-            request_id = f"cmpl-{uuid.uuid4().hex}"
+            # PD frontend 会把同一个 X-Request-Id 发给 prefill/decode。
+            # worker 尊重该 ID，使两台机器上的 timing 文件可以用同一个
+            # request_id 关联；普通客户端未传 header 时仍自动生成。
+            request_id = (
+                request.headers.get("X-Request-Id")
+                or f"cmpl-{uuid.uuid4().hex}"
+            )
 
             if stream:
                 return StreamingResponse(
-                    self._stream_chat(request_id, data, request),
+                    self._stream_chat(
+                        request_id,
+                        data,
+                        request,
+                        server_received_at_ns,
+                    ),
                     media_type="text/event-stream",
                 )
             else:
-                response = await self._chat(request_id, data, request)
+                response = await self._chat(
+                    request_id,
+                    data,
+                    request,
+                    server_received_at_ns,
+                )
                 if isinstance(response, JSONResponse):
                     return response
                 return JSONResponse(content=response)
@@ -432,7 +452,13 @@ class InferenceServer:
             ignore_eos=self.ignore_eos,
         )
 
-    async def _stream_chat(self, request_id: str, data: dict, http_request: Request):
+    async def _stream_chat(
+        self,
+        request_id: str,
+        data: dict,
+        http_request: Request,
+        server_received_at_ns: int | None = None,
+    ):
         """Handle streaming chat request."""
         req = None
         _abort_reason = FinishReason.CANCELED
@@ -448,6 +474,7 @@ class InferenceServer:
                 request_data=data,
                 add_generation_prompt=bool(data.get("add_generation_prompt", True)),
                 chat_template_kwargs=data.get("chat_template_kwargs") or {},
+                server_received_at_ns=server_received_at_ns,
             )
 
             async for token_output in self.engine.stream_request(
@@ -541,7 +568,13 @@ class InferenceServer:
                 self.engine.add_aborted_req(req, _abort_reason)
         yield "data: [DONE]\n\n"
 
-    async def _chat(self, request_id: str, data: dict, http_request: Request):
+    async def _chat(
+        self,
+        request_id: str,
+        data: dict,
+        http_request: Request,
+        server_received_at_ns: int | None = None,
+    ):
         """Handle non-streaming chat request."""
         req = None
         _abort_reason = FinishReason.CANCELED
@@ -557,6 +590,7 @@ class InferenceServer:
                 request_data=data,
                 add_generation_prompt=bool(data.get("add_generation_prompt", True)),
                 chat_template_kwargs=data.get("chat_template_kwargs") or {},
+                server_received_at_ns=server_received_at_ns,
             )
 
             # Collect all generated tokens

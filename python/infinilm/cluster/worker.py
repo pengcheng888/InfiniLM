@@ -235,7 +235,13 @@ class ClusterInferenceServer(InferenceServer):
             request_task.cancel()
         await asyncio.gather(request_task, return_exceptions=True)
 
-    async def _chat(self, request_id: str, data: dict, http_request):
+    async def _chat(
+        self,
+        request_id: str,
+        data: dict,
+        http_request,
+        server_received_at_ns: int | None = None,
+    ):
         """包装非流式 InferenceServer 请求，统计流量并传播客户端断开。"""
         self.worker_traffic.begin(streaming=False)
         canceled = False
@@ -243,7 +249,18 @@ class ClusterInferenceServer(InferenceServer):
         try:
             # 内部请求放入独立 task，由 _wait_for_request() 周期检查断开。
             response = await self._wait_for_request(
-                asyncio.create_task(super()._chat(request_id, data, http_request)),
+                (
+                    asyncio.create_task(super()._chat(request_id, data, http_request))
+                    if server_received_at_ns is None
+                    else asyncio.create_task(
+                        super()._chat(
+                            request_id,
+                            data,
+                            http_request,
+                            server_received_at_ns,
+                        )
+                    )
+                ),
                 http_request,
             )
             failed = int(getattr(response, "status_code", 200)) >= 400
@@ -260,7 +277,13 @@ class ClusterInferenceServer(InferenceServer):
             # begin/finish 一一对应，保证 active_requests 不会因断开泄漏。
             self.worker_traffic.finish(canceled=canceled, failed=failed)
 
-    async def _stream_chat(self, request_id: str, data: dict, http_request):
+    async def _stream_chat(
+        self,
+        request_id: str,
+        data: dict,
+        http_request,
+        server_received_at_ns: int | None = None,
+    ):
         """包装流式 InferenceServer generator，统计流量并传播取消。"""
         self.worker_traffic.begin(streaming=True)
         canceled = False
@@ -268,7 +291,16 @@ class ClusterInferenceServer(InferenceServer):
         try:
             # internal_stream 是原有 InferenceServer._stream_chat()；
             # 这里逐 chunk 包装，才能在等待下一个 token 时检查断开。
-            internal_stream = super()._stream_chat(request_id, data, http_request)
+            internal_stream = (
+                super()._stream_chat(request_id, data, http_request)
+                if server_received_at_ns is None
+                else super()._stream_chat(
+                    request_id,
+                    data,
+                    http_request,
+                    server_received_at_ns,
+                )
+            )
             while True:
                 try:
                     # 每个 chunk 都通过独立 task 等待，等待期间可检测断开。

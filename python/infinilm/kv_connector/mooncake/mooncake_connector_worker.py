@@ -5,8 +5,10 @@ except ImportError as e:
 
 import asyncio
 import logging
+import os
 import threading
 import time
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import IntEnum
@@ -160,6 +162,11 @@ class MooncakeConnectorWorker:
         self.num_blocks = 0
         self.kv_caches_base_addr: list[int] = []
         self.device_kv_caches: dict[str, infinicore.Tensor] = {}
+        # 传输线程和调度线程都会访问 timing，使用独立小锁保护快照交换。
+        self._kv_transfer_stats: dict[ReqId, dict] = {}
+        self._kv_transfer_stats_lock = threading.Lock()
+        # 只在 P 进程内递增，配合 PID 生成全局唯一的 producer batch ID。
+        self._kv_transfer_batch_sequence = 0
 
         self.async_zmq_ctx = zmq.asyncio.Context()
         self._encoder = msgspec.msgpack.Encoder()
@@ -222,6 +229,67 @@ class MooncakeConnectorWorker:
     def _async_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         asyncio.set_event_loop(loop)
         loop.run_forever()
+
+    def _record_transfer_stats(
+        self,
+        request_ids: list[ReqId] | set[ReqId],
+        *,
+        event: str,
+        role: str,
+        started_at_ns: int,
+        completed_at_ns: int,
+        block_count: int,
+        bytes_count: int,
+        outcome: str,
+        batch_size: int = 1,
+        batch_id: str | None = None,
+        request_block_counts: Mapping[ReqId, int] | None = None,
+    ) -> None:
+        """记录当前节点本地时钟下的 KV transfer timing。
+
+        P/D 可能位于不同机器，monotonic epoch 不保证一致；这里只导出
+        本节点 start/complete 和二者差值，禁止跨节点时间戳相减。
+        """
+        payload = {
+            "event": event,
+            "request_id": None,
+            "role": role,
+            "scope": (
+                "producer_batch_transfer"
+                if event == "kv_send"
+                else "decode_local_kv_readiness"
+            ),
+            "clock_domain": "local-monotonic",
+            "cross_node_comparable": False,
+            "started_at_ns": started_at_ns,
+            "completed_at_ns": completed_at_ns,
+            "duration_ns": completed_at_ns - started_at_ns,
+            "block_count": block_count,
+            "bytes": bytes_count,
+            "batch_size": batch_size,
+            # batch_* 是一次物理 Mooncake batch 的总量；bytes/block_count
+            # 保留为兼容字段，producer 侧同样表示 batch 总量。
+            "batch_id": batch_id,
+            "batch_request_count": batch_size,
+            "batch_block_count": block_count,
+            "batch_bytes": bytes_count,
+            "outcome": outcome,
+        }
+        with self._kv_transfer_stats_lock:
+            for request_id in request_ids:
+                item = dict(payload)
+                item["request_id"] = request_id
+                item["request_block_count"] = (
+                    request_block_counts or {}
+                ).get(request_id, block_count if batch_size == 1 else 0)
+                self._kv_transfer_stats[request_id] = item
+
+    def get_kv_connector_stats(self) -> dict[ReqId, dict]:
+        """取出并清空最近一段 Mooncake 传输 timing。"""
+        with self._kv_transfer_stats_lock:
+            stats = self._kv_transfer_stats
+            self._kv_transfer_stats = {}
+            return stats
 
     def __del__(self):
         self.shutdown()
@@ -466,6 +534,18 @@ class MooncakeConnectorWorker:
             ret_value = 0
             if len(xfer_reqs_ids) > 0 and src_ptrs:
                 remote_session = f"{meta.remote_hostname}:{meta.remote_port}"
+                # 一次 sender 调用可能覆盖多个 request；先固定 batch ID 和
+                # 每个请求的 block 数，供离线工具去重并还原 batch 总量。
+                with self._kv_transfer_stats_lock:
+                    self._kv_transfer_batch_sequence += 1
+                    transfer_batch_id = (
+                        f"kv-send-{os.getpid()}-"
+                        f"{self._kv_transfer_batch_sequence}"
+                    )
+                request_block_counts = {
+                    d_req_id: len(meta.req_blocks[d_req_id][1])
+                    for d_req_id in xfer_reqs_ids
+                }
 
                 # wait until return value
                 kv_flag_addr = meta.kv_flag_addr
@@ -479,6 +559,8 @@ class MooncakeConnectorWorker:
                     xfer_reqs_ids,
                     xfer_block_ids,
                     kv_flag_addr,
+                    transfer_batch_id,
+                    request_block_counts,
                 )
 
             if ret_value != 0:
@@ -614,19 +696,26 @@ class MooncakeConnectorWorker:
         xfer_reqs_ids: list[ReqId],
         xfer_block_ids: list[int],
         kv_flag_addr: list[int],
+        transfer_batch_id: str,
+        request_block_counts: Mapping[ReqId, int],
     ) -> int:
+        """同步发送一个 producer batch 的 KV 数据和 ready flag。"""
         logger.debug(
             "mooncake engine batch_transfer_sync_write to %s start,xfer_reqs_ids: %s",
             remote_session,
             ", ".join(xfer_reqs_ids),
         )
 
-        start_time = time.perf_counter()
+        started_at_ns = time.monotonic_ns()
+        # P 侧 duration 只覆盖 Mooncake 数据/flag 写调用，不含 D 侧等待。
         ret_value = self.engine.batch_transfer_sync_write(
             remote_session, src_ptrs, dst_ptrs, lengths
         )
+        data_bytes = sum(lengths)
+        flag_bytes = 0
 
         if ret_value == 0 and len(kv_flag_addr) > 0:
+            # KV 数据写成功后，再写每个 block 一个 byte 的 ready flag。
             n = len(xfer_block_ids)
             flag_src_ptrs = [self.kv_flag_src_ptrs[b] for b in xfer_block_ids]
             flag_dst_ptrs = [kv_flag_addr[b] for b in xfer_block_ids]
@@ -635,6 +724,7 @@ class MooncakeConnectorWorker:
             flag_ret_value = self.engine.batch_transfer_sync_write(
                 remote_session, flag_src_ptrs, flag_dst_ptrs, flag_lengths
             )
+            flag_bytes = len(flag_lengths)
 
             if flag_ret_value != 0:
                 ret_value = flag_ret_value
@@ -649,7 +739,7 @@ class MooncakeConnectorWorker:
             logger.debug(
                 "mooncake engine sending to %s done, took %s, xfer_reqs_ids: %s",
                 remote_session,
-                time.perf_counter() - start_time,
+                (time.monotonic_ns() - started_at_ns) / 1_000_000_000,
                 ", ".join(xfer_reqs_ids),
             )
         else:
@@ -659,6 +749,19 @@ class MooncakeConnectorWorker:
                 ret_value,
                 ", ".join(xfer_reqs_ids),
             )
+        self._record_transfer_stats(
+            xfer_reqs_ids,
+            event="kv_send",
+            role="prefill",
+            started_at_ns=started_at_ns,
+            completed_at_ns=time.monotonic_ns(),
+            block_count=len(set(xfer_block_ids)),
+            bytes_count=data_bytes + flag_bytes,
+            outcome="success" if ret_value == 0 else "failed",
+            batch_size=len(xfer_reqs_ids),
+            batch_id=transfer_batch_id,
+            request_block_counts=request_block_counts,
+        )
         return ret_value
 
     def register_kv_caches(self, kv_caches: dict[str, infinicore.Tensor]):
@@ -932,6 +1035,26 @@ class MooncakeConnectorWorker:
 
                 await self._wait_for_kv_flags_ready(success_block_ids)
 
+                # receive 统计从 D 决定拉取 KV 时开始，到本地 flag ready 结束；
+                # 它包含 bootstrap/ZMQ/传输等待，不等于纯网络传输时间。
+                completed_at_ns = time.monotonic_ns()
+                failed_req_ids = set(self.xfer_failed_recving_reqs_ids)
+                for req_id in finished_recving_reqs:
+                    pull_meta = pull_metas[req_id]
+                    self._record_transfer_stats(
+                        [req_id],
+                        event="kv_receive",
+                        role="decode",
+                        started_at_ns=pull_meta.started_at_ns or completed_at_ns,
+                        completed_at_ns=completed_at_ns,
+                        block_count=len(pull_meta.local_block_ids),
+                        bytes_count=(
+                            len(pull_meta.local_block_ids)
+                            * self.block_len
+                            * len(self.kv_caches_base_addr)
+                        ),
+                        outcome="failed" if req_id in failed_req_ids else "success",
+                    )
                 self.finished_recving_reqs.update(finished_recving_reqs)
 
         except zmq.ContextTerminated:
@@ -1092,6 +1215,7 @@ class MooncakeConnectorWorker:
     async def _start_load_kv(
         self, reqs_to_recv: dict[EngineId, dict[ReqId, PullReqMeta]]
     ):
+        """为 D 侧待拉取 KV 记录起始时间，并启动远端传输流程。"""
         # reprocess timeout reqs (merge per-engine pull maps, do not replace whole inner dicts)
         if self.timeout_reqs_to_recv:
             for engine_id, timed_out in self.timeout_reqs_to_recv.items():
@@ -1100,6 +1224,11 @@ class MooncakeConnectorWorker:
             self.timeout_reqs_to_recv.clear()
 
         for remote_engine_id, pull_metas in reqs_to_recv.items():
+            # 同一批拉取共享起始时间；后续无论复用 agent 还是新建连接，
+            # kv_receive 都能覆盖完整等待路径。
+            started_at_ns = time.monotonic_ns()
+            for pull_meta in pull_metas.values():
+                pull_meta.started_at_ns = started_at_ns
             if remote_engine_id not in self._remote_agents:
                 asyncio.create_task(
                     self.handle_new_engine_id(remote_engine_id, pull_metas)

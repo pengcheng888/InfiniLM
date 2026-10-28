@@ -210,7 +210,7 @@ def main():
         cache_type=cache_type,
         max_batch_size=max_batch_size,
         max_tokens=max(output_lens),
-        num_blocks=cfg.num_blocks,
+        gpu_memory_utilization=cfg.gpu_memory_utilization,
         block_size=cfg.block_size,
         max_cache_len=max_cache_len,
         temperature=cfg.temperature,

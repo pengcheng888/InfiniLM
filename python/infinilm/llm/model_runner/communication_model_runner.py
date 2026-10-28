@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import contextmanager
+from time import monotonic_ns
 from typing import Any, Generator, Mapping
 
 import infinicore
@@ -17,6 +19,7 @@ from infinilm.infer_engine import read_hf_config
 from infinilm.kv_connector import KVConnectorFactory, KVConnectorRole
 from infinilm.llm.model_runner.model_runner import (
     KVConnectorOutput,
+    ModelForwardTiming,
     ModelRunnerOutput,
 )
 from infinilm.processors import AutoInfinilmProcessor
@@ -104,6 +107,9 @@ class CommunicationModelRunner:
         self._closed = False
         self.communication_test_mode = True
         self.kv_transfer_config = config.kv_transfer_config
+        # 通信测试没有真实 engine forward，但仍需要稳定 batch ID 供 timing
+        # 去重和 Mooncake 事件关联使用。
+        self._forward_batch_sequence = 0
 
         self._validate_config()
         self._init_device()
@@ -237,15 +243,41 @@ class CommunicationModelRunner:
         """执行一次假 forward，并保留 KV connector 的收发状态收集。"""
         sampled_tokens_list = []
         kv_connector_output = None
+        forward_timing: ModelForwardTiming | None = None
 
         if self.kv_connector is None:
+            engine_forward_started_at_ns = monotonic_ns()
             sampled_tokens_list = self._model_forward(scheduler_output)
+            engine_forward_completed_at_ns = monotonic_ns()
+            forward_timing = self._make_forward_timing(
+                engine_forward_started_at_ns,
+                engine_forward_completed_at_ns,
+            )
         else:
             with self.maybe_get_kv_connector_output(
                 scheduler_output,
             ) as kv_connector_output:
                 if scheduler_output.num_requests > 0:
+                    engine_forward_started_at_ns = monotonic_ns()
                     sampled_tokens_list = self._model_forward(scheduler_output)
+                    engine_forward_completed_at_ns = monotonic_ns()
+                    forward_timing = self._make_forward_timing(
+                        engine_forward_started_at_ns,
+                        engine_forward_completed_at_ns,
+                    )
+
+        # 和普通 ModelRunner 一样，把 batch 级 forward timing 复制到本轮
+        # 每个 request 的 step；假 forward 耗时只代表测试调度开销，不代表计算。
+        if forward_timing is not None:
+            for request in scheduler_output.scheduled_requests:
+                for timing in getattr(request, "timing_steps", ())[-1:]:
+                    timing.engine_forward_started_at_ns = (
+                        forward_timing.engine_forward_started_at_ns
+                    )
+                    timing.engine_forward_completed_at_ns = (
+                        forward_timing.engine_forward_completed_at_ns
+                    )
+                    timing.forward_batch_id = forward_timing.forward_batch_id
 
         req_ids = [
             request.request_id
@@ -255,6 +287,24 @@ class CommunicationModelRunner:
             req_ids=req_ids,
             sampled_token_ids=sampled_tokens_list,
             kv_connector_output=kv_connector_output,
+            forward_timing=forward_timing,
+        )
+
+    def _make_forward_timing(
+        self,
+        engine_forward_started_at_ns: int,
+        engine_forward_completed_at_ns: int,
+    ) -> ModelForwardTiming:
+        """为一次假 forward 生成 schema v4 需要的 batch timing。"""
+        forward_sequence = getattr(self, "_forward_batch_sequence", 0) + 1
+        self._forward_batch_sequence = forward_sequence
+        return ModelForwardTiming(
+            engine_forward_started_at_ns=engine_forward_started_at_ns,
+            engine_forward_completed_at_ns=engine_forward_completed_at_ns,
+            forward_batch_id=(
+                f"communication-forward-{os.getpid()}-{forward_sequence}"
+            ),
+            source="communication_model_runner",
         )
 
     def _model_forward(self, scheduler_output) -> list[int]:

@@ -9,7 +9,12 @@ from typing import List, Optional
 import janus
 
 from infinilm.llm.cache_manager import BlockManager, MambaCacheManager
-from infinilm.llm.request import InferenceRequest, RequestStatus
+from infinilm.llm.request import (
+    InferenceRequest,
+    RequestStatus,
+    RequestStepTiming,
+    monotonic_ns,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +99,9 @@ class Scheduler:
         self.max_num_batched_tokens = max_num_batched_tokens
         self.connector = connector
         self.enable_prefix_caching = enable_prefix_caching
+        # Worker connector 产生的 KV transfer timing 先放入这里，由
+        # LLMEngine 在 update_from_output() 后统一交给 JSONL recorder。
+        self._pending_timing_events: list[dict] = []
 
     def add_request(self, request: InferenceRequest):
         if request is not None:
@@ -112,7 +120,49 @@ class Scheduler:
                 and not request.has_multimodal_inputs,
             )
             request.status = RequestStatus.WAITING
+            request.scheduler_enqueued_at_ns = monotonic_ns()
             self.waiting_queue.sync_q.put(request)
+
+    def _make_scheduler_output(
+        self,
+        scheduled_requests: List[InferenceRequest],
+        *,
+        is_prefill: bool,
+        queue_depths_before: tuple[int, int, int],
+    ) -> SchedulerOutput:
+        """生成批次，并为每个请求追加一个 timing step。"""
+        batch_ready_at_ns = monotonic_ns()
+        waiting_before, running_before, remote_kv_before = queue_depths_before
+        waiting_after = self.waiting_queue.sync_q.qsize()
+        running_after = self.running_queue.sync_q.qsize()
+        remote_kv_after = len(self.remote_kv_requests)
+        for request in scheduled_requests:
+            if request.scheduler_polled_at_ns is None:
+                request.scheduler_polled_at_ns = batch_ready_at_ns
+            request.timing_steps.append(
+                RequestStepTiming(
+                    request_id=request.request_id,
+                    role=request.timing_role,
+                    step_index=len(request.timing_steps),
+                    phase="prefill" if is_prefill else "decode",
+                    batch_size=len(scheduled_requests),
+                    server_received_at_ns=request.server_received_at_ns,
+                    scheduler_enqueued_at_ns=request.scheduler_enqueued_at_ns,
+                    scheduler_polled_at_ns=request.scheduler_polled_at_ns,
+                    scheduler_batch_ready_at_ns=batch_ready_at_ns,
+                    scheduler_waiting_queue_depth_before=waiting_before,
+                    scheduler_running_queue_depth_before=running_before,
+                    scheduler_remote_kv_requests_before=remote_kv_before,
+                    scheduler_waiting_queue_depth_after=waiting_after,
+                    scheduler_running_queue_depth_after=running_after,
+                    scheduler_remote_kv_requests_after=remote_kv_after,
+                )
+            )
+        return SchedulerOutput(
+            scheduled_requests=scheduled_requests,
+            is_prefill=is_prefill,
+            speculative_cache_ops=self.speculative_cache_ops,
+        )
 
     def _exceeds_token_budget(
         self,
@@ -134,6 +184,11 @@ class Scheduler:
 
     def schedule(self) -> Optional[SchedulerOutput]:
         """Schedule and return batch of requests to execute."""
+        queue_depths_before = (
+            self.waiting_queue.sync_q.qsize(),
+            self.running_queue.sync_q.qsize(),
+            len(self.remote_kv_requests),
+        )
         deferred_requests = []
         scheduled_requests = []
         is_prefill = False
@@ -147,6 +202,7 @@ class Scheduler:
         ):
             try:
                 req = self.waiting_queue.sync_q.get_nowait()
+                req.scheduler_polled_at_ns = monotonic_ns()
             except queue.Empty:
                 break
             # Skip requests that were already finished (e.g., timed out/canceled while waiting)
@@ -302,10 +358,10 @@ class Scheduler:
         # Return prefill batch if any waiting requests were scheduled
         if scheduled_requests:
             is_prefill = True
-            scheduler_output = SchedulerOutput(
-                scheduled_requests=scheduled_requests,
+            scheduler_output = self._make_scheduler_output(
+                scheduled_requests,
                 is_prefill=is_prefill,
-                speculative_cache_ops=self.speculative_cache_ops,
+                queue_depths_before=queue_depths_before,
             )
             if self.connector is not None:
                 meta = self.connector.build_connector_meta()
@@ -316,6 +372,7 @@ class Scheduler:
         while len(scheduled_requests) < self.max_batch_size:
             try:
                 req = self.running_queue.sync_q.get_nowait()
+                req.scheduler_polled_at_ns = monotonic_ns()
             except queue.Empty:
                 break
             # Skip requests that were already finished (e.g., timed out/canceled while running)
@@ -349,6 +406,7 @@ class Scheduler:
                     self.waiting_queue.sync_q.put(req)
                 elif req_id in self.finished_receiving_kv_req_ids:
                     if len(scheduled_requests) < self.max_batch_size:
+                        req.scheduler_polled_at_ns = monotonic_ns()
                         logger.info(
                             f"Request {req_id[:8]}... finished receiving KV, scheduling for decode."
                         )
@@ -361,10 +419,10 @@ class Scheduler:
         # Return decode batch if any running requests were scheduled
         if scheduled_requests:
             is_prefill = False
-            scheduler_output = SchedulerOutput(
-                scheduled_requests=scheduled_requests,
+            scheduler_output = self._make_scheduler_output(
+                scheduled_requests,
                 is_prefill=is_prefill,
-                speculative_cache_ops=self.speculative_cache_ops,
+                queue_depths_before=queue_depths_before,
             )
 
             if self.connector is not None:
@@ -530,6 +588,7 @@ class Scheduler:
         )
 
     def update_from_output(self, model_output):
+        """根据 model runner 输出更新 KV 接收状态和 block 生命周期。"""
         if self.connector is None or model_output.kv_connector_output is None:
             return
 
@@ -545,6 +604,14 @@ class Scheduler:
         invalid_block_ids = (
             getattr(model_output.kv_connector_output, "invalid_block_ids", None) or []
         )
+        timing_stats = (
+            getattr(model_output.kv_connector_output, "kv_connector_stats", None)
+            or {}
+        )
+        if isinstance(timing_stats, dict):
+            # connector worker 线程只生产事件；这里在 engine step 中统一移交，
+            # 避免 recorder 直接被多个传输线程并发调用。
+            self._pending_timing_events.extend(timing_stats.values())
 
         for req_id in finished_recving_req_ids:
             if req_id in self.pending_free_blocks:
@@ -582,6 +649,12 @@ class Scheduler:
                     )
                     break
             req.num_computed_tokens = trusted_boundary
+
+    def pop_timing_events(self) -> list[dict]:
+        """取出并清空本 step 收集到的 KV transfer timing 事件。"""
+        events = self._pending_timing_events
+        self._pending_timing_events = []
+        return events
 
     def get_cache_stats(self) -> dict:
         """Get cache statistics."""

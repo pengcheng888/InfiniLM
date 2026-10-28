@@ -437,7 +437,7 @@ class TestModel:
         master_port=29500,
         max_batch_size=1,
         max_tokens=512,
-        num_blocks=512,
+        gpu_memory_utilization=0.85,
         block_size=256,
         max_cache_len=4096,
         temperature=1.0,
@@ -505,7 +505,7 @@ class TestModel:
                 cache_type="paged" if cache_config is not None else "static",
                 max_batch_size=max_batch_size,
                 max_tokens=max_tokens,
-                num_blocks=num_blocks,
+                gpu_memory_utilization=gpu_memory_utilization,
                 block_size=block_size,
                 max_cache_len=max_cache_len,
                 temperature=temperature,
@@ -908,9 +908,6 @@ if __name__ == "__main__":
             else 0,
         )
         cfg.attn = attn_backend
-        if enable_paged_attn:
-            cfg.num_blocks = max_num_blocks
-
         if cfg.node_rank > 0:
             from infinilm.server.pipeline_worker import run_worker
 
@@ -941,7 +938,7 @@ if __name__ == "__main__":
             max_benchmark_tokens,
             _WARMUP_DECODE_LEN if cfg.warmup else 0,
         ),
-        num_blocks=max_num_blocks if enable_paged_attn else cfg.num_blocks,
+        gpu_memory_utilization=cfg.gpu_memory_utilization,
         block_size=cfg.block_size,
         max_cache_len=max(
             max_benchmark_cache_len,

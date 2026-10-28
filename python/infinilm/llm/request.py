@@ -22,6 +22,11 @@ from infinilm.llm.sampling_params import SamplingParams
 logger = logging.getLogger(__name__)
 
 
+def monotonic_ns() -> int:
+    """返回与 C++ forward timing 使用的同一 CLOCK_MONOTONIC 时间。"""
+    return time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+
+
 class _SequenceView(Sequence):
     """Live read-only view over an internally mutable list."""
 
@@ -141,6 +146,77 @@ class TokenOutput:
     generated_text: str = ""
 
 
+@dataclass
+class RequestStepTiming:
+    """一个请求在一次 prefill/decode step 中的关键时间点。
+
+    所有时间都使用 ``CLOCK_MONOTONIC`` 纳秒。C++ forward 与 Python 侧
+    打点必须使用同一时钟，不能混用 wall clock 和 perf_counter。
+    """
+
+    # 请求唯一 ID；同一个请求的每一轮 timing 都写入同一个 JSONL 文件。
+    request_id: str
+    # 当前请求第几次被调度执行；prefill 为 0，后续 decode 依次递增。
+    step_index: int
+    # 当前执行阶段：prefill 表示首段计算，decode 表示逐 token 增量生成。
+    phase: str
+    # 本轮 scheduler 构建的 batch 内请求数；engine forward 是 batch 级调用。
+    batch_size: int
+    # 同一次物理 engine forward 的批次 ID。同一 batch 内所有 request step
+    # 共享该 ID，离线分析用它去重 request step，得到真实 forward 调用数。
+    forward_batch_id: str | None = None
+    # 记录产生者角色。P/D 可能跨机器部署，各角色只使用本进程
+    # CLOCK_MONOTONIC，时间戳不能跨节点比较。
+    role: str = "aggregated"
+    # worker HTTP route 入口时间，早于 body 读取、JSON 解析和 tokenize。
+    server_received_at_ns: int | None = None
+    # 请求完成预处理并进入 scheduler waiting queue 的时间。
+    scheduler_enqueued_at_ns: int | None = None
+    # scheduler 从 waiting/running queue 取出该请求、开始处理的时间。
+    scheduler_polled_at_ns: int | None = None
+    # scheduler 完成本轮 batch 构建、准备交给 ModelRunner 的时间。
+    scheduler_batch_ready_at_ns: int | None = None
+    # schedule() 入口处的三个 scheduler 状态深度。waiting 表示待 prefill
+    # 调度，running 表示待 decode 调度，remote_kv 表示等待远端 KV ready。
+    scheduler_waiting_queue_depth_before: int | None = None
+    scheduler_running_queue_depth_before: int | None = None
+    scheduler_remote_kv_requests_before: int | None = None
+    # 本轮 batch 构建完成、即将交给 ModelRunner 时的状态深度。此时已被
+    # 选中的请求不在三个队列中，数量由 batch_size 单独表示。
+    scheduler_waiting_queue_depth_after: int | None = None
+    scheduler_running_queue_depth_after: int | None = None
+    scheduler_remote_kv_requests_after: int | None = None
+    # ModelRunner 真正调用 self.model_engine.forward() 前的时间；
+    # speculative 路径不采集该字段。
+    engine_forward_started_at_ns: int | None = None
+    # self.model_engine.forward() 返回后的时间；该值是 ModelRunner
+    # 视角的 engine forward 完成点，不包含输出 tensor 转 Python list。
+    engine_forward_completed_at_ns: int | None = None
+
+    def to_dict(self) -> dict[str, int | str | None]:
+        """转换为可直接写入日志或导出的字典。"""
+        return {
+            "request_id": self.request_id,
+            "role": self.role,
+            "step_index": self.step_index,
+            "phase": self.phase,
+            "batch_size": self.batch_size,
+            "forward_batch_id": self.forward_batch_id,
+            "server_received_at_ns": self.server_received_at_ns,
+            "scheduler_enqueued_at_ns": self.scheduler_enqueued_at_ns,
+            "scheduler_polled_at_ns": self.scheduler_polled_at_ns,
+            "scheduler_batch_ready_at_ns": self.scheduler_batch_ready_at_ns,
+            "scheduler_waiting_queue_depth_before": self.scheduler_waiting_queue_depth_before,
+            "scheduler_running_queue_depth_before": self.scheduler_running_queue_depth_before,
+            "scheduler_remote_kv_requests_before": self.scheduler_remote_kv_requests_before,
+            "scheduler_waiting_queue_depth_after": self.scheduler_waiting_queue_depth_after,
+            "scheduler_running_queue_depth_after": self.scheduler_running_queue_depth_after,
+            "scheduler_remote_kv_requests_after": self.scheduler_remote_kv_requests_after,
+            "engine_forward_started_at_ns": self.engine_forward_started_at_ns,
+            "engine_forward_completed_at_ns": self.engine_forward_completed_at_ns,
+        }
+
+
 class InferenceRequest:
     """Internal inference request object for managing generation state and resources."""
 
@@ -154,6 +230,9 @@ class InferenceRequest:
         sampling_params: Optional[SamplingParams] = None,
         eos_token_ids: Optional[List[int]] = None,
         arrival_time: Optional[float] = None,
+        server_received_at_ns: Optional[int] = None,
+        # timing 日志中的 worker 角色；未显式指定时按普通 aggregated 服务处理。
+        timing_role: Optional[str] = None,
         # For server use
         request_data: Optional[dict] = None,
         *,
@@ -161,9 +240,17 @@ class InferenceRequest:
     ):
         self.arrival_time: float = arrival_time or time.time()
         self.finished_time: Optional[float] = None
+        # HTTP route 在解析 body 前记录该时间；arrival_time 是内部 request
+        # 创建时间，二者不能混用。
+        self.server_received_at_ns: Optional[int] = server_received_at_ns
+        self.scheduler_enqueued_at_ns: Optional[int] = None
+        self.scheduler_polled_at_ns: Optional[int] = None
+        self.timing_steps: List[RequestStepTiming] = []
 
         # Request metadata
         self.request_id: str = request_id
+        # PD 场景最终会在 engine 侧根据 KV producer/consumer 配置校正角色。
+        self.timing_role: str = timing_role or "aggregated"
         self.prompt: Optional[str] = prompt
         self._prompt_token_ids: tuple[int, ...] = (
             tuple(prompt_token_ids) if prompt_token_ids is not None else ()
@@ -321,6 +408,57 @@ class InferenceRequest:
 
     def get_mm_token_index_mappings(self) -> Optional[List[dict]]:
         return self.mm_token_index_mappings
+
+    def get_timing_summary(self) -> dict[str, int | str | None]:
+        """汇总首步排队路径和全部 C++ forward 耗时。"""
+        if not self.timing_steps:
+            return {"request_id": self.request_id, "steps": 0}
+
+        first = self.timing_steps[0]
+        last = self.timing_steps[-1]
+        engine_forward_total_ns = sum(
+            step.engine_forward_completed_at_ns
+            - step.engine_forward_started_at_ns
+            for step in self.timing_steps
+            if step.engine_forward_completed_at_ns is not None
+            and step.engine_forward_started_at_ns is not None
+        )
+        queue_ns = (
+            first.scheduler_polled_at_ns - first.server_received_at_ns
+            if first.scheduler_polled_at_ns is not None
+            and first.server_received_at_ns is not None
+            else None
+        )
+        scheduler_ns = (
+            first.scheduler_batch_ready_at_ns - first.scheduler_polled_at_ns
+            if first.scheduler_batch_ready_at_ns is not None
+            and first.scheduler_polled_at_ns is not None
+            else None
+        )
+        scheduler_batch_ready_to_engine_forward_start_ns = (
+            first.engine_forward_started_at_ns
+            - first.scheduler_batch_ready_at_ns
+            if first.engine_forward_started_at_ns is not None
+            and first.scheduler_batch_ready_at_ns is not None
+            else None
+        )
+        return {
+            "request_id": self.request_id,
+            "role": self.timing_role,
+            "steps": len(self.timing_steps),
+            "server_received_at_ns": first.server_received_at_ns,
+            "first_scheduler_polled_at_ns": first.scheduler_polled_at_ns,
+            "first_engine_forward_started_at_ns": first.engine_forward_started_at_ns,
+            "last_engine_forward_completed_at_ns": (
+                last.engine_forward_completed_at_ns
+            ),
+            "queue_ns": queue_ns,
+            "scheduler_ns": scheduler_ns,
+            "scheduler_batch_ready_to_engine_forward_start_ns": (
+                scheduler_batch_ready_to_engine_forward_start_ns
+            ),
+            "engine_forward_total_ns": engine_forward_total_ns,
+        }
 
     def is_finished(self) -> bool:
         return self.status in [
