@@ -33,6 +33,15 @@ class InfinilmProcessor:
         """Return the text tokenizer associated with this processor."""
         raise NotImplementedError("get_tokenizer is not implemented yet")
 
+    def fast_text_tokenize(self, prompt: str, *, tokenizer=None) -> list[int]:
+        """Return text token IDs without building processor tensors."""
+        raise NotImplementedError("fast_text_tokenize is not implemented yet")
+
+    @property
+    def supports_fast_text_tokenize(self) -> bool:
+        """Whether text-only requests may bypass the generic processor."""
+        return False
+
     def get_mm_token_index_list(
         self, prompt_token_ids, image_ids=None, video_ids=None, audio_ids=None, **kwargs
     ):

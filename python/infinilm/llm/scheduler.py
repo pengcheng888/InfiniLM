@@ -76,6 +76,9 @@ class Scheduler:
         has_mamba_cache: bool = False,
         num_mamba_cache_blocks: int | None = None,
         enable_prefix_caching: bool = True,
+        request_timing_enabled: bool = True,
+        request_timing_mode: str = "full",
+        request_timing_sample_interval: int = 1,
     ):
         self.waiting_queue = janus.Queue()
         self.running_queue = janus.Queue()
@@ -99,12 +102,18 @@ class Scheduler:
         self.max_num_batched_tokens = max_num_batched_tokens
         self.connector = connector
         self.enable_prefix_caching = enable_prefix_caching
+        self.request_timing_enabled = request_timing_enabled
+        self.request_timing_mode = request_timing_mode
+        self.request_timing_sample_interval = request_timing_sample_interval
         # Worker connector 产生的 KV transfer timing 先放入这里，由
         # LLMEngine 在 update_from_output() 后统一交给 JSONL recorder。
         self._pending_timing_events: list[dict] = []
 
     def add_request(self, request: InferenceRequest):
         if request is not None:
+            if self.request_timing_enabled:
+                request.timing_mode = self.request_timing_mode
+                request.sample_interval = self.request_timing_sample_interval
             prompt_length = request.get_prompt_length()
             if prompt_length > self.max_num_batched_tokens:
                 raise ValueError(
@@ -120,8 +129,24 @@ class Scheduler:
                 and not request.has_multimodal_inputs,
             )
             request.status = RequestStatus.WAITING
-            request.scheduler_enqueued_at_ns = monotonic_ns()
+            if self.request_timing_enabled:
+                request.scheduler_enqueued_at_ns = monotonic_ns()
             self.waiting_queue.sync_q.put(request)
+
+    def _note_scheduler_polled(self, request: InferenceRequest) -> None:
+        if not self.request_timing_enabled:
+            return
+        if self.request_timing_mode == "summary":
+            if request.first_scheduler_polled_at_ns is None:
+                polled_at_ns = monotonic_ns()
+                request.first_scheduler_polled_at_ns = polled_at_ns
+                request.scheduler_polled_at_ns = polled_at_ns
+            return
+
+        polled_at_ns = monotonic_ns()
+        if request.first_scheduler_polled_at_ns is None:
+            request.first_scheduler_polled_at_ns = polled_at_ns
+        request.scheduler_polled_at_ns = polled_at_ns
 
     def _make_scheduler_output(
         self,
@@ -131,33 +156,58 @@ class Scheduler:
         queue_depths_before: tuple[int, int, int],
     ) -> SchedulerOutput:
         """生成批次，并为每个请求追加一个 timing step。"""
+        if not self.request_timing_enabled:
+            return SchedulerOutput(
+                scheduled_requests=scheduled_requests,
+                is_prefill=is_prefill,
+                speculative_cache_ops=self.speculative_cache_ops,
+            )
+
+        if self.request_timing_mode == "summary":
+            needs_summary_boundary = any(
+                request.scheduler_batch_ready_at_ns is None
+                for request in scheduled_requests
+            )
+            batch_ready_at_ns = monotonic_ns() if needs_summary_boundary else 0
+            for request in scheduled_requests:
+                if request.scheduler_batch_ready_at_ns is None:
+                    request.record_summary_step(batch_ready_at_ns)
+            return SchedulerOutput(
+                scheduled_requests=scheduled_requests,
+                is_prefill=is_prefill,
+                speculative_cache_ops=self.speculative_cache_ops,
+            )
+
         batch_ready_at_ns = monotonic_ns()
         waiting_before, running_before, remote_kv_before = queue_depths_before
         waiting_after = self.waiting_queue.sync_q.qsize()
         running_after = self.running_queue.sync_q.qsize()
         remote_kv_after = len(self.remote_kv_requests)
-        for request in scheduled_requests:
-            if request.scheduler_polled_at_ns is None:
-                request.scheduler_polled_at_ns = batch_ready_at_ns
-            request.timing_steps.append(
-                RequestStepTiming(
-                    request_id=request.request_id,
-                    role=request.timing_role,
-                    step_index=len(request.timing_steps),
-                    phase="prefill" if is_prefill else "decode",
-                    batch_size=len(scheduled_requests),
-                    server_received_at_ns=request.server_received_at_ns,
-                    scheduler_enqueued_at_ns=request.scheduler_enqueued_at_ns,
-                    scheduler_polled_at_ns=request.scheduler_polled_at_ns,
-                    scheduler_batch_ready_at_ns=batch_ready_at_ns,
-                    scheduler_waiting_queue_depth_before=waiting_before,
-                    scheduler_running_queue_depth_before=running_before,
-                    scheduler_remote_kv_requests_before=remote_kv_before,
-                    scheduler_waiting_queue_depth_after=waiting_after,
-                    scheduler_running_queue_depth_after=running_after,
-                    scheduler_remote_kv_requests_after=remote_kv_after,
+        if self.request_timing_enabled and self.request_timing_mode == "full":
+            for request in scheduled_requests:
+                if request.scheduler_polled_at_ns is None:
+                    request.scheduler_polled_at_ns = batch_ready_at_ns
+                request.timing_steps.append(
+                    RequestStepTiming(
+                        request_id=request.request_id,
+                        role=request.timing_role,
+                        step_index=len(request.timing_steps),
+                        phase="prefill" if is_prefill else "decode",
+                        batch_size=len(scheduled_requests),
+                        server_received_at_ns=request.server_received_at_ns,
+                        request_created_at_ns=request.request_created_at_ns,
+                        scheduler_enqueued_at_ns=request.scheduler_enqueued_at_ns,
+                        scheduler_polled_at_ns=request.scheduler_polled_at_ns,
+                        scheduler_batch_ready_at_ns=batch_ready_at_ns,
+                        scheduler_waiting_queue_depth_before=waiting_before,
+                        scheduler_running_queue_depth_before=running_before,
+                        scheduler_remote_kv_requests_before=remote_kv_before,
+                        scheduler_waiting_queue_depth_after=waiting_after,
+                        scheduler_running_queue_depth_after=running_after,
+                        scheduler_remote_kv_requests_after=remote_kv_after,
+                        entrance_timing=request.entrance_timing,
+                    )
                 )
-            )
         return SchedulerOutput(
             scheduled_requests=scheduled_requests,
             is_prefill=is_prefill,
@@ -202,7 +252,7 @@ class Scheduler:
         ):
             try:
                 req = self.waiting_queue.sync_q.get_nowait()
-                req.scheduler_polled_at_ns = monotonic_ns()
+                self._note_scheduler_polled(req)
             except queue.Empty:
                 break
             # Skip requests that were already finished (e.g., timed out/canceled while waiting)
@@ -372,7 +422,7 @@ class Scheduler:
         while len(scheduled_requests) < self.max_batch_size:
             try:
                 req = self.running_queue.sync_q.get_nowait()
-                req.scheduler_polled_at_ns = monotonic_ns()
+                self._note_scheduler_polled(req)
             except queue.Empty:
                 break
             # Skip requests that were already finished (e.g., timed out/canceled while running)
@@ -406,7 +456,7 @@ class Scheduler:
                     self.waiting_queue.sync_q.put(req)
                 elif req_id in self.finished_receiving_kv_req_ids:
                     if len(scheduled_requests) < self.max_batch_size:
-                        req.scheduler_polled_at_ns = monotonic_ns()
+                        self._note_scheduler_polled(req)
                         logger.info(
                             f"Request {req_id[:8]}... finished receiving KV, scheduling for decode."
                         )
@@ -605,10 +655,9 @@ class Scheduler:
             getattr(model_output.kv_connector_output, "invalid_block_ids", None) or []
         )
         timing_stats = (
-            getattr(model_output.kv_connector_output, "kv_connector_stats", None)
-            or {}
+            getattr(model_output.kv_connector_output, "kv_connector_stats", None) or {}
         )
-        if isinstance(timing_stats, dict):
+        if self.request_timing_enabled and isinstance(timing_stats, dict):
             # connector worker 线程只生产事件；这里在 engine step 中统一移交，
             # 避免 recorder 直接被多个传输线程并发调用。
             self._pending_timing_events.extend(timing_stats.values())

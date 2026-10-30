@@ -10,18 +10,24 @@ import threading
 import time
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from infinilm.llm.request import InferenceRequest, RequestStepTiming
 
 DEFAULT_REQUEST_TIMING_DIR = Path("/tmp/infinilm-request-timing")
+DEFAULT_REQUEST_TIMING_ENABLED = True
+DEFAULT_REQUEST_TIMING_MODE = "summary"
+DEFAULT_REQUEST_TIMING_SAMPLE_INTERVAL = 32
 # 观测文件只用于诊断，默认 24 小时后清理，防止长期运行占满 /tmp。
 DEFAULT_REQUEST_TIMING_RETENTION_SECONDS = 24 * 60 * 60
 # 后台写队列采用有界容量；超过后丢弃 timing，不影响推理请求。
 DEFAULT_REQUEST_TIMING_MAX_PENDING_JOBS = 1024
 # schema 字段用于离线工具识别字段语义；修改日志结构时必须递增。
-REQUEST_TIMING_SCHEMA_VERSION = 4
+REQUEST_TIMING_SCHEMA_VERSION = 6
+REQUEST_TIMING_SUMMARY_SCHEMA_VERSION = 7
+REQUEST_TIMING_SAMPLED_SUMMARY_SCHEMA_VERSION = 8
 # 过期文件清理与请求写入解耦，固定每小时执行一次。
 REQUEST_TIMING_CLEANUP_INTERVAL_SECONDS = 60 * 60
 
@@ -31,6 +37,76 @@ REQUEST_TIMING_CLEANUP_INTERVAL_SECONDS = 60 * 60
 REQUEST_TIMING_FLUSH_STEP_COUNT = 256
 REQUEST_TIMING_FLUSH_INTERVAL_SECONDS = 10.0
 _UNSAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9_.-]")
+
+
+def _request_timing_enabled(value: str | None, default: bool) -> bool:
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized not in {"1", "true", "yes", "on", "0", "false", "no", "off"}:
+        raise RuntimeError(f"INFINILM_REQUEST_TIMING must be a boolean: {value!r}")
+    return normalized in {"1", "true", "yes", "on"}
+
+
+@dataclass(frozen=True)
+class RequestTimingConfig:
+    """Runtime configuration for request and scheduler timing."""
+
+    enabled: bool = DEFAULT_REQUEST_TIMING_ENABLED
+    mode: str = DEFAULT_REQUEST_TIMING_MODE
+    sample_interval: int = DEFAULT_REQUEST_TIMING_SAMPLE_INTERVAL
+    root: Path = DEFAULT_REQUEST_TIMING_DIR
+
+    @classmethod
+    def from_environment(cls) -> "RequestTimingConfig":
+        raw_mode = os.environ.get(
+            "INFINILM_REQUEST_TIMING_MODE", DEFAULT_REQUEST_TIMING_MODE
+        )
+        mode = raw_mode.strip().lower()
+        if mode not in {"full", "summary"}:
+            raise RuntimeError(
+                f"INFINILM_REQUEST_TIMING_MODE must be full or summary: {raw_mode!r}"
+            )
+        raw_sample_interval = os.environ.get(
+            "INFINILM_REQUEST_TIMING_SAMPLE_INTERVAL",
+            str(DEFAULT_REQUEST_TIMING_SAMPLE_INTERVAL),
+        )
+        try:
+            sample_interval = int(raw_sample_interval)
+        except ValueError as exc:
+            raise RuntimeError(
+                "INFINILM_REQUEST_TIMING_SAMPLE_INTERVAL must be an integer: "
+                f"{raw_sample_interval!r}"
+            ) from exc
+        if sample_interval not in {1, 4, 8, 16, 32, 64, 128}:
+            raise RuntimeError(
+                "INFINILM_REQUEST_TIMING_SAMPLE_INTERVAL must be one of "
+                "1, 4, 8, 16, 32, 64, 128"
+            )
+        return cls(
+            enabled=_request_timing_enabled(
+                os.environ.get("INFINILM_REQUEST_TIMING"),
+                DEFAULT_REQUEST_TIMING_ENABLED,
+            ),
+            mode=mode,
+            sample_interval=sample_interval,
+            root=Path(
+                os.environ.get(
+                    "INFINILM_REQUEST_TIMING_DIR", DEFAULT_REQUEST_TIMING_DIR
+                )
+            ),
+        )
+
+    def create_recorder(
+        self,
+    ) -> "RequestTimingFileRecorder | DisabledRequestTimingRecorder":
+        if not self.enabled:
+            return DisabledRequestTimingRecorder()
+        return RequestTimingFileRecorder(
+            root=self.root,
+            mode=self.mode,
+            sample_interval=self.sample_interval,
+        )
 
 
 def request_timing_path(
@@ -62,13 +138,21 @@ class RequestTimingFileRecorder:
         self,
         *,
         root: Path | str = DEFAULT_REQUEST_TIMING_DIR,
+        mode: str = "full",
+        sample_interval: int = 1,
         retention_seconds: float = DEFAULT_REQUEST_TIMING_RETENTION_SECONDS,
         max_pending_jobs: int = DEFAULT_REQUEST_TIMING_MAX_PENDING_JOBS,
     ) -> None:
         """初始化 recorder；线程池和后台线程都等到首次写入时创建。"""
         if max_pending_jobs <= 0:
             raise ValueError("max_pending_jobs must be positive")
+        if mode not in {"full", "summary"}:
+            raise ValueError("mode must be 'full' or 'summary'")
+        if sample_interval not in {1, 4, 8, 16, 32, 64, 128}:
+            raise ValueError("sample_interval must be 1, 4, 8, 16, 32, 64, or 128")
         self._root = Path(root)
+        self._mode = mode
+        self._sample_interval = sample_interval
         # 单 worker 保证同一请求的 JSONL append 顺序与提交顺序一致。
         self._executor: ThreadPoolExecutor | None = None
         # _lock 保护 buffers/closed 等状态；flush condition 复用同一把锁。
@@ -106,6 +190,15 @@ class RequestTimingFileRecorder:
             "event": "step",
             **timing.to_dict(),
             "durations_ns": {
+                "server_to_request_created": cls._duration_ns(
+                    timing.server_received_at_ns,
+                    timing.request_created_at_ns,
+                ),
+                **cls._entrance_durations(timing),
+                "request_created_to_scheduler_enqueue": cls._duration_ns(
+                    timing.request_created_at_ns,
+                    timing.scheduler_enqueued_at_ns,
+                ),
                 "queue": cls._duration_ns(
                     timing.server_received_at_ns,
                     timing.scheduler_polled_at_ns,
@@ -125,12 +218,98 @@ class RequestTimingFileRecorder:
             },
         }
 
-    @staticmethod
-    def _finish_payload(request: InferenceRequest) -> dict[str, Any]:
-        """请求进入终态时输出一条汇总记录。"""
+    @classmethod
+    def _entrance_durations(cls, timing: RequestStepTiming) -> dict[str, int | None]:
+        entrance = timing.entrance_timing
+        field_names = (
+            "body_read_completed_at_ns",
+            "json_parsed_at_ns",
+            "route_prepared_at_ns",
+            "handler_started_at_ns",
+            "preprocessing_started_at_ns",
+            "chat_template_completed_at_ns",
+            "multimodal_resolved_at_ns",
+            "tokenization_completed_at_ns",
+            "prompt_token_ids_ready_at_ns",
+        )
+        if entrance is None:
+            fields = {name: None for name in field_names}
+        else:
+            fields = {name: getattr(entrance, name) for name in field_names}
+        duration_edges = (
+            (
+                "server_to_body_read",
+                "server_received_at_ns",
+                "body_read_completed_at_ns",
+            ),
+            (
+                "body_read_to_json_parse",
+                "body_read_completed_at_ns",
+                "json_parsed_at_ns",
+            ),
+            (
+                "json_parse_to_route_prepare",
+                "json_parsed_at_ns",
+                "route_prepared_at_ns",
+            ),
+            (
+                "route_prepare_to_handler_start",
+                "route_prepared_at_ns",
+                "handler_started_at_ns",
+            ),
+            (
+                "handler_start_to_preprocessing_start",
+                "handler_started_at_ns",
+                "preprocessing_started_at_ns",
+            ),
+            (
+                "preprocessing_to_chat_template",
+                "preprocessing_started_at_ns",
+                "chat_template_completed_at_ns",
+            ),
+            (
+                "chat_template_to_multimodal_resolve",
+                "chat_template_completed_at_ns",
+                "multimodal_resolved_at_ns",
+            ),
+            (
+                "multimodal_to_tokenization",
+                "multimodal_resolved_at_ns",
+                "tokenization_completed_at_ns",
+            ),
+            (
+                "tokenization_to_prompt_token_ids",
+                "tokenization_completed_at_ns",
+                "prompt_token_ids_ready_at_ns",
+            ),
+            (
+                "prompt_token_ids_to_request_created",
+                "prompt_token_ids_ready_at_ns",
+                "request_created_at_ns",
+            ),
+        )
         return {
-            "schema_version": REQUEST_TIMING_SCHEMA_VERSION,
+            name: cls._duration_ns(
+                fields.get(start_field, getattr(timing, start_field, None)),
+                fields.get(end_field, getattr(timing, end_field, None)),
+            )
+            for name, start_field, end_field in duration_edges
+        }
+
+    def _finish_payload(self, request: InferenceRequest) -> dict[str, Any]:
+        """请求进入终态时输出一条汇总记录。"""
+        is_summary = self._mode == "summary"
+        is_sampled_summary = is_summary and self._sample_interval > 1
+        return {
+            "schema_version": (
+                REQUEST_TIMING_SAMPLED_SUMMARY_SCHEMA_VERSION
+                if is_sampled_summary
+                else REQUEST_TIMING_SUMMARY_SCHEMA_VERSION
+                if is_summary
+                else REQUEST_TIMING_SCHEMA_VERSION
+            ),
             "event": "finish",
+            **({"timing_mode": "summary"} if is_summary else {}),
             "role": request.timing_role,
             "finish_reason": (
                 request.finish_reason.value
@@ -230,9 +409,7 @@ class RequestTimingFileRecorder:
         """启动时和每小时清理一次过期 timing 文件。"""
         while True:
             self._cleanup_expired_files()
-            if self._cleanup_stop.wait(
-                REQUEST_TIMING_CLEANUP_INTERVAL_SECONDS
-            ):
+            if self._cleanup_stop.wait(REQUEST_TIMING_CLEANUP_INTERVAL_SECONDS):
                 return
 
     def _submit_locked(
@@ -310,15 +487,18 @@ class RequestTimingFileRecorder:
                     return
 
                 now_ns = time.monotonic_ns()
-                interval_ns = int(
-                    REQUEST_TIMING_FLUSH_INTERVAL_SECONDS * 1_000_000_000
-                )
+                interval_ns = int(REQUEST_TIMING_FLUSH_INTERVAL_SECONDS * 1_000_000_000)
                 for request_id, buffer in list(self._buffers.items()):
-                    if buffer and now_ns - self._last_flush_at_ns[request_id] >= interval_ns:
+                    if (
+                        buffer
+                        and now_ns - self._last_flush_at_ns[request_id] >= interval_ns
+                    ):
                         self._flush_request_locked(request_id, now_ns)
 
     def record_steps(self, timings: Sequence[RequestStepTiming]) -> None:
         """记录一轮 scheduler batch；同批次内按 request 分别处理。"""
+        if self._mode == "summary":
+            return
         timings = tuple(timings)
         if not timings:
             return
@@ -339,9 +519,7 @@ class RequestTimingFileRecorder:
                 buffer = self._buffers.setdefault(request_id, [])
                 buffer.append(timing)
                 now_ns = time.monotonic_ns()
-                interval_ns = int(
-                    REQUEST_TIMING_FLUSH_INTERVAL_SECONDS * 1_000_000_000
-                )
+                interval_ns = int(REQUEST_TIMING_FLUSH_INTERVAL_SECONDS * 1_000_000_000)
                 if (
                     len(buffer) >= REQUEST_TIMING_FLUSH_STEP_COUNT
                     or now_ns - self._last_flush_at_ns[request_id] >= interval_ns
@@ -362,6 +540,14 @@ class RequestTimingFileRecorder:
             if self._closed:
                 return
             request_id = request.request_id
+            if self._mode == "summary":
+                self._submit_locked(
+                    1,
+                    self._write_finish,
+                    (),
+                    request,
+                )
+                return
             # finish 负责清空该请求的全部残留状态，防止后续事件复用旧时间。
             timings = tuple(self._buffers.pop(request_id, ()))
             self._last_flush_at_ns.pop(request_id, None)
@@ -386,15 +572,22 @@ class RequestTimingFileRecorder:
             if self._closed:
                 return
             event_payload = dict(payload)
-            event_payload.setdefault("schema_version", REQUEST_TIMING_SCHEMA_VERSION)
+            event_payload.setdefault(
+                "schema_version",
+                (
+                    REQUEST_TIMING_SAMPLED_SUMMARY_SCHEMA_VERSION
+                    if self._mode == "summary" and self._sample_interval > 1
+                    else REQUEST_TIMING_SUMMARY_SCHEMA_VERSION
+                    if self._mode == "summary"
+                    else REQUEST_TIMING_SCHEMA_VERSION
+                ),
+            )
             self._submit_locked(1, self._write_event, event_payload)
 
     def stats(self) -> dict[str, int]:
         """返回 recorder 内部观测状态，用于诊断后台写入是否积压。"""
         with self._lock:
-            buffered_requests = sum(
-                bool(buffer) for buffer in self._buffers.values()
-            )
+            buffered_requests = sum(bool(buffer) for buffer in self._buffers.values())
         with self._stats_lock:
             return {
                 "dropped_records": self._dropped_records,
@@ -440,7 +633,36 @@ class RequestTimingFileRecorder:
 
         if flush_thread is not None and flush_thread is not threading.current_thread():
             flush_thread.join(timeout=REQUEST_TIMING_FLUSH_INTERVAL_SECONDS + 1)
-        if cleanup_thread is not None and cleanup_thread is not threading.current_thread():
+        if (
+            cleanup_thread is not None
+            and cleanup_thread is not threading.current_thread()
+        ):
             cleanup_thread.join(timeout=1)
         if executor is not None:
             executor.shutdown(wait=True)
+
+
+class DisabledRequestTimingRecorder:
+    """No-op recorder used when request timing is disabled."""
+
+    def record_steps(self, timings: Sequence[RequestStepTiming]) -> None:
+        return
+
+    def record_step(self, timing: RequestStepTiming) -> None:
+        return
+
+    def record_finish(self, request: InferenceRequest) -> None:
+        return
+
+    def record_event(self, payload: dict[str, Any]) -> None:
+        return
+
+    def stats(self) -> dict[str, int]:
+        return {
+            "dropped_records": 0,
+            "pending_jobs": 0,
+            "buffered_requests": 0,
+        }
+
+    def close(self) -> None:
+        return

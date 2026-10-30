@@ -25,6 +25,86 @@ TIMESTAMP_FIELDS = (
     "engine_forward_started_at_ns",
     "engine_forward_completed_at_ns",
 )
+TIMESTAMP_FIELDS_V5 = (
+    "server_received_at_ns",
+    "request_created_at_ns",
+    "scheduler_enqueued_at_ns",
+    "scheduler_polled_at_ns",
+    "scheduler_batch_ready_at_ns",
+    "engine_forward_started_at_ns",
+    "engine_forward_completed_at_ns",
+)
+TIMESTAMP_FIELDS_V6 = (
+    "server_received_at_ns",
+    "body_read_completed_at_ns",
+    "json_parsed_at_ns",
+    "route_prepared_at_ns",
+    "handler_started_at_ns",
+    "preprocessing_started_at_ns",
+    "chat_template_completed_at_ns",
+    "multimodal_resolved_at_ns",
+    "tokenization_completed_at_ns",
+    "prompt_token_ids_ready_at_ns",
+    "request_created_at_ns",
+    "scheduler_enqueued_at_ns",
+    "scheduler_polled_at_ns",
+    "scheduler_batch_ready_at_ns",
+    "engine_forward_started_at_ns",
+    "engine_forward_completed_at_ns",
+)
+ENTRANCE_TIMESTAMP_FIELDS_V6 = TIMESTAMP_FIELDS_V6[1:10]
+ENTRANCE_DURATION_FIELDS_V6 = (
+    (
+        "server_to_body_read",
+        "server_received_at_ns",
+        "body_read_completed_at_ns",
+    ),
+    (
+        "body_read_to_json_parse",
+        "body_read_completed_at_ns",
+        "json_parsed_at_ns",
+    ),
+    (
+        "json_parse_to_route_prepare",
+        "json_parsed_at_ns",
+        "route_prepared_at_ns",
+    ),
+    (
+        "route_prepare_to_handler_start",
+        "route_prepared_at_ns",
+        "handler_started_at_ns",
+    ),
+    (
+        "handler_start_to_preprocessing_start",
+        "handler_started_at_ns",
+        "preprocessing_started_at_ns",
+    ),
+    (
+        "preprocessing_to_chat_template",
+        "preprocessing_started_at_ns",
+        "chat_template_completed_at_ns",
+    ),
+    (
+        "chat_template_to_multimodal_resolve",
+        "chat_template_completed_at_ns",
+        "multimodal_resolved_at_ns",
+    ),
+    (
+        "multimodal_to_tokenization",
+        "multimodal_resolved_at_ns",
+        "tokenization_completed_at_ns",
+    ),
+    (
+        "tokenization_to_prompt_token_ids",
+        "tokenization_completed_at_ns",
+        "prompt_token_ids_ready_at_ns",
+    ),
+    (
+        "prompt_token_ids_to_request_created",
+        "prompt_token_ids_ready_at_ns",
+        "request_created_at_ns",
+    ),
+)
 # 兼容 schema v1/v2 的历史日志。
 LEGACY_TIMESTAMP_FIELDS = (
     "server_received_at_ns",
@@ -88,8 +168,7 @@ def expected_timing_filename(request_id: str) -> str:
         "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-"
     )
     safe_prefix = "".join(
-        character if character in safe_characters else "_"
-        for character in request_id
+        character if character in safe_characters else "_" for character in request_id
     )[:80]
     if safe_prefix != request_id or not safe_prefix:
         digest = hashlib.sha256(request_id.encode("utf-8")).hexdigest()[:12]
@@ -118,7 +197,30 @@ def _validate_step(result: FileValidationResult, record: dict[str, Any]):
 
     schema_version = record.get("schema_version")
     legacy_schema = schema_version is None or schema_version <= 2
-    timestamp_fields = LEGACY_TIMESTAMP_FIELDS if legacy_schema else TIMESTAMP_FIELDS
+    entrance_values = (
+        [record.get(field) for field in ENTRANCE_TIMESTAMP_FIELDS_V6]
+        if schema_version == 6
+        else []
+    )
+    complete_entrance_timing = bool(entrance_values) and all(
+        isinstance(value, int) and value >= 0 for value in entrance_values
+    )
+    missing_entrance_timing = (
+        any(value is not None for value in entrance_values)
+        and not complete_entrance_timing
+    )
+    timestamp_fields = (
+        LEGACY_TIMESTAMP_FIELDS
+        if legacy_schema
+        else (
+            TIMESTAMP_FIELDS_V6
+            if schema_version == 6
+            and (complete_entrance_timing or missing_entrance_timing)
+            else TIMESTAMP_FIELDS_V5
+            if schema_version == 5
+            else TIMESTAMP_FIELDS
+        )
+    )
     if not legacy_schema and "model_runner_entered_at_ns" in record:
         result.errors.append("schema v3 must not record model_runner_entered_at_ns")
         return
@@ -130,7 +232,7 @@ def _validate_step(result: FileValidationResult, record: dict[str, Any]):
     if any(left > right for left, right in zip(timestamps, timestamps[1:])):
         result.errors.append("step timestamps are not monotonic")
 
-    if schema_version == 4:
+    if schema_version is not None and schema_version >= 4:
         for field_name in SCHEDULER_SNAPSHOT_FIELDS:
             value = record.get(field_name)
             if not isinstance(value, int) or value < 0:
@@ -146,14 +248,49 @@ def _validate_step(result: FileValidationResult, record: dict[str, Any]):
             "engine_forward": timestamps[6] - timestamps[5],
         }
     else:
+        timestamp_by_name = {field: record.get(field) for field in timestamp_fields}
         expected_durations = {
-            "queue": timestamps[2] - timestamps[0],
-            "scheduler": timestamps[3] - timestamps[2],
-            "scheduler_batch_ready_to_engine_forward_start": (
-                timestamps[4] - timestamps[3]
+            "queue": (
+                timestamp_by_name["scheduler_polled_at_ns"]
+                - timestamp_by_name["server_received_at_ns"]
             ),
-            "engine_forward": timestamps[5] - timestamps[4],
+            "scheduler": (
+                timestamp_by_name["scheduler_batch_ready_at_ns"]
+                - timestamp_by_name["scheduler_polled_at_ns"]
+            ),
+            "scheduler_batch_ready_to_engine_forward_start": (
+                timestamp_by_name["engine_forward_started_at_ns"]
+                - timestamp_by_name["scheduler_batch_ready_at_ns"]
+            ),
+            "engine_forward": (
+                timestamp_by_name["engine_forward_completed_at_ns"]
+                - timestamp_by_name["engine_forward_started_at_ns"]
+            ),
         }
+        if schema_version == 5:
+            expected_durations.update(
+                {
+                    "server_to_request_created": (
+                        timestamp_by_name["request_created_at_ns"]
+                        - timestamp_by_name["server_received_at_ns"]
+                    ),
+                    "request_created_to_scheduler_enqueue": (
+                        timestamp_by_name["scheduler_enqueued_at_ns"]
+                        - timestamp_by_name["request_created_at_ns"]
+                    ),
+                }
+            )
+        if schema_version == 6 and complete_entrance_timing:
+            expected_durations.update(
+                {
+                    duration_name: (
+                        timestamp_by_name[end_field] - timestamp_by_name[start_field]
+                    )
+                    for duration_name, start_field, end_field in (
+                        ENTRANCE_DURATION_FIELDS_V6
+                    )
+                }
+            )
     actual_durations = record.get("durations_ns")
     if not isinstance(actual_durations, dict):
         result.errors.append("step has no durations_ns object")
@@ -172,6 +309,86 @@ def _validate_finish(
     steps: list[dict[str, Any]],
 ):
     """校验 finish 汇总是否与同文件 step 明细一致。"""
+    if record.get("timing_mode") == "summary":
+        expected_order = (
+            record.get("server_received_at_ns"),
+            record.get("request_created_at_ns"),
+            record.get("scheduler_enqueued_at_ns"),
+            record.get("first_scheduler_polled_at_ns"),
+            record.get("scheduler_batch_ready_at_ns"),
+            record.get("first_engine_forward_started_at_ns"),
+            record.get("first_engine_forward_completed_at_ns"),
+            record.get("last_engine_forward_completed_at_ns"),
+            record.get("finish_local_monotonic_ns"),
+        )
+        timestamps = [value for value in expected_order if value is not None]
+        if any(not isinstance(value, int) or value < 0 for value in timestamps):
+            result.errors.append("summary finish has invalid timestamps")
+        elif any(left > right for left, right in zip(timestamps, timestamps[1:])):
+            result.errors.append("summary finish timestamps are not monotonic")
+
+        steps = record.get("steps")
+        forward_total = record.get("engine_forward_total_ns")
+        estimated_total = record.get("engine_forward_total_estimate_ns")
+        sample_interval = record.get("sample_interval")
+        decode_steps = record.get("decode_step_count")
+        sampled_steps = record.get("sampled_decode_step_count")
+        sampled_forward = record.get("sampled_decode_forward_ns")
+        if not isinstance(steps, int) or steps < 0:
+            result.errors.append("summary finish has invalid steps")
+        if forward_total is not None and (
+            not isinstance(forward_total, int) or forward_total < 0
+        ):
+            result.errors.append("summary finish has invalid engine_forward_total_ns")
+        if estimated_total is not None and (
+            not isinstance(estimated_total, int) or estimated_total < 0
+        ):
+            result.errors.append(
+                "summary finish has invalid engine_forward_total_estimate_ns"
+            )
+        if not isinstance(sample_interval, int) or sample_interval < 1:
+            result.errors.append("summary finish has invalid sample_interval")
+        if not isinstance(decode_steps, int) or decode_steps < 0:
+            result.errors.append("summary finish has invalid decode_step_count")
+        if not isinstance(sampled_steps, int) or not 0 <= sampled_steps <= decode_steps:
+            result.errors.append("summary finish has invalid sampled_decode_step_count")
+        if not isinstance(sampled_forward, int) or sampled_forward < 0:
+            result.errors.append("summary finish has invalid sampled_decode_forward_ns")
+        if record.get("schema_version") == 8:
+            if not isinstance(estimated_total, int) or estimated_total < 0:
+                result.errors.append("sampled summary finish has invalid estimate")
+            if decode_steps > 0 and sampled_steps == 0:
+                result.errors.append("sampled summary finish has no decode samples")
+
+        first_forward_duration = (
+            record.get("first_engine_forward_completed_at_ns")
+            - record.get("first_engine_forward_started_at_ns")
+            if isinstance(record.get("first_engine_forward_completed_at_ns"), int)
+            and isinstance(record.get("first_engine_forward_started_at_ns"), int)
+            else None
+        )
+        if (
+            first_forward_duration is not None
+            and isinstance(forward_total, int)
+            and forward_total < first_forward_duration
+        ):
+            result.errors.append(
+                "summary finish engine_forward_total_ns is less than first forward"
+            )
+        if estimated_total is not None and first_forward_duration is not None:
+            first_forward_is_decode = (
+                decode_steps > 0 and record.get("role") == "decode"
+            )
+            if (
+                isinstance(estimated_total, int)
+                and estimated_total < first_forward_duration
+                and not first_forward_is_decode
+            ):
+                result.errors.append(
+                    "summary finish estimate is less than first prefill forward"
+                )
+        return
+
     expected_steps = len(steps)
     if record.get("steps") != expected_steps:
         result.errors.append(
@@ -212,11 +429,32 @@ def _validate_finish(
             expected_fields["first_engine_forward_started_at_ns"] = first.get(
                 "engine_forward_started_at_ns"
             )
+        if first.get("schema_version") == 5:
+            expected_fields["request_created_at_ns"] = first.get(
+                "request_created_at_ns"
+            )
+        if first.get("schema_version") == 6:
+            expected_fields["request_created_at_ns"] = first.get(
+                "request_created_at_ns"
+            )
+        if first.get("schema_version") == 6 and all(
+            first.get(field) is not None for field in ENTRANCE_TIMESTAMP_FIELDS_V6
+        ):
+            for field_name in (
+                "body_read_completed_at_ns",
+                "json_parsed_at_ns",
+                "route_prepared_at_ns",
+                "handler_started_at_ns",
+                "preprocessing_started_at_ns",
+                "chat_template_completed_at_ns",
+                "multimodal_resolved_at_ns",
+                "tokenization_completed_at_ns",
+                "prompt_token_ids_ready_at_ns",
+            ):
+                expected_fields[field_name] = first.get(field_name)
         for field_name, expected in expected_fields.items():
             if record.get(field_name) != expected:
-                result.errors.append(
-                    f"finish {field_name} does not match step records"
-                )
+                result.errors.append(f"finish {field_name} does not match step records")
 
 
 def _validate_transfer_event(
@@ -228,18 +466,13 @@ def _validate_transfer_event(
     # kv_send 在 P 侧，kv_receive 在 D 侧；scope 描述统计口径。
     expected_role = "prefill" if event == "kv_send" else "decode"
     expected_scope = (
-        "producer_batch_transfer"
-        if event == "kv_send"
-        else "decode_local_kv_readiness"
+        "producer_batch_transfer" if event == "kv_send" else "decode_local_kv_readiness"
     )
     if record.get("role") != expected_role:
         result.errors.append(f"{event} has unexpected role")
     if "scope" in record and record.get("scope") != expected_scope:
         result.errors.append(f"{event} has unexpected scope")
-    if (
-        "clock_domain" in record
-        and record.get("clock_domain") != "local-monotonic"
-    ):
+    if "clock_domain" in record and record.get("clock_domain") != "local-monotonic":
         result.errors.append(f"{event} has invalid clock_domain")
     if (
         "cross_node_comparable" in record
@@ -261,9 +494,7 @@ def _validate_transfer_event(
         result.errors.append(f"{event} has invalid timestamps or duration")
     if not isinstance(record.get("bytes"), int) or record["bytes"] < 0:
         result.errors.append(f"{event} has invalid bytes")
-    if "schema_version" in record and not isinstance(
-        record["schema_version"], int
-    ):
+    if "schema_version" in record and not isinstance(record["schema_version"], int):
         result.errors.append(f"{event} has invalid schema_version")
     if event == "kv_send" and record.get("batch_id") is not None:
         # 新 schema 显式描述一次物理 producer batch，避免按 request 重复统计。
@@ -332,7 +563,7 @@ def validate_timing_file(path: Path) -> FileValidationResult:
         if schema_version is not None and (
             not isinstance(schema_version, int)
             or schema_version <= 0
-            or schema_version > 4
+            or schema_version > 8
         ):
             _append_error(result, line_number, "invalid schema_version")
         if result.request_id is None:
@@ -376,12 +607,16 @@ def validate_timing_file(path: Path) -> FileValidationResult:
             result.role = "decode"
         else:
             result.role = "aggregated"
-    if not steps:
+    summary_finish = bool(
+        finish_records and finish_records[0].get("timing_mode") == "summary"
+    )
+    if not steps and not summary_finish:
         result.errors.append("file contains no step records")
 
-    step_indexes = [record.get("step_index") for record in steps]
-    if step_indexes != list(range(len(steps))):
-        result.errors.append("step_index sequence is not contiguous from zero")
+    if steps:
+        step_indexes = [record.get("step_index") for record in steps]
+        if step_indexes != list(range(len(steps))):
+            result.errors.append("step_index sequence is not contiguous from zero")
 
     phases = [record.get("phase") for record in steps]
     # 三种角色的合法 phase 序列不同：普通服务包含 prefill+decode，
@@ -392,7 +627,7 @@ def validate_timing_file(path: Path) -> FileValidationResult:
         expected_phases = ["prefill"]
     else:
         expected_phases = ["decode"] * len(steps)
-    if phases != expected_phases:
+    if steps and phases != expected_phases:
         result.errors.append(
             f"phase sequence mismatch: expected {expected_phases}, got {phases}"
         )
@@ -464,9 +699,7 @@ def _batch_consistency_errors(
         for field_name in SCHEDULER_SNAPSHOT_FIELDS:
             values = {record.get(field_name) for record in records}
             if len(values) != 1:
-                message = (
-                    f"forward batch {key[-1]} has inconsistent {field_name}"
-                )
+                message = f"forward batch {key[-1]} has inconsistent {field_name}"
                 for request_id in request_ids:
                     errors[request_id].append(message)
 
@@ -504,9 +737,10 @@ def _batch_consistency_errors(
         ]
         expected_blocks = records[0].get("batch_block_count")
         # 各 request 的 block 数求和后才等于整个 Mooncake batch 的 block 数。
-        if len(request_block_counts) == len(records) and sum(
-            request_block_counts
-        ) != expected_blocks:
+        if (
+            len(request_block_counts) == len(records)
+            and sum(request_block_counts) != expected_blocks
+        ):
             message = (
                 f"kv_send batch {batch_id} request blocks do not sum to "
                 f"batch_block_count"
@@ -553,7 +787,9 @@ def validate_timing_root(
         is_pd = {"prefill", "decode"}.issubset(roles)
         expected_roles = {"prefill", "decode"} if is_pd else {"aggregated"}
         if not expected_roles.issubset(roles):
-            errors.append(f"missing expected roles: {sorted(expected_roles - set(roles))}")
+            errors.append(
+                f"missing expected roles: {sorted(expected_roles - set(roles))}"
+            )
 
         events_by_role: dict[str, set[str]] = defaultdict(set)
         for result in results:
@@ -622,7 +858,9 @@ def validate_timing_root(
         "file_count": len(file_results),
         "file_status_counts": dict(sorted(status_counts.items())),
         "request_count": len(request_groups),
-        "complete_request_count": sum(group["status"] == "complete" for group in request_groups),
+        "complete_request_count": sum(
+            group["status"] == "complete" for group in request_groups
+        ),
         "incomplete_or_invalid_request_count": incomplete_count,
         "invalid_file_count": invalid_count,
         "batch_consistency_error_count": batch_consistency_error_count,
@@ -635,10 +873,7 @@ def _render_text(report: dict[str, Any]) -> str:
     """渲染人可读的校验报告。"""
     lines = [
         f"Timing root: {report['root']} exists={report['root_exists']}",
-        (
-            f"Files: {report['file_count']} "
-            f"status={report['file_status_counts']}"
-        ),
+        (f"Files: {report['file_count']} status={report['file_status_counts']}"),
         (
             f"Requests: {report['request_count']} "
             f"complete={report['complete_request_count']} "
@@ -686,8 +921,7 @@ def main(argv: list[str] | None = None) -> int:
     if report["invalid_file_count"]:
         return 2
     if (
-        report["incomplete_or_invalid_request_count"]
-        or not report["file_count"]
+        report["incomplete_or_invalid_request_count"] or not report["file_count"]
     ) and not args.allow_incomplete:
         return 1
     return 0

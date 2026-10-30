@@ -12,6 +12,7 @@ from typing import List, Optional
 
 import janus
 
+from infinilm.llm.output_timing import OutputTokenTiming
 from infinilm.llm.prefix_cache import (
     EMPTY_BLOCK_HASH,
     BlockHash,
@@ -144,6 +145,47 @@ class TokenOutput:
     finished: bool = False
     finish_reason: Optional[FinishReason] = None
     generated_text: str = ""
+    output_timing: Optional[OutputTokenTiming] = None
+
+
+@dataclass
+class TokenBatch:
+    """Multiple outputs from one request, published as one queue item."""
+
+    request_id: str
+    outputs: List[TokenOutput] = field(default_factory=list)
+
+
+@dataclass
+class RequestEntranceTiming:
+    """HTTP 入口到 InferenceRequest 创建前的分段时间点。
+
+    These timestamps are captured on the worker's monotonic clock and are only
+    subtracted within the same process.
+    """
+
+    body_read_completed_at_ns: int | None = None
+    json_parsed_at_ns: int | None = None
+    route_prepared_at_ns: int | None = None
+    handler_started_at_ns: int | None = None
+    preprocessing_started_at_ns: int | None = None
+    chat_template_completed_at_ns: int | None = None
+    multimodal_resolved_at_ns: int | None = None
+    tokenization_completed_at_ns: int | None = None
+    prompt_token_ids_ready_at_ns: int | None = None
+
+    def to_dict(self) -> dict[str, int | None]:
+        return {
+            "body_read_completed_at_ns": self.body_read_completed_at_ns,
+            "json_parsed_at_ns": self.json_parsed_at_ns,
+            "route_prepared_at_ns": self.route_prepared_at_ns,
+            "handler_started_at_ns": self.handler_started_at_ns,
+            "preprocessing_started_at_ns": self.preprocessing_started_at_ns,
+            "chat_template_completed_at_ns": self.chat_template_completed_at_ns,
+            "multimodal_resolved_at_ns": self.multimodal_resolved_at_ns,
+            "tokenization_completed_at_ns": self.tokenization_completed_at_ns,
+            "prompt_token_ids_ready_at_ns": self.prompt_token_ids_ready_at_ns,
+        }
 
 
 @dataclass
@@ -170,6 +212,8 @@ class RequestStepTiming:
     role: str = "aggregated"
     # worker HTTP route 入口时间，早于 body 读取、JSON 解析和 tokenize。
     server_received_at_ns: int | None = None
+    # InferenceRequest 完成创建的时间；v5 用于拆分入口预处理和入队前处理。
+    request_created_at_ns: int | None = None
     # 请求完成预处理并进入 scheduler waiting queue 的时间。
     scheduler_enqueued_at_ns: int | None = None
     # scheduler 从 waiting/running queue 取出该请求、开始处理的时间。
@@ -192,10 +236,12 @@ class RequestStepTiming:
     # self.model_engine.forward() 返回后的时间；该值是 ModelRunner
     # 视角的 engine forward 完成点，不包含输出 tensor 转 Python list。
     engine_forward_completed_at_ns: int | None = None
+    # v6 入口分段时间点。写日志时展开到 step 顶层，保持离线工具简单。
+    entrance_timing: RequestEntranceTiming | None = None
 
     def to_dict(self) -> dict[str, int | str | None]:
         """转换为可直接写入日志或导出的字典。"""
-        return {
+        payload = {
             "request_id": self.request_id,
             "role": self.role,
             "step_index": self.step_index,
@@ -203,6 +249,7 @@ class RequestStepTiming:
             "batch_size": self.batch_size,
             "forward_batch_id": self.forward_batch_id,
             "server_received_at_ns": self.server_received_at_ns,
+            "request_created_at_ns": self.request_created_at_ns,
             "scheduler_enqueued_at_ns": self.scheduler_enqueued_at_ns,
             "scheduler_polled_at_ns": self.scheduler_polled_at_ns,
             "scheduler_batch_ready_at_ns": self.scheduler_batch_ready_at_ns,
@@ -215,6 +262,9 @@ class RequestStepTiming:
             "engine_forward_started_at_ns": self.engine_forward_started_at_ns,
             "engine_forward_completed_at_ns": self.engine_forward_completed_at_ns,
         }
+        if self.entrance_timing is not None:
+            payload.update(self.entrance_timing.to_dict())
+        return payload
 
 
 class InferenceRequest:
@@ -236,6 +286,7 @@ class InferenceRequest:
         # For server use
         request_data: Optional[dict] = None,
         *,
+        entrance_timing: Optional[RequestEntranceTiming] = None,
         has_multimodal_inputs: bool = False,
     ):
         self.arrival_time: float = arrival_time or time.time()
@@ -243,8 +294,22 @@ class InferenceRequest:
         # HTTP route 在解析 body 前记录该时间；arrival_time 是内部 request
         # 创建时间，二者不能混用。
         self.server_received_at_ns: Optional[int] = server_received_at_ns
+        self.request_created_at_ns: Optional[int] = None
         self.scheduler_enqueued_at_ns: Optional[int] = None
         self.scheduler_polled_at_ns: Optional[int] = None
+        self.first_scheduler_polled_at_ns: Optional[int] = None
+        self.scheduler_batch_ready_at_ns: Optional[int] = None
+        self.first_engine_forward_started_at_ns: Optional[int] = None
+        self.first_engine_forward_completed_at_ns: Optional[int] = None
+        self.last_engine_forward_completed_at_ns: Optional[int] = None
+        self.engine_forward_total_ns: Optional[int] = None
+        self.prefill_forward_ns: Optional[int] = None
+        self.decode_step_count: int = 0
+        self.sampled_decode_step_count: int = 0
+        self.sampled_decode_forward_ns: int = 0
+        self.sample_interval: int = 1
+        self.timing_step_count: int = 0
+        self.timing_mode: str = "full"
         self.timing_steps: List[RequestStepTiming] = []
 
         # Request metadata
@@ -310,6 +375,7 @@ class InferenceRequest:
 
         # For server use
         self.request_data: Optional[dict] = request_data
+        self.entrance_timing: Optional[RequestEntranceTiming] = entrance_timing
 
         # Async output & streaming
         self._output_queue: Optional[janus.Queue] = None
@@ -412,13 +478,89 @@ class InferenceRequest:
     def get_timing_summary(self) -> dict[str, int | str | None]:
         """汇总首步排队路径和全部 C++ forward 耗时。"""
         if not self.timing_steps:
-            return {"request_id": self.request_id, "steps": 0}
+            if self.timing_mode != "summary":
+                return {"request_id": self.request_id, "steps": 0}
+
+            queue_ns = (
+                self.first_scheduler_polled_at_ns - self.server_received_at_ns
+                if self.first_scheduler_polled_at_ns is not None
+                and self.server_received_at_ns is not None
+                else None
+            )
+            scheduler_ns = (
+                self.scheduler_batch_ready_at_ns - self.first_scheduler_polled_at_ns
+                if self.scheduler_batch_ready_at_ns is not None
+                and self.first_scheduler_polled_at_ns is not None
+                else None
+            )
+            scheduler_batch_ready_to_engine_forward_start_ns = (
+                self.first_engine_forward_started_at_ns
+                - self.scheduler_batch_ready_at_ns
+                if self.first_engine_forward_started_at_ns is not None
+                and self.scheduler_batch_ready_at_ns is not None
+                else None
+            )
+            generated_steps = self.get_num_generated_tokens()
+            exact_total_ns = None
+            estimated_total_ns = None
+            if self.sample_interval == 1:
+                exact_total_ns = (
+                    self.prefill_forward_ns or 0
+                ) + self.sampled_decode_forward_ns
+            elif self.decode_step_count == 0:
+                estimated_total_ns = self.prefill_forward_ns or 0
+            elif self.sampled_decode_step_count > 0:
+                sampled_decode_average_ns = (
+                    self.sampled_decode_forward_ns / self.sampled_decode_step_count
+                )
+                estimated_total_ns = int(
+                    (self.prefill_forward_ns or 0)
+                    + sampled_decode_average_ns * self.decode_step_count
+                )
+            return {
+                "request_id": self.request_id,
+                "role": self.timing_role,
+                "steps": generated_steps,
+                "server_received_at_ns": self.server_received_at_ns,
+                "request_created_at_ns": self.request_created_at_ns,
+                **(
+                    self.entrance_timing.to_dict()
+                    if self.entrance_timing is not None
+                    else {}
+                ),
+                "scheduler_enqueued_at_ns": self.scheduler_enqueued_at_ns,
+                "first_scheduler_polled_at_ns": self.first_scheduler_polled_at_ns,
+                "scheduler_batch_ready_at_ns": self.scheduler_batch_ready_at_ns,
+                "first_engine_forward_started_at_ns": (
+                    self.first_engine_forward_started_at_ns
+                ),
+                "first_engine_forward_completed_at_ns": (
+                    self.first_engine_forward_completed_at_ns
+                ),
+                "last_engine_forward_completed_at_ns": (
+                    self.last_engine_forward_completed_at_ns
+                ),
+                "queue_ns": queue_ns,
+                "scheduler_ns": scheduler_ns,
+                "scheduler_batch_ready_to_engine_forward_start_ns": (
+                    scheduler_batch_ready_to_engine_forward_start_ns
+                ),
+                "sample_interval": self.sample_interval,
+                "decode_step_count": self.decode_step_count,
+                "sampled_decode_step_count": self.sampled_decode_step_count,
+                "sampled_decode_forward_ns": self.sampled_decode_forward_ns,
+                "engine_forward_total_ns": exact_total_ns,
+                **(
+                    {"engine_forward_total_estimate_ns": estimated_total_ns}
+                    if self.sample_interval > 1
+                    else {}
+                ),
+            }
 
         first = self.timing_steps[0]
         last = self.timing_steps[-1]
         engine_forward_total_ns = sum(
-            step.engine_forward_completed_at_ns
-            - step.engine_forward_started_at_ns
+            step.engine_forward_completed_at_ns - step.engine_forward_started_at_ns
             for step in self.timing_steps
             if step.engine_forward_completed_at_ns is not None
             and step.engine_forward_started_at_ns is not None
@@ -436,8 +578,7 @@ class InferenceRequest:
             else None
         )
         scheduler_batch_ready_to_engine_forward_start_ns = (
-            first.engine_forward_started_at_ns
-            - first.scheduler_batch_ready_at_ns
+            first.engine_forward_started_at_ns - first.scheduler_batch_ready_at_ns
             if first.engine_forward_started_at_ns is not None
             and first.scheduler_batch_ready_at_ns is not None
             else None
@@ -447,6 +588,12 @@ class InferenceRequest:
             "role": self.timing_role,
             "steps": len(self.timing_steps),
             "server_received_at_ns": first.server_received_at_ns,
+            "request_created_at_ns": first.request_created_at_ns,
+            **(
+                first.entrance_timing.to_dict()
+                if first.entrance_timing is not None
+                else {}
+            ),
             "first_scheduler_polled_at_ns": first.scheduler_polled_at_ns,
             "first_engine_forward_started_at_ns": first.engine_forward_started_at_ns,
             "last_engine_forward_completed_at_ns": (
@@ -459,6 +606,49 @@ class InferenceRequest:
             ),
             "engine_forward_total_ns": engine_forward_total_ns,
         }
+
+    def record_summary_step(self, batch_ready_at_ns: int) -> None:
+        """Record the first scheduler boundary without per-step retention."""
+        if self.scheduler_polled_at_ns is None:
+            self.scheduler_polled_at_ns = batch_ready_at_ns
+        if self.first_scheduler_polled_at_ns is None:
+            self.first_scheduler_polled_at_ns = self.scheduler_polled_at_ns
+        if self.scheduler_batch_ready_at_ns is None:
+            self.scheduler_batch_ready_at_ns = batch_ready_at_ns
+
+    def record_summary_prefill_forward(
+        self,
+        engine_forward_started_at_ns: int,
+        engine_forward_completed_at_ns: int,
+    ) -> None:
+        """Record the exact first prefill forward."""
+        duration_ns = engine_forward_completed_at_ns - engine_forward_started_at_ns
+        if self.first_engine_forward_started_at_ns is None:
+            self.first_engine_forward_started_at_ns = engine_forward_started_at_ns
+            self.first_engine_forward_completed_at_ns = engine_forward_completed_at_ns
+        self.last_engine_forward_completed_at_ns = engine_forward_completed_at_ns
+        self.prefill_forward_ns = duration_ns
+
+    def record_summary_decode_forward(
+        self,
+        engine_forward_started_at_ns: int,
+        engine_forward_completed_at_ns: int,
+    ) -> None:
+        """Count every decode step but sample only periodic durations."""
+        self.decode_step_count += 1
+        if self.first_engine_forward_started_at_ns is None:
+            self.first_engine_forward_started_at_ns = engine_forward_started_at_ns
+            self.first_engine_forward_completed_at_ns = engine_forward_completed_at_ns
+        self.last_engine_forward_completed_at_ns = engine_forward_completed_at_ns
+
+        should_sample = (
+            self.sampled_decode_step_count == 0
+            or self.decode_step_count % self.sample_interval == 0
+        )
+        if should_sample:
+            duration_ns = engine_forward_completed_at_ns - engine_forward_started_at_ns
+            self.sampled_decode_forward_ns += duration_ns
+            self.sampled_decode_step_count += 1
 
     def is_finished(self) -> bool:
         return self.status in [

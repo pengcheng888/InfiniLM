@@ -59,9 +59,7 @@ def create_communication_test_kv_caches(
     head_dim = text_config.get("head_dim")
     if head_dim is None:
         hidden_size = _required_positive_int(text_config, "hidden_size")
-        num_attention_heads = _required_positive_int(
-            text_config, "num_attention_heads"
-        )
+        num_attention_heads = _required_positive_int(text_config, "num_attention_heads")
         if hidden_size % num_attention_heads != 0:
             raise ValueError(
                 "cluster communication test requires hidden_size divisible by "
@@ -146,14 +144,9 @@ class CommunicationModelRunner:
             "max_position_embeddings",
             self.config.max_cache_len,
         )
-        if not (
-            1024
-            <= self.config.max_num_batched_tokens
-            <= max_position_embeddings
-        ):
+        if not (1024 <= self.config.max_num_batched_tokens <= max_position_embeddings):
             raise ValueError(
-                "max_num_batched_tokens must be in "
-                f"[1024, {max_position_embeddings}]"
+                f"max_num_batched_tokens must be in [1024, {max_position_embeddings}]"
             )
 
         if self.config.cache_type != "paged":
@@ -162,9 +155,7 @@ class CommunicationModelRunner:
             self.config.tensor_parallel_size != 1
             or self.config.pipeline_parallel_size != 1
         ):
-            raise ValueError(
-                "cluster communication test only supports tp=1 and pp=1"
-            )
+            raise ValueError("cluster communication test only supports tp=1 and pp=1")
         if self.config.draft_model_path is not None:
             raise ValueError("cluster communication test does not support draft models")
         if self.config.use_mla:
@@ -270,7 +261,8 @@ class CommunicationModelRunner:
         # 每个 request 的 step；假 forward 耗时只代表测试调度开销，不代表计算。
         if forward_timing is not None:
             for request in scheduler_output.scheduled_requests:
-                for timing in getattr(request, "timing_steps", ())[-1:]:
+                timing_steps = getattr(request, "timing_steps", ())
+                for timing in timing_steps[-1:]:
                     timing.engine_forward_started_at_ns = (
                         forward_timing.engine_forward_started_at_ns
                     )
@@ -278,10 +270,23 @@ class CommunicationModelRunner:
                         forward_timing.engine_forward_completed_at_ns
                     )
                     timing.forward_batch_id = forward_timing.forward_batch_id
+                if (
+                    not timing_steps
+                    and getattr(request, "timing_mode", "full") == "summary"
+                ):
+                    if scheduler_output.is_prefill:
+                        request.record_summary_prefill_forward(
+                            forward_timing.engine_forward_started_at_ns,
+                            forward_timing.engine_forward_completed_at_ns,
+                        )
+                    else:
+                        request.record_summary_decode_forward(
+                            forward_timing.engine_forward_started_at_ns,
+                            forward_timing.engine_forward_completed_at_ns,
+                        )
 
         req_ids = [
-            request.request_id
-            for request in scheduler_output.scheduled_requests
+            request.request_id for request in scheduler_output.scheduled_requests
         ]
         return ModelRunnerOutput(
             req_ids=req_ids,
@@ -309,9 +314,7 @@ class CommunicationModelRunner:
 
     def _model_forward(self, scheduler_output) -> list[int]:
         """返回固定 token id，只驱动 scheduler 和 KV 传输流程。"""
-        return [
-            self._communication_test_token_id
-        ] * scheduler_output.num_requests
+        return [self._communication_test_token_id] * scheduler_output.num_requests
 
     @contextmanager
     def maybe_get_kv_connector_output(

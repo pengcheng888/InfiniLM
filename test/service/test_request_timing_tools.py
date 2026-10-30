@@ -300,7 +300,165 @@ class RequestTimerToolsTest(unittest.TestCase):
             snapshots["active_backlog_after_including_scheduled"],
             {"count": 1, "avg": 5, "min": 5, "max": 5, "p50": 5, "p95": 5},
         )
-        self.assertEqual(metrics["summary"]["aggregated"]["ttft_local_ms"]["min_ms"], 0.00008)
+        self.assertEqual(
+            metrics["summary"]["aggregated"]["ttft_local_ms"]["min_ms"], 0.00008
+        )
+
+    def test_schema_v5_splits_request_creation_path(self):
+        """v5 将入口预处理和 request 创建后的入队前处理拆开。"""
+        records = [
+            self._step("aggregated", "prefill", 0),
+            self._finish("aggregated", 1, 30),
+        ]
+        step, finish = records
+        step.update(
+            {
+                "schema_version": 5,
+                "server_received_at_ns": 100,
+                "request_created_at_ns": 105,
+                "scheduler_enqueued_at_ns": 110,
+            }
+        )
+        step["durations_ns"].update(
+            {
+                "server_to_request_created": 5,
+                "request_created_to_scheduler_enqueue": 5,
+            }
+        )
+        finish.update({"schema_version": 5, "request_created_at_ns": 105})
+
+        with TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            self._write(root, "1000", "request-1", records)
+            validation = validate_timing_root(root)
+            metrics = compute_timing_metrics(root)
+
+        self.assertEqual(validation["invalid_file_count"], 0)
+        role = metrics["requests"][0]["aggregated"]
+        self.assertEqual(role["server_to_request_created_ms"], 0.000005)
+        self.assertEqual(
+            role["request_created_to_scheduler_enqueue_ms"],
+            0.000005,
+        )
+        self.assertEqual(
+            metrics["summary"]["aggregated"]["server_to_request_created_ms"]["count"],
+            1.0,
+        )
+
+    def test_schema_v6_splits_entrance_stages(self):
+        """v6 将 HTTP 入口到 request 创建拆成可相加的原子区间。"""
+        records = [
+            self._step("aggregated", "prefill", 0),
+            self._finish("aggregated", 1, 30),
+        ]
+        step, finish = records
+        entrance_timestamps = {
+            "server_received_at_ns": 100,
+            "body_read_completed_at_ns": 101,
+            "json_parsed_at_ns": 102,
+            "route_prepared_at_ns": 103,
+            "handler_started_at_ns": 104,
+            "preprocessing_started_at_ns": 105,
+            "chat_template_completed_at_ns": 106,
+            "multimodal_resolved_at_ns": 107,
+            "tokenization_completed_at_ns": 108,
+            "prompt_token_ids_ready_at_ns": 109,
+            "request_created_at_ns": 110,
+            "scheduler_enqueued_at_ns": 111,
+        }
+        duration_names = (
+            "server_to_body_read",
+            "body_read_to_json_parse",
+            "json_parse_to_route_prepare",
+            "route_prepare_to_handler_start",
+            "handler_start_to_preprocessing_start",
+            "preprocessing_to_chat_template",
+            "chat_template_to_multimodal_resolve",
+            "multimodal_to_tokenization",
+            "tokenization_to_prompt_token_ids",
+            "prompt_token_ids_to_request_created",
+        )
+        step.update(
+            {
+                "schema_version": 6,
+                **entrance_timestamps,
+            }
+        )
+        step["durations_ns"].update(
+            {
+                **{name: 1 for name in duration_names},
+                "server_to_request_created": 10,
+                "request_created_to_scheduler_enqueue": 1,
+            }
+        )
+        finish.update(
+            {
+                "schema_version": 6,
+                **{
+                    name: value
+                    for name, value in step.items()
+                    if name.endswith("_at_ns")
+                },
+            }
+        )
+
+        with TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            self._write(root, "1000", "request-1", records)
+            validation = validate_timing_root(root)
+            metrics = compute_timing_metrics(root)
+
+        self.assertEqual(validation["invalid_file_count"], 0)
+        role = metrics["requests"][0]["aggregated"]
+        for name in duration_names:
+            self.assertEqual(role[f"{name}_ms"], 0.000001)
+        self.assertEqual(role["server_to_request_created_ms"], 0.00001)
+        self.assertEqual(
+            metrics["summary"]["aggregated"]["route_prepare_to_handler_start_ms"][
+                "count"
+            ],
+            1.0,
+        )
+
+    def test_schema_v6_allows_programmatic_requests_without_http_entrance(self):
+        """直连 engine 的请求没有 HTTP 入口字段时仍应生成有效 v6 timing。"""
+        records = [
+            self._step("aggregated", "prefill", 0),
+            self._finish("aggregated", 1, 30),
+        ]
+        step, finish = records
+        step.update(
+            {
+                "schema_version": 6,
+                "server_received_at_ns": 100,
+                "request_created_at_ns": 105,
+                "scheduler_enqueued_at_ns": 110,
+            }
+        )
+        step["durations_ns"].update(
+            {
+                "server_to_request_created": 5,
+                "request_created_to_scheduler_enqueue": 5,
+            }
+        )
+        finish.update(
+            {
+                "schema_version": 6,
+                "request_created_at_ns": 105,
+            }
+        )
+
+        with TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            self._write(root, "1000", "request-1", records)
+            validation = validate_timing_root(root)
+            metrics = compute_timing_metrics(root)
+
+        self.assertEqual(validation["invalid_file_count"], 0)
+        role = metrics["requests"][0]["aggregated"]
+        self.assertEqual(role["server_to_request_created_ms"], 0.000005)
+        self.assertIsNone(role["server_to_body_read_ms"])
+        self.assertIsNone(role["route_prepare_to_handler_start_ms"])
 
     def test_request_id_filter_uses_safe_filename(self):
         """unsafe request id 过滤必须按 recorder 的安全文件名匹配。"""
@@ -386,7 +544,7 @@ class RequestTimerToolsTest(unittest.TestCase):
             self._finish("aggregated", 1, 30),
         ]
         records[0]["forward_batch_id"] = ["bad-id"]
-        records[0]["schema_version"] = 5
+        records[0]["schema_version"] = 9
 
         with TemporaryDirectory() as temporary_dir:
             root = Path(temporary_dir)
@@ -395,7 +553,10 @@ class RequestTimerToolsTest(unittest.TestCase):
 
         self.assertEqual(validation["file_status_counts"], {"invalid": 1})
         self.assertTrue(
-            any("forward_batch_id" in error for error in validation["files"][0]["errors"])
+            any(
+                "forward_batch_id" in error
+                for error in validation["files"][0]["errors"]
+            )
         )
         self.assertTrue(
             any("schema_version" in error for error in validation["files"][0]["errors"])

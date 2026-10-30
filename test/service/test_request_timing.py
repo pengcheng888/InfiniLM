@@ -21,12 +21,14 @@ from infinilm.llm.scheduler import Scheduler
 
 class RequestTimingTest(unittest.TestCase):
     def _request(self, received_at_ns: int) -> InferenceRequest:
-        return InferenceRequest(
+        request = InferenceRequest(
             request_id="timing-request",
             prompt_token_ids=[1, 2, 3],
             sampling_params=SamplingParams(max_tokens=1),
             server_received_at_ns=received_at_ns,
         )
+        request.request_created_at_ns = received_at_ns + 5
+        return request
 
     def _timing(self, request_id: str, step_index: int) -> RequestStepTiming:
         return RequestStepTiming(
@@ -61,6 +63,10 @@ class RequestTimingTest(unittest.TestCase):
             self.assertEqual(step.request_id, request.request_id)
             self.assertEqual(step.batch_size, 1)
             self.assertLessEqual(step.server_received_at_ns, 100)
+            self.assertEqual(
+                step.request_created_at_ns,
+                request.request_created_at_ns,
+            )
             self.assertLessEqual(
                 step.scheduler_enqueued_at_ns,
                 step.scheduler_polled_at_ns,
@@ -286,7 +292,7 @@ class RequestTimingTest(unittest.TestCase):
 
         self.assertEqual(
             records,
-            [{**payload, "schema_version": 4}],
+            [{**payload, "schema_version": 6}],
         )
 
     def test_recorder_batches_step_submission(self):
@@ -662,6 +668,7 @@ class RequestTimingTest(unittest.TestCase):
             complete_requests=Mock(),
         )
         engine.tokenizer = SimpleNamespace(decode=lambda token_ids: "ok")
+        engine._tokenizer_lock = threading.Lock()
         engine.request_timing_recorder = Mock()
 
         with self.assertNoLogs(level="DEBUG"):
@@ -681,6 +688,7 @@ class RequestTimingTest(unittest.TestCase):
             complete_requests=Mock(),
         )
         engine.tokenizer = SimpleNamespace(decode=lambda token_ids: "ok")
+        engine._tokenizer_lock = threading.Lock()
         engine.request_timing_recorder = Mock()
 
         engine._update_requests([request], [7])

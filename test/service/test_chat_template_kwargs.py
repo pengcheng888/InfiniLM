@@ -1,10 +1,14 @@
 import asyncio
 import unittest
 from types import SimpleNamespace
-from unittest.mock import Mock, PropertyMock, patch
+from unittest.mock import AsyncMock, Mock, PropertyMock, patch
 
 from infinilm.llm import AsyncLLMEngine, FinishReason
-from infinilm.llm.request import InferenceRequest, TokenOutput
+from infinilm.llm.request import (
+    InferenceRequest,
+    RequestEntranceTiming,
+    TokenOutput,
+)
 from infinilm.server.inference_server import InferenceServer
 
 
@@ -72,6 +76,7 @@ class ChatTemplateKwargsTest(unittest.TestCase):
             request_data=None,
             chat_template_kwargs={"enable_thinking": False},
             server_received_at_ns=123,
+            entrance_timing=None,
         )
 
     def test_chat_server_passes_template_kwargs_and_timing(self):
@@ -95,11 +100,10 @@ class ChatTemplateKwargsTest(unittest.TestCase):
                     finish_reason=FinishReason.LENGTH,
                 )
 
-            add_chat_request = Mock(return_value=request)
             server = InferenceServer.__new__(InferenceServer)
             server.model_id = "model"
             server.engine = SimpleNamespace(
-                add_chat_request=add_chat_request,
+                add_chat_request_async=AsyncMock(return_value=request),
                 stream_request=stream_request,
                 engine=SimpleNamespace(eos_token_ids=[]),
             )
@@ -111,6 +115,7 @@ class ChatTemplateKwargsTest(unittest.TestCase):
                 "messages": [{"role": "user", "content": "hello"}],
                 "chat_template_kwargs": {"enable_thinking": False},
             }
+            entrance_timing = RequestEntranceTiming()
 
             with patch.object(
                 server,
@@ -126,10 +131,11 @@ class ChatTemplateKwargsTest(unittest.TestCase):
                     data,
                     http_request,
                     123,
+                    entrance_timing,
                 )
 
             self.assertEqual(response["choices"][0]["finish_reason"], "length")
-            add_chat_request.assert_called_once_with(
+            server.engine.add_chat_request_async.assert_awaited_once_with(
                 messages=[{"role": "user", "content": "hello"}],
                 sampling_params=SimpleNamespace(ignore_eos=False),
                 request_id="request-1",
@@ -137,6 +143,7 @@ class ChatTemplateKwargsTest(unittest.TestCase):
                 add_generation_prompt=True,
                 chat_template_kwargs={"enable_thinking": False},
                 server_received_at_ns=123,
+                entrance_timing=entrance_timing,
             )
 
         asyncio.run(run())

@@ -15,7 +15,7 @@ from infinilm.llm.model_runner import model_runner as model_runner_module
 from infinilm.llm.model_runner.communication_model_runner import (
     CommunicationModelRunner,
 )
-from infinilm.llm.request import RequestStepTiming
+from infinilm.llm.request import RequestEntranceTiming, RequestStepTiming
 from infinilm.llm.request_timing.request_timing import (
     RequestTimingFileRecorder,
 )
@@ -131,8 +131,8 @@ class ModelRunnerCommunicationModeTest(unittest.TestCase):
         self.assertEqual(output.req_ids, ["req-0", "req-1", "req-2"])
         self.assertEqual(output.sampled_token_ids, [7, 7, 7])
 
-    def test_communication_mode_produces_valid_schema_v4_timing(self):
-        """通信测试假 forward 也生成完整 step timing 并通过 v4 校验。"""
+    def test_communication_mode_produces_valid_schema_v6_timing(self):
+        """通信测试假 forward 也生成完整 step timing 并通过 v6 校验。"""
         with patch.dict(
             "os.environ",
             {
@@ -151,7 +151,19 @@ class ModelRunnerCommunicationModeTest(unittest.TestCase):
                 phase="prefill",
                 batch_size=1,
                 server_received_at_ns=100,
-                scheduler_enqueued_at_ns=110,
+                entrance_timing=RequestEntranceTiming(
+                    body_read_completed_at_ns=101,
+                    json_parsed_at_ns=102,
+                    route_prepared_at_ns=103,
+                    handler_started_at_ns=104,
+                    preprocessing_started_at_ns=105,
+                    chat_template_completed_at_ns=106,
+                    multimodal_resolved_at_ns=107,
+                    tokenization_completed_at_ns=108,
+                    prompt_token_ids_ready_at_ns=109,
+                ),
+                request_created_at_ns=110,
+                scheduler_enqueued_at_ns=111,
                 scheduler_polled_at_ns=120,
                 scheduler_batch_ready_at_ns=130,
                 scheduler_waiting_queue_depth_before=1,
@@ -195,7 +207,7 @@ class ModelRunnerCommunicationModeTest(unittest.TestCase):
             timing.forward_batch_id,
             output.forward_timing.forward_batch_id,
         )
-        self.assertEqual(record["schema_version"], 4)
+        self.assertEqual(record["schema_version"], 6)
         self.assertEqual(record["forward_batch_id"], timing.forward_batch_id)
         self.assertEqual(validation["invalid_file_count"], 0)
 

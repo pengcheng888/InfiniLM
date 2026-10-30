@@ -73,8 +73,7 @@ class ModelRunner:
         )
         if not 1024 <= config.max_num_batched_tokens <= max_position_embeddings:
             raise ValueError(
-                "max_num_batched_tokens must be in "
-                f"[1024, {max_position_embeddings}]"
+                f"max_num_batched_tokens must be in [1024, {max_position_embeddings}]"
             )
 
         self.hf_config = hf_config
@@ -158,7 +157,9 @@ class ModelRunner:
         # scheduler 必须使用 engine 返回的 effective blocks，而不是 probe 值。
         resolved_config = self.model_engine.get_cache_config()
         config.effective_num_blocks = resolved_config.num_blocks()
-        minimum_blocks = (config.max_cache_len + config.block_size - 1) // config.block_size
+        minimum_blocks = (
+            config.max_cache_len + config.block_size - 1
+        ) // config.block_size
         if config.effective_num_blocks < minimum_blocks:
             raise RuntimeError(
                 "gpu_memory_utilization resolved "
@@ -279,6 +280,17 @@ class ModelRunner:
                         forward_timing.engine_forward_completed_at_ns
                     )
                     timing.forward_batch_id = forward_timing.forward_batch_id
+                elif getattr(request, "timing_mode", "full") == "summary":
+                    if scheduler_output.is_prefill:
+                        request.record_summary_prefill_forward(
+                            forward_timing.engine_forward_started_at_ns,
+                            forward_timing.engine_forward_completed_at_ns,
+                        )
+                    else:
+                        request.record_summary_decode_forward(
+                            forward_timing.engine_forward_started_at_ns,
+                            forward_timing.engine_forward_completed_at_ns,
+                        )
 
         #  model_runner_output
         req_ids = []

@@ -17,6 +17,47 @@ from infinilm.llm.request_timing.validate_logs import (
     validate_timing_root,
 )
 
+ENTRANCE_METRIC_FIELDS = (
+    ("server_to_body_read_ms", "server_received_at_ns", "body_read_completed_at_ns"),
+    ("body_read_to_json_parse_ms", "body_read_completed_at_ns", "json_parsed_at_ns"),
+    ("json_parse_to_route_prepare_ms", "json_parsed_at_ns", "route_prepared_at_ns"),
+    (
+        "route_prepare_to_handler_start_ms",
+        "route_prepared_at_ns",
+        "handler_started_at_ns",
+    ),
+    (
+        "handler_start_to_preprocessing_start_ms",
+        "handler_started_at_ns",
+        "preprocessing_started_at_ns",
+    ),
+    (
+        "preprocessing_to_chat_template_ms",
+        "preprocessing_started_at_ns",
+        "chat_template_completed_at_ns",
+    ),
+    (
+        "chat_template_to_multimodal_resolve_ms",
+        "chat_template_completed_at_ns",
+        "multimodal_resolved_at_ns",
+    ),
+    (
+        "multimodal_to_tokenization_ms",
+        "multimodal_resolved_at_ns",
+        "tokenization_completed_at_ns",
+    ),
+    (
+        "tokenization_to_prompt_token_ids_ms",
+        "tokenization_completed_at_ns",
+        "prompt_token_ids_ready_at_ns",
+    ),
+    (
+        "prompt_token_ids_to_request_created_ms",
+        "prompt_token_ids_ready_at_ns",
+        "request_created_at_ns",
+    ),
+)
+
 
 def _milliseconds(value_ns: Any) -> float | None:
     """把纳秒转毫秒；无效观测值保持 None，不伪装成 0。"""
@@ -97,11 +138,7 @@ def _sum_numeric(records: list[dict[str, Any]], key: str) -> int | float:
 def _record_duration_ms(record: dict[str, Any]) -> float:
     """安全读取事件 duration；invalid 值按 0 进入分布，由 validator 报错。"""
     duration_ns = record.get("duration_ns")
-    return (
-        _milliseconds(duration_ns)
-        if isinstance(duration_ns, (int, float))
-        else 0.0
-    )
+    return _milliseconds(duration_ns) if isinstance(duration_ns, (int, float)) else 0.0
 
 
 def _load_request_groups(
@@ -126,9 +163,7 @@ def _load_request_groups(
             except (TypeError, json.JSONDecodeError):
                 errors.append(f"{path}:{line_number}: invalid JSON")
                 continue
-            if isinstance(record, dict) and isinstance(
-                record.get("request_id"), str
-            ):
+            if isinstance(record, dict) and isinstance(record.get("request_id"), str):
                 # 兼容 schema v1：没有 role 时按 KV 事件推断 P/D 角色。
                 if record.get("role") is None:
                     record = dict(record)
@@ -154,8 +189,117 @@ def _role_metrics(records: list[dict[str, Any]], role: str) -> dict[str, Any]:
         (record for record in role_records if record.get("event") == "finish"),
         None,
     )
+    summary_finish = bool(
+        finish
+        and finish.get("timing_mode") == "summary"
+        and finish.get("schema_version") in {7, 8}
+    )
     if not steps:
-        return {"role": role, "status": "missing", "step_count": 0}
+        if not summary_finish:
+            return {"role": role, "status": "missing", "step_count": 0}
+
+        first = dict(finish)
+        first["scheduler_polled_at_ns"] = finish.get("first_scheduler_polled_at_ns")
+        first["engine_forward_started_at_ns"] = finish.get(
+            "first_engine_forward_started_at_ns"
+        )
+        first["engine_forward_completed_at_ns"] = finish.get(
+            "first_engine_forward_completed_at_ns"
+        )
+        first_forward_ns = (
+            finish.get("first_engine_forward_completed_at_ns")
+            - finish.get("first_engine_forward_started_at_ns")
+            if isinstance(finish.get("first_engine_forward_completed_at_ns"), int)
+            and isinstance(finish.get("first_engine_forward_started_at_ns"), int)
+            else None
+        )
+        engine_total_ns = finish.get("engine_forward_total_ns")
+        if engine_total_ns is None:
+            engine_total_ns = finish.get("engine_forward_total_estimate_ns")
+        decode_total_ns = (
+            engine_total_ns
+            if role == "decode" and isinstance(engine_total_ns, int)
+            else engine_total_ns - first_forward_ns
+            if isinstance(engine_total_ns, int) and isinstance(first_forward_ns, int)
+            else None
+        )
+        step_count = finish.get("steps") if isinstance(finish.get("steps"), int) else 0
+        decode_step_count = (
+            finish.get("decode_step_count")
+            if isinstance(finish.get("decode_step_count"), int)
+            else max(step_count - 1, 0)
+        )
+        first_durations = {
+            "queue": finish.get("queue_ns"),
+            "scheduler": finish.get("scheduler_ns"),
+            "engine_forward": first_forward_ns,
+        }
+        entrance_metrics = {
+            metric_name: _elapsedMilliseconds(
+                first.get(start_field), first.get(end_field)
+            )
+            for metric_name, start_field, end_field in ENTRANCE_METRIC_FIELDS
+        }
+        return {
+            "role": role,
+            "status": "complete",
+            "timing_mode": "summary",
+            "sample_interval": finish.get("sample_interval"),
+            "engine_forward_estimated": finish.get("schema_version") == 8,
+            "sampled_decode_steps": finish.get("sampled_decode_step_count"),
+            "step_count": step_count,
+            "batch_size_counts": {},
+            "server_to_request_created_ms": _elapsedMilliseconds(
+                first.get("server_received_at_ns"),
+                first.get("request_created_at_ns"),
+            ),
+            **entrance_metrics,
+            "request_created_to_scheduler_enqueue_ms": _elapsedMilliseconds(
+                first.get("request_created_at_ns"),
+                first.get("scheduler_enqueued_at_ns"),
+            ),
+            "server_to_scheduler_enqueue_ms": _elapsedMilliseconds(
+                first.get("server_received_at_ns"),
+                first.get("scheduler_enqueued_at_ns"),
+            ),
+            "scheduler_enqueue_to_polled_ms": _elapsedMilliseconds(
+                first.get("scheduler_enqueued_at_ns"),
+                first.get("scheduler_polled_at_ns"),
+            ),
+            "scheduler_batch_build_ms": _elapsedMilliseconds(
+                first.get("scheduler_polled_at_ns"),
+                first.get("scheduler_batch_ready_at_ns"),
+            ),
+            "scheduler_batch_ready_to_engine_forward_start_ms": (
+                _elapsedMilliseconds(
+                    first.get("scheduler_batch_ready_at_ns"),
+                    first.get("engine_forward_started_at_ns"),
+                )
+            ),
+            "server_to_engine_forward_start_ms": _elapsedMilliseconds(
+                first.get("server_received_at_ns"),
+                first.get("engine_forward_started_at_ns"),
+            ),
+            "first_engine_forward_ms": _milliseconds(first_forward_ns),
+            "scheduler_ms": _milliseconds(first_durations.get("scheduler")),
+            "first_token_local_ms": _elapsedMilliseconds(
+                first.get("server_received_at_ns"),
+                first.get("engine_forward_completed_at_ns"),
+            ),
+            "local_span_ms": _elapsedMilliseconds(
+                first.get("server_received_at_ns"),
+                finish.get("last_engine_forward_completed_at_ns"),
+            ),
+            "engine_forward_total_ms": _milliseconds(engine_total_ns),
+            "prefill_forward_total_ms": _milliseconds(first_forward_ns),
+            "decode_forward_total_ms": _milliseconds(decode_total_ns),
+            "decode_forward_avg_ms": _milliseconds(
+                decode_total_ns / decode_step_count
+                if isinstance(decode_total_ns, int) and decode_step_count > 0
+                else None
+            ),
+            "finish_reason": finish.get("finish_reason"),
+        }
 
     # 文件按 PID/request 读取；同一角色内保持 step 顺序。
     first = steps[0]
@@ -164,45 +308,48 @@ def _role_metrics(records: list[dict[str, Any]], role: str) -> dict[str, Any]:
         record["durations_ns"]["engine_forward"]
         for record in steps
         if isinstance(record.get("durations_ns"), dict)
-        and isinstance(
-            record["durations_ns"].get("engine_forward"), (int, float)
-        )
+        and isinstance(record["durations_ns"].get("engine_forward"), (int, float))
     ]
     decode_forwards = [
         record["durations_ns"]["engine_forward"]
         for record in steps
         if record.get("phase") == "decode"
         and isinstance(record.get("durations_ns"), dict)
-        and isinstance(
-            record["durations_ns"].get("engine_forward"), (int, float)
-        )
+        and isinstance(record["durations_ns"].get("engine_forward"), (int, float))
     ]
     prefill_forwards = [
         record["durations_ns"]["engine_forward"]
         for record in steps
         if record.get("phase") == "prefill"
         and isinstance(record.get("durations_ns"), dict)
-        and isinstance(
-            record["durations_ns"].get("engine_forward"), (int, float)
-        )
+        and isinstance(record["durations_ns"].get("engine_forward"), (int, float))
     ]
     batch_sizes = Counter(record.get("batch_size") for record in steps)
     first_durations = first.get("durations_ns")
-    first_durations = (
-        first_durations if isinstance(first_durations, dict) else {}
-    )
+    first_durations = first_durations if isinstance(first_durations, dict) else {}
+    entrance_metrics = {
+        metric_name: _elapsedMilliseconds(first.get(start_field), first.get(end_field))
+        for metric_name, start_field, end_field in ENTRANCE_METRIC_FIELDS
+    }
     return {
         "role": role,
         "status": "complete" if finish else "incomplete",
         "step_count": len(steps),
         "batch_size_counts": {
             str(key): value
-            for key, value in sorted(
-                batch_sizes.items(), key=lambda item: str(item[0])
-            )
+            for key, value in sorted(batch_sizes.items(), key=lambda item: str(item[0]))
         },
         # 首次调度路径使用首条 step 的原始时间戳，避免 queue 混合入口
         # 预处理和 scheduler 队列等待两个不同阶段。
+        "server_to_request_created_ms": _elapsedMilliseconds(
+            first.get("server_received_at_ns"),
+            first.get("request_created_at_ns"),
+        ),
+        **entrance_metrics,
+        "request_created_to_scheduler_enqueue_ms": _elapsedMilliseconds(
+            first.get("request_created_at_ns"),
+            first.get("scheduler_enqueued_at_ns"),
+        ),
         "server_to_scheduler_enqueue_ms": _elapsedMilliseconds(
             first.get("server_received_at_ns"),
             first.get("scheduler_enqueued_at_ns"),
@@ -344,18 +491,14 @@ def _scheduler_snapshot_summary(
         "snapshot_count": len(snapshots),
         "batch_size_counts": {
             str(key): value
-            for key, value in sorted(
-                batch_sizes.items(), key=lambda item: str(item[0])
-            )
+            for key, value in sorted(batch_sizes.items(), key=lambda item: str(item[0]))
         },
         **{
             field_name: _integer_distribution(field_values(field_name))
             for field_name in snapshot_fields
         },
         "active_backlog_before": _integer_distribution(active_before),
-        "active_backlog_after_including_scheduled": _integer_distribution(
-            active_after
-        ),
+        "active_backlog_after_including_scheduled": _integer_distribution(active_after),
     }
 
 
@@ -412,18 +555,32 @@ def _request_metrics(request_id: str, records: list[dict[str, Any]]) -> dict[str
             if record.get("role") == "decode" and record.get("event") == "step"
         ]
         first_decode = decode_steps[0] if decode_steps else {}
+        if not first_decode:
+            summary_decode_finish = next(
+                (
+                    record
+                    for record in records
+                    if record.get("role") == "decode"
+                    and record.get("event") == "finish"
+                    and record.get("timing_mode") == "summary"
+                ),
+                None,
+            )
+            if summary_decode_finish is not None:
+                first_decode = {
+                    "engine_forward_started_at_ns": (
+                        summary_decode_finish.get("first_engine_forward_started_at_ns")
+                    )
+                }
         receive_records = [
             record for record in records if record.get("event") == "kv_receive"
         ]
         receive_completed = (
-            receive_records[-1].get("completed_at_ns")
-            if receive_records
-            else None
+            receive_records[-1].get("completed_at_ns") if receive_records else None
         )
         # KV receive 和 decode step 都在 D 节点，二者可以使用 D 本地 monotonic 差值。
         decode_wait_after_kv_ns = (
-            first_decode.get("engine_forward_started_at_ns")
-            - receive_completed
+            first_decode.get("engine_forward_started_at_ns") - receive_completed
             if first_decode
             and isinstance(first_decode.get("engine_forward_started_at_ns"), int)
             and isinstance(receive_completed, int)
@@ -519,9 +676,7 @@ def _physical_forward_summary(
     process_summaries: list[dict[str, Any]] = []
     for pid in pids:
         pid_steps = [record for record in steps if record["_timing_pid"] == pid]
-        pid_physical = [
-            record for record in physical_records if record["pid"] == pid
-        ]
+        pid_physical = [record for record in physical_records if record["pid"] == pid]
         pid_busy_ms = sum(
             record["duration_ms"]
             for record in pid_physical
@@ -531,16 +686,11 @@ def _physical_forward_summary(
             record
             for record in pid_steps
             if isinstance(record.get("server_received_at_ns"), (int, float))
-            and isinstance(
-                record.get("engine_forward_completed_at_ns"), (int, float)
-            )
+            and isinstance(record.get("engine_forward_completed_at_ns"), (int, float))
         ]
         local_wall_ms = (
             (
-                max(
-                    record["engine_forward_completed_at_ns"]
-                    for record in timestamps
-                )
+                max(record["engine_forward_completed_at_ns"] for record in timestamps)
                 - min(record["server_received_at_ns"] for record in timestamps)
             )
             / 1_000_000
@@ -567,21 +717,15 @@ def _physical_forward_summary(
         "physical_forward_count": len(physical_records),
         "batch_size_counts": {
             str(key): value
-            for key, value in sorted(
-                batch_sizes.items(), key=lambda item: str(item[0])
-            )
+            for key, value in sorted(batch_sizes.items(), key=lambda item: str(item[0]))
         },
         "forward_duration_ms": _distribution(durations),
         "forward_busy_ms": busy_ms,
-        "local_wall_ms": (
-            single_process["local_wall_ms"] if single_process else None
-        ),
+        "local_wall_ms": (single_process["local_wall_ms"] if single_process else None),
         "process_count": len(process_summaries),
         "processes": process_summaries,
         "forward_busy_ratio": (
-            single_process["forward_busy_ratio"]
-            if single_process
-            else None
+            single_process["forward_busy_ratio"] if single_process else None
         ),
         "scheduler_snapshots": _scheduler_snapshot_summary(records, role),
     }
@@ -611,17 +755,14 @@ def _merged_interval_union(records: list[dict[str, Any]]) -> float:
                 merged[-1][1] = max(merged[-1][1], completed)
         # 每个 PID 的 monotonic epoch 独立；先做进程内 union，再累加安全时长。
         total_ms += (
-            sum(completed - started for started, completed in merged)
-            / 1_000_000
+            sum(completed - started for started, completed in merged) / 1_000_000
         )
     return total_ms
 
 
 def _transfer_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
     """分别输出 request-weighted 和去重 batch-weighted 传输指标。"""
-    send_events = [
-        record for record in records if record.get("event") == "kv_send"
-    ]
+    send_events = [record for record in records if record.get("event") == "kv_send"]
     receive_events = [
         record for record in records if record.get("event") == "kv_receive"
     ]
@@ -644,9 +785,7 @@ def _transfer_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
     unique_send_records = list(unique_send.values())
     send_bytes = sum(
         record.get("batch_bytes", record.get("bytes"))
-        if isinstance(
-            record.get("batch_bytes", record.get("bytes")), (int, float)
-        )
+        if isinstance(record.get("batch_bytes", record.get("bytes")), (int, float))
         else 0
         for record in unique_send_records
     )
@@ -661,8 +800,7 @@ def _transfer_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
                 _record_duration_ms(record) for record in send_events
             ),
             "batch_weighted_duration_ms": _distribution(
-                _record_duration_ms(record)
-                for record in unique_send_records
+                _record_duration_ms(record) for record in unique_send_records
             ),
             "batch_bytes_total": send_bytes,
             "busy_union_ms": send_busy_ms,
@@ -698,8 +836,14 @@ def _summary(
 
     def values(items: list[dict[str, Any]], key: str) -> list[float]:
         """只把有效数值送入分布统计，缺失项不影响其它请求。"""
+        return [item[key] for item in items if isinstance(item.get(key), (int, float))]
+
+    def role_values(items: list[dict[str, Any]], role: str, key: str) -> list[float]:
+        """读取 request 内嵌角色指标，用于入口路径的分布统计。"""
         return [
-            item[key] for item in items if isinstance(item.get(key), (int, float))
+            item[role][key]
+            for item in items
+            if isinstance(item.get(role, {}).get(key), (int, float))
         ]
 
     summary = {
@@ -707,32 +851,58 @@ def _summary(
         "aggregated_request_count": len(aggregated),
         "pd_request_count": len(pd),
         "aggregated": {
+            "server_to_request_created_ms": _distribution(
+                role_values(aggregated, "aggregated", "server_to_request_created_ms")
+            ),
+            **{
+                metric_name: _distribution(
+                    role_values(aggregated, "aggregated", metric_name)
+                )
+                for metric_name, _, _ in ENTRANCE_METRIC_FIELDS
+            },
+            "request_created_to_scheduler_enqueue_ms": _distribution(
+                role_values(
+                    aggregated,
+                    "aggregated",
+                    "request_created_to_scheduler_enqueue_ms",
+                )
+            ),
             "ttft_local_ms": _distribution(values(aggregated, "ttft_local_ms")),
             "prefill_compute_ms": _distribution(
                 values(aggregated, "prefill_compute_ms")
             ),
-            "decode_compute_ms": _distribution(
-                values(aggregated, "decode_compute_ms")
-            ),
+            "decode_compute_ms": _distribution(values(aggregated, "decode_compute_ms")),
         },
         "pd": {
+            **{
+                f"p_{metric_name}": _distribution(
+                    role_values(pd, "prefill", metric_name)
+                )
+                for metric_name, _, _ in ENTRANCE_METRIC_FIELDS
+            },
+            **{
+                f"d_{metric_name}": _distribution(
+                    role_values(pd, "decode", metric_name)
+                )
+                for metric_name, _, _ in ENTRANCE_METRIC_FIELDS
+            },
+            "p_server_to_request_created_ms": _distribution(
+                role_values(pd, "prefill", "server_to_request_created_ms")
+            ),
+            "d_server_to_request_created_ms": _distribution(
+                role_values(pd, "decode", "server_to_request_created_ms")
+            ),
             "p_compute_ms": _distribution(values(pd, "p_compute_ms")),
             "d_compute_ms": _distribution(values(pd, "d_compute_ms")),
-            "mooncake_transfer_ms": _distribution(
-                values(pd, "mooncake_transfer_ms")
-            ),
-            "d_kv_readiness_ms": _distribution(
-                values(pd, "d_kv_readiness_ms")
-            ),
+            "mooncake_transfer_ms": _distribution(values(pd, "mooncake_transfer_ms")),
+            "d_kv_readiness_ms": _distribution(values(pd, "d_kv_readiness_ms")),
             "decode_start_after_kv_ready_ms": _distribution(
                 values(pd, "decode_start_after_kv_ready_ms")
             ),
         },
     }
     if any(item["mode"] == "aggregated" for item in request_metrics):
-        summary["aggregated_node"] = _physical_forward_summary(
-            records, "aggregated"
-        )
+        summary["aggregated_node"] = _physical_forward_summary(records, "aggregated")
     if any(item["mode"] == "pd" for item in request_metrics):
         # P/D 的节点级统计分别计算；Mooncake 传输单独输出。
         summary.update(

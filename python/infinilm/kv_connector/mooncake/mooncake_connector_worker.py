@@ -41,6 +41,16 @@ ReqId = str
 TransferId = str
 
 
+def _mooncake_data_transfer_bypass_from_environment() -> bool:
+    raw_value = os.environ.get("INFINILM_MOONCAKE_DATA_TRANSFER_BYPASS", "false")
+    normalized = raw_value.strip().lower()
+    if normalized not in {"1", "true", "yes", "on", "0", "false", "no", "off"}:
+        raise RuntimeError(
+            f"INFINILM_MOONCAKE_DATA_TRANSFER_BYPASS must be a boolean: {raw_value!r}"
+        )
+    return normalized in {"1", "true", "yes", "on"}
+
+
 class MooncakeXferResponseStatus(IntEnum):
     # Transfer finished
     FINISH = 0
@@ -124,6 +134,15 @@ class MooncakeConnectorWorker:
         self.parallel_config = MooncakeParallelConfig()
         self.is_kv_producer: bool = kv_transfer_config.kv_role == "kv_producer"
         self.is_kv_consumer: bool = kv_transfer_config.kv_role == "kv_consumer"
+        self.mooncake_data_transfer_bypass = (
+            _mooncake_data_transfer_bypass_from_environment()
+        )
+        if self.mooncake_data_transfer_bypass:
+            logger.warning(
+                "Mooncake data transfer bypass is enabled; bootstrap and ZMQ "
+                "metadata exchange remain active, but transferred KV contents "
+                "are not valid for correctness checks."
+            )
 
         self.num_sender_workers = kv_transfer_config.kv_connector_extra_config.get(
             "num_workers", 10
@@ -244,6 +263,7 @@ class MooncakeConnectorWorker:
         batch_size: int = 1,
         batch_id: str | None = None,
         request_block_counts: Mapping[ReqId, int] | None = None,
+        data_transfer_bypassed: bool = False,
     ) -> None:
         """记录当前节点本地时钟下的 KV transfer timing。
 
@@ -273,15 +293,16 @@ class MooncakeConnectorWorker:
             "batch_request_count": batch_size,
             "batch_block_count": block_count,
             "batch_bytes": bytes_count,
+            "mooncake_data_transfer_bypassed": data_transfer_bypassed,
             "outcome": outcome,
         }
         with self._kv_transfer_stats_lock:
             for request_id in request_ids:
                 item = dict(payload)
                 item["request_id"] = request_id
-                item["request_block_count"] = (
-                    request_block_counts or {}
-                ).get(request_id, block_count if batch_size == 1 else 0)
+                item["request_block_count"] = (request_block_counts or {}).get(
+                    request_id, block_count if batch_size == 1 else 0
+                )
                 self._kv_transfer_stats[request_id] = item
 
     def get_kv_connector_stats(self) -> dict[ReqId, dict]:
@@ -539,8 +560,7 @@ class MooncakeConnectorWorker:
                 with self._kv_transfer_stats_lock:
                     self._kv_transfer_batch_sequence += 1
                     transfer_batch_id = (
-                        f"kv-send-{os.getpid()}-"
-                        f"{self._kv_transfer_batch_sequence}"
+                        f"kv-send-{os.getpid()}-{self._kv_transfer_batch_sequence}"
                     )
                 request_block_counts = {
                     d_req_id: len(meta.req_blocks[d_req_id][1])
@@ -708,10 +728,13 @@ class MooncakeConnectorWorker:
 
         started_at_ns = time.monotonic_ns()
         # P 侧 duration 只覆盖 Mooncake 数据/flag 写调用，不含 D 侧等待。
-        ret_value = self.engine.batch_transfer_sync_write(
-            remote_session, src_ptrs, dst_ptrs, lengths
-        )
         data_bytes = sum(lengths)
+        if self.mooncake_data_transfer_bypass:
+            ret_value = 0
+        else:
+            ret_value = self.engine.batch_transfer_sync_write(
+                remote_session, src_ptrs, dst_ptrs, lengths
+            )
         flag_bytes = 0
 
         if ret_value == 0 and len(kv_flag_addr) > 0:
@@ -721,9 +744,12 @@ class MooncakeConnectorWorker:
             flag_dst_ptrs = [kv_flag_addr[b] for b in xfer_block_ids]
             flag_lengths = [1] * n
 
-            flag_ret_value = self.engine.batch_transfer_sync_write(
-                remote_session, flag_src_ptrs, flag_dst_ptrs, flag_lengths
-            )
+            if self.mooncake_data_transfer_bypass:
+                flag_ret_value = 0
+            else:
+                flag_ret_value = self.engine.batch_transfer_sync_write(
+                    remote_session, flag_src_ptrs, flag_dst_ptrs, flag_lengths
+                )
             flag_bytes = len(flag_lengths)
 
             if flag_ret_value != 0:
@@ -761,6 +787,7 @@ class MooncakeConnectorWorker:
             batch_size=len(xfer_reqs_ids),
             batch_id=transfer_batch_id,
             request_block_counts=request_block_counts,
+            data_transfer_bypassed=self.mooncake_data_transfer_bypass,
         )
         return ret_value
 
@@ -1033,9 +1060,11 @@ class MooncakeConnectorWorker:
                     "processed_reqs_count must be equal to the number of pull_metas"
                 )
 
-                await self._wait_for_kv_flags_ready(success_block_ids)
+                if not self.mooncake_data_transfer_bypass:
+                    await self._wait_for_kv_flags_ready(success_block_ids)
 
                 # receive 统计从 D 决定拉取 KV 时开始，到本地 flag ready 结束；
+                # bypass 模式下 ready flag 等待被瞬时跳过。
                 # 它包含 bootstrap/ZMQ/传输等待，不等于纯网络传输时间。
                 completed_at_ns = time.monotonic_ns()
                 failed_req_ids = set(self.xfer_failed_recving_reqs_ids)
@@ -1054,6 +1083,7 @@ class MooncakeConnectorWorker:
                             * len(self.kv_caches_base_addr)
                         ),
                         outcome="failed" if req_id in failed_req_ids else "success",
+                        data_transfer_bypassed=self.mooncake_data_transfer_bypass,
                     )
                 self.finished_recving_reqs.update(finished_recving_reqs)
 

@@ -18,14 +18,59 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from infinilm.base_config import BaseConfig
 from infinilm.config import KVTransferConfig
 from infinilm.llm import AsyncLLMEngine, FinishReason, SamplingParams
-from infinilm.llm.request import monotonic_ns
+from infinilm.llm.output_timing import (
+    DisabledOutputTimingCollector,
+    OutputTimingService,
+)
+from infinilm.llm.request import RequestEntranceTiming, monotonic_ns
+from infinilm.llm.request_timing import RequestTimingConfig
 from infinilm.moe_config import configure_moe_ep_backend
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_STREAM_TIMEOUT = 100.0
 DEFAULT_REQUEST_TIMEOUT = 1000.0
+DEFAULT_DISCONNECT_CHECK_TOKEN_INTERVAL = 32
+DEFAULT_SSE_FLUSH_TOKEN_INTERVAL = 4
 INTERNAL_REQUEST_HEADER = "X-InfiniLM-Internal"
+
+
+def sse_flush_tokens_from_environment() -> int:
+    raw_value = os.environ.get(
+        "INFINILM_SSE_FLUSH_TOKENS",
+        str(DEFAULT_SSE_FLUSH_TOKEN_INTERVAL),
+    )
+    try:
+        interval = int(raw_value)
+    except ValueError as exc:
+        raise RuntimeError(
+            f"INFINILM_SSE_FLUSH_TOKENS must be an integer: {raw_value!r}"
+        ) from exc
+    if interval not in {1, 4, 8}:
+        raise RuntimeError("INFINILM_SSE_FLUSH_TOKENS must be 1, 4, or 8")
+    return interval
+
+
+SSE_FLUSH_TOKEN_INTERVAL = sse_flush_tokens_from_environment()
+
+
+def disconnect_check_tokens_from_environment() -> int:
+    raw_value = os.environ.get(
+        "INFINILM_DISCONNECT_CHECK_TOKENS",
+        str(DEFAULT_DISCONNECT_CHECK_TOKEN_INTERVAL),
+    )
+    try:
+        interval = int(raw_value)
+    except ValueError as exc:
+        raise RuntimeError(
+            f"INFINILM_DISCONNECT_CHECK_TOKENS must be an integer: {raw_value!r}"
+        ) from exc
+    if interval not in {32, 1024}:
+        raise RuntimeError("INFINILM_DISCONNECT_CHECK_TOKENS must be 32 or 1024")
+    return interval
+
+
+DISCONNECT_CHECK_TOKEN_INTERVAL = disconnect_check_tokens_from_environment()
 
 
 def chunk_json(
@@ -101,6 +146,37 @@ def completion_json(
     if cache is not None:
         response["cache"] = cache
     return response
+
+
+class TimedStreamingResponse(StreamingResponse):
+    """StreamingResponse with a diagnostic wrapper around ASGI body sends."""
+
+    def __init__(self, *args, timing_collector=None, timing_service=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._timing_collector = timing_collector
+        self._timing_service = timing_service
+
+    async def __call__(self, scope, receive, send):
+        if self._timing_collector is None or not self._timing_collector.enabled:
+            await super().__call__(scope, receive, send)
+            return
+
+        async def timed_send(message):
+            started_at_ns = monotonic_ns()
+            await send(message)
+            self._timing_collector.record_asgi_body_send(
+                started_at_ns,
+                monotonic_ns(),
+                len(message.get("body", b"")),
+                message.get("type", ""),
+            )
+
+        try:
+            await super().__call__(scope, receive, timed_send)
+        finally:
+            payload = self._timing_collector.finish()
+            if self._timing_service is not None:
+                self._timing_service.record_finished_collector(payload)
 
 
 class InferenceServer:
@@ -210,6 +286,8 @@ class InferenceServer:
         self.pre_transpose = pre_transpose
 
         self.engine: AsyncLLMEngine = None
+        self.output_timing = OutputTimingService()
+        self.request_timing_enabled = RequestTimingConfig.from_environment().enabled
 
     def start(self):
         """Start the HTTP server."""
@@ -223,44 +301,49 @@ class InferenceServer:
 
         @asynccontextmanager
         async def lifespan(app: FastAPI):
-            self.engine = AsyncLLMEngine(
-                model_path=self.model_path,
-                device=self.device,
-                dtype=self.dtype,
-                tensor_parallel_size=self.tensor_parallel_size,
-                pipeline_parallel_size=self.pipeline_parallel_size,
-                pipeline_parallel_stage=self.pipeline_parallel_stage,
-                master_addr=self.master_addr,
-                master_port=self.master_port,
-                moe_ep_backend=self.moe_ep_backend,
-                moe_ep_size=self.moe_ep_size,
-                use_legacy_moe=self.use_legacy_moe,
-                cache_type=self.cache_type,
-                max_batch_size=self.max_batch_size,
-                max_tokens=self.max_tokens,
-                gpu_memory_utilization=self.gpu_memory_utilization,
-                block_size=self.block_size,
-                max_cache_len=self.max_cache_len,
-                temperature=self.temperature,
-                top_p=self.top_p,
-                top_k=self.top_k,
-                enable_graph=self.enable_graph,
-                enable_workspace=self.enable_workspace,
-                max_num_batched_tokens=self.max_num_batched_tokens,
-                attn_backend=self.attn_backend,
-                use_mla=self.use_mla,
-                skip_load=self.skip_load,
-                weight_load_mode=self.weight_load_mode,
-                kv_transfer_config=self.kv_transfer_config,
-                enable_prefix_caching=self.enable_prefix_caching,
-                pre_transpose=self.pre_transpose,
-            )
-            self.engine.start()
-            logger.info(f"Engine initialized with model at {self.model_path}")
-            logger.info(f"  enable_graph: {self.enable_graph}")
-            logger.info(f"  enable_workspace: {self.enable_workspace}")
-            yield
-            self.engine.stop()
+            await self.output_timing.start()
+            try:
+                self.engine = AsyncLLMEngine(
+                    model_path=self.model_path,
+                    device=self.device,
+                    dtype=self.dtype,
+                    tensor_parallel_size=self.tensor_parallel_size,
+                    pipeline_parallel_size=self.pipeline_parallel_size,
+                    pipeline_parallel_stage=self.pipeline_parallel_stage,
+                    master_addr=self.master_addr,
+                    master_port=self.master_port,
+                    moe_ep_backend=self.moe_ep_backend,
+                    moe_ep_size=self.moe_ep_size,
+                    use_legacy_moe=self.use_legacy_moe,
+                    cache_type=self.cache_type,
+                    max_batch_size=self.max_batch_size,
+                    max_tokens=self.max_tokens,
+                    gpu_memory_utilization=self.gpu_memory_utilization,
+                    block_size=self.block_size,
+                    max_cache_len=self.max_cache_len,
+                    temperature=self.temperature,
+                    top_p=self.top_p,
+                    top_k=self.top_k,
+                    enable_graph=self.enable_graph,
+                    enable_workspace=self.enable_workspace,
+                    max_num_batched_tokens=self.max_num_batched_tokens,
+                    attn_backend=self.attn_backend,
+                    use_mla=self.use_mla,
+                    skip_load=self.skip_load,
+                    weight_load_mode=self.weight_load_mode,
+                    kv_transfer_config=self.kv_transfer_config,
+                    enable_prefix_caching=self.enable_prefix_caching,
+                    pre_transpose=self.pre_transpose,
+                )
+                self.engine.start()
+                logger.info(f"Engine initialized with model at {self.model_path}")
+                logger.info(f"  enable_graph: {self.enable_graph}")
+                logger.info(f"  enable_workspace: {self.enable_workspace}")
+                yield
+            finally:
+                if self.engine is not None:
+                    self.engine.stop()
+                await self.output_timing.stop()
 
         app = FastAPI(lifespan=lifespan)
         self._register_routes(app)
@@ -269,7 +352,10 @@ class InferenceServer:
 
     def _register_prefill_api_guard(self, app: FastAPI) -> None:
         """Keep producer-only workers off the public OpenAI surface."""
-        if self.kv_transfer_config is None or self.kv_transfer_config.kv_role != "kv_producer":
+        if (
+            self.kv_transfer_config is None
+            or self.kv_transfer_config.kv_role != "kv_producer"
+        ):
             return
 
         @app.middleware("http")
@@ -301,10 +387,19 @@ class InferenceServer:
         async def chat_completions(request: Request):
             # 该时间代表 worker 应用层收到 HTTP request 的时刻，早于 body
             # 读取、JSON 解析、tokenize 和 InferenceRequest 创建。
-            server_received_at_ns = monotonic_ns()
+            server_received_at_ns = (
+                monotonic_ns() if self.request_timing_enabled else None
+            )
+            entrance_timing = (
+                RequestEntranceTiming() if self.request_timing_enabled else None
+            )
             try:
-                data = await request.json()
-                # logger.debug(f"Received request data: {data}")
+                body = await request.body()
+                if entrance_timing is not None:
+                    entrance_timing.body_read_completed_at_ns = monotonic_ns()
+                data = json.loads(body)
+                if entrance_timing is not None:
+                    entrance_timing.json_parsed_at_ns = monotonic_ns()
             except Exception as e:
                 logger.error(f"Failed to parse request JSON: {e}")
                 return JSONResponse(content={"error": "Invalid JSON"}, status_code=400)
@@ -325,27 +420,48 @@ class InferenceServer:
             # worker 尊重该 ID，使两台机器上的 timing 文件可以用同一个
             # request_id 关联；普通客户端未传 header 时仍自动生成。
             request_id = (
-                request.headers.get("X-Request-Id")
-                or f"cmpl-{uuid.uuid4().hex}"
+                request.headers.get("X-Request-Id") or f"cmpl-{uuid.uuid4().hex}"
             )
+            if entrance_timing is not None:
+                entrance_timing.route_prepared_at_ns = monotonic_ns()
 
             if stream:
-                return StreamingResponse(
+                prestarted_request, prebuilt_sampling_params = (
+                    self._start_stream_chat_request(
+                        request_id=request_id,
+                        data=data,
+                        server_received_at_ns=server_received_at_ns,
+                        entrance_timing=entrance_timing,
+                    )
+                )
+                timing_collector = self.output_timing.create_collector(request_id)
+                return TimedStreamingResponse(
                     self._stream_chat(
                         request_id,
                         data,
                         request,
                         server_received_at_ns,
+                        entrance_timing,
+                        prestarted_request,
+                        prebuilt_sampling_params,
+                        output_collector=timing_collector,
                     ),
                     media_type="text/event-stream",
+                    timing_collector=timing_collector,
+                    timing_service=self.output_timing,
                 )
             else:
+                timing_collector = self.output_timing.create_collector(request_id)
                 response = await self._chat(
                     request_id,
                     data,
                     request,
                     server_received_at_ns,
+                    entrance_timing,
+                    output_collector=timing_collector,
                 )
+                payload = timing_collector.finish()
+                self.output_timing.record_finished_collector(payload)
                 if isinstance(response, JSONResponse):
                     return response
                 return JSONResponse(content=response)
@@ -452,55 +568,178 @@ class InferenceServer:
             ignore_eos=self.ignore_eos,
         )
 
+    def _start_stream_chat_request(
+        self,
+        *,
+        request_id: str,
+        data: dict,
+        server_received_at_ns: int | None,
+        entrance_timing: RequestEntranceTiming,
+    ):
+        """Submit preprocessing before Starlette schedules the stream body."""
+        if entrance_timing is not None:
+            entrance_timing.handler_started_at_ns = monotonic_ns()
+        sampling_params = self._build_sampling_params(data)
+        prestarted_request = self.engine.start_chat_preprocessing(
+            messages=data.get("messages", []),
+            request_id=request_id,
+            add_generation_prompt=bool(data.get("add_generation_prompt", True)),
+            chat_template_kwargs=data.get("chat_template_kwargs") or {},
+            server_received_at_ns=server_received_at_ns,
+            entrance_timing=entrance_timing,
+        )
+        return prestarted_request, sampling_params
+
     async def _stream_chat(
         self,
         request_id: str,
         data: dict,
         http_request: Request,
         server_received_at_ns: int | None = None,
+        entrance_timing: RequestEntranceTiming | None = None,
+        prestarted_request=None,
+        prebuilt_sampling_params: SamplingParams | None = None,
+        output_collector=None,
     ):
         """Handle streaming chat request."""
         req = None
         _abort_reason = FinishReason.CANCELED
+        received_token_outputs = 0
+        pending_token_texts: list[str] = []
+        pending_token_count = 0
+        has_flushed_token_text = False
+        if output_collector is None:
+            timing_service = getattr(self, "output_timing", None)
+            output_collector = (
+                timing_service.create_collector(request_id)
+                if timing_service is not None
+                else DisabledOutputTimingCollector()
+            )
+        output_timing_enabled = output_collector.enabled
+        output_timing_enabled = output_collector.enabled
+
+        def render_sse_chunk(payload: dict) -> str:
+            json_started_at_ns = monotonic_ns() if output_timing_enabled else None
+            chunk = json.dumps(payload, ensure_ascii=False)
+            frame = f"data: {chunk}\n\n"
+            if output_timing_enabled:
+                output_collector.record_sse_json(
+                    json_started_at_ns,
+                    monotonic_ns(),
+                    len(frame.encode("utf-8")),
+                )
+            return frame
+
+        def take_pending_sse_chunk() -> str | None:
+            nonlocal pending_token_texts, pending_token_count
+            if not pending_token_texts:
+                return None
+            content = "".join(pending_token_texts)
+            pending_token_texts = []
+            pending_token_count = 0
+            chunk = render_sse_chunk(
+                chunk_json(
+                    request_id,
+                    content=content,
+                    model=self.model_id,
+                )
+            )
+            return chunk
+
+        if (
+            entrance_timing is not None
+            and entrance_timing.handler_started_at_ns is None
+        ):
+            entrance_timing.handler_started_at_ns = monotonic_ns()
 
         try:
             messages = data.get("messages", [])
-            sampling_params = self._build_sampling_params(data)
-
-            req = self.engine.add_chat_request(
-                messages=messages,
-                sampling_params=sampling_params,
-                request_id=request_id,
-                request_data=data,
-                add_generation_prompt=bool(data.get("add_generation_prompt", True)),
-                chat_template_kwargs=data.get("chat_template_kwargs") or {},
-                server_received_at_ns=server_received_at_ns,
+            sampling_params = prebuilt_sampling_params or self._build_sampling_params(
+                data
             )
+
+            if prestarted_request is None:
+                req = await self.engine.add_chat_request_async(
+                    messages=messages,
+                    sampling_params=sampling_params,
+                    request_id=request_id,
+                    request_data=data,
+                    add_generation_prompt=bool(data.get("add_generation_prompt", True)),
+                    chat_template_kwargs=data.get("chat_template_kwargs") or {},
+                    server_received_at_ns=server_received_at_ns,
+                    entrance_timing=entrance_timing,
+                )
+            else:
+                req = await self.engine.finish_chat_preprocessing(
+                    prestarted_request,
+                    sampling_params=sampling_params,
+                    request_data=data,
+                )
 
             async for token_output in self.engine.stream_request(
                 req,
                 timeout=DEFAULT_STREAM_TIMEOUT,
                 request_timeout=DEFAULT_REQUEST_TIMEOUT,
             ):
-                # Check client disconnect
-                if await http_request.is_disconnected():
-                    logger.info(f"Client disconnected for request {request_id}")
-                    break
+                received_token_outputs += 1
+                token_timing = getattr(token_output, "output_timing", None)
+                if token_timing is not None:
+                    token_timing.route_received_at_ns = monotonic_ns()
+                    output_collector.record_token(token_timing, token_output.token_id)
+
+                # ASGI disconnect probes are measurable at high token rates. Check
+                # periodically instead of once per token; Starlette still cancels
+                # this generator when it observes a transport-level disconnect.
+                should_check_disconnect = (
+                    received_token_outputs % DISCONNECT_CHECK_TOKEN_INTERVAL == 0
+                    or token_output.finished
+                )
+                if should_check_disconnect:
+                    disconnect_started_at_ns = (
+                        monotonic_ns() if output_timing_enabled else None
+                    )
+                    if await http_request.is_disconnected():
+                        logger.info(f"Client disconnected for request {request_id}")
+                        break
+                    if output_timing_enabled:
+                        output_collector.record_disconnect(
+                            disconnect_started_at_ns, monotonic_ns()
+                        )
 
                 if token_output.finish_reason == FinishReason.TIMEOUT:
                     logger.warning(
                         f"Request {request_id} timed out after {DEFAULT_REQUEST_TIMEOUT}s"
                     )
-                    error_chunk = json.dumps(
+                    pending_chunk = take_pending_sse_chunk()
+                    if pending_chunk is not None:
+                        yield_started_at_ns = (
+                            monotonic_ns() if output_timing_enabled else None
+                        )
+                        yield pending_chunk
+                        if output_timing_enabled:
+                            output_collector.record_route_yield(
+                                yield_started_at_ns,
+                                monotonic_ns(),
+                                len(pending_chunk.encode()),
+                            )
+                    error_chunk = render_sse_chunk(
                         chunk_json(
                             request_id,
                             content="[Request timeout]",
                             finish_reason="timeout",
                             model=self.model_id,
-                        ),
-                        ensure_ascii=False,
+                        )
                     )
-                    yield f"data: {error_chunk}\n\n"
+                    yield_started_at_ns = (
+                        monotonic_ns() if output_timing_enabled else None
+                    )
+                    yield error_chunk
+                    if output_timing_enabled:
+                        output_collector.record_route_yield(
+                            yield_started_at_ns,
+                            monotonic_ns(),
+                            len(error_chunk.encode()),
+                        )
                     break
 
                 # Skip EOS token text for OpenAI API compatibility
@@ -512,33 +751,67 @@ class InferenceServer:
                     and token_output.token_id in eos_token_ids
                 )
 
+                pending_token_count += 1
+
                 if not is_eos_token and token_output.token_text:
-                    # Send token
-                    chunk = json.dumps(
-                        chunk_json(
-                            request_id,
-                            content=token_output.token_text,
-                            model=self.model_id,
-                        ),
-                        ensure_ascii=False,
+                    pending_token_texts.append(token_output.token_text)
+
+                    # Preserve first-token latency, then amortize JSON and ASGI
+                    # sends over a small token group.
+                    should_flush = (
+                        not has_flushed_token_text
+                        or pending_token_count >= SSE_FLUSH_TOKEN_INTERVAL
                     )
-                    yield f"data: {chunk}\n\n"
+                    if should_flush:
+                        chunk = take_pending_sse_chunk()
+                        assert chunk is not None
+                        has_flushed_token_text = True
+                        yield_started_at_ns = (
+                            monotonic_ns() if output_timing_enabled else None
+                        )
+                        yield chunk
+                        if output_timing_enabled:
+                            output_collector.record_route_yield(
+                                yield_started_at_ns,
+                                monotonic_ns(),
+                                len(chunk.encode()),
+                            )
 
                 if token_output.finished:
+                    pending_chunk = take_pending_sse_chunk()
+                    if pending_chunk is not None:
+                        yield_started_at_ns = (
+                            monotonic_ns() if output_timing_enabled else None
+                        )
+                        yield pending_chunk
+                        if output_timing_enabled:
+                            output_collector.record_route_yield(
+                                yield_started_at_ns,
+                                monotonic_ns(),
+                                len(pending_chunk.encode()),
+                            )
                     finish_reason = self._convert_finish_reason(
                         token_output.finish_reason
                     )
                     cache_stats = self._cache_stats(req)
-                    chunk = json.dumps(
+                    chunk = render_sse_chunk(
                         chunk_json(
                             request_id,
                             finish_reason=finish_reason,
                             model=self.model_id,
                             cache=cache_stats,
-                        ),
-                        ensure_ascii=False,
+                        )
                     )
-                    yield f"data: {chunk}\n\n"
+                    yield_started_at_ns = (
+                        monotonic_ns() if output_timing_enabled else None
+                    )
+                    yield chunk
+                    if output_timing_enabled:
+                        output_collector.record_route_yield(
+                            yield_started_at_ns,
+                            monotonic_ns(),
+                            len(chunk.encode()),
+                        )
                     break
 
         except asyncio.CancelledError:
@@ -550,23 +823,52 @@ class InferenceServer:
         except Exception as e:
             logger.error(f"Stream error for {request_id}: {e}", exc_info=True)
             _abort_reason = FinishReason.ERROR
-            error_chunk = json.dumps(
+            pending_chunk = take_pending_sse_chunk()
+            if pending_chunk is not None:
+                yield_started_at_ns = monotonic_ns() if output_timing_enabled else None
+                yield pending_chunk
+                if output_timing_enabled:
+                    output_collector.record_route_yield(
+                        yield_started_at_ns,
+                        monotonic_ns(),
+                        len(pending_chunk.encode()),
+                    )
+            error_chunk = render_sse_chunk(
                 chunk_json(
                     request_id,
                     content=f"[Error: {str(e)}]",
                     finish_reason="error",
                     model=self.model_id,
-                ),
-                ensure_ascii=False,
+                )
             )
-            yield f"data: {error_chunk}\n\n"
+            yield_started_at_ns = monotonic_ns() if output_timing_enabled else None
+            yield error_chunk
+            if output_timing_enabled:
+                output_collector.record_route_yield(
+                    yield_started_at_ns,
+                    monotonic_ns(),
+                    len(error_chunk.encode()),
+                )
 
         finally:
+            if (
+                prestarted_request is not None
+                and not prestarted_request.tokenized_future.done()
+            ):
+                prestarted_request.tokenized_future.cancel()
             # Unified abort: reason is ERROR if we got here via Exception, else CANCELED.
             # req.close() is handled by stream_request.finally.
             if req and not req.is_finished():
                 self.engine.add_aborted_req(req, _abort_reason)
-        yield "data: [DONE]\n\n"
+        done_chunk = "data: [DONE]\n\n"
+        yield_started_at_ns = monotonic_ns() if output_timing_enabled else None
+        yield done_chunk
+        if output_timing_enabled:
+            output_collector.record_route_yield(
+                yield_started_at_ns,
+                monotonic_ns(),
+                len(done_chunk.encode()),
+            )
 
     async def _chat(
         self,
@@ -574,16 +876,30 @@ class InferenceServer:
         data: dict,
         http_request: Request,
         server_received_at_ns: int | None = None,
+        entrance_timing: RequestEntranceTiming | None = None,
+        output_collector=None,
     ):
         """Handle non-streaming chat request."""
         req = None
         _abort_reason = FinishReason.CANCELED
+        if output_collector is None:
+            timing_service = getattr(self, "output_timing", None)
+            output_collector = (
+                timing_service.create_collector(request_id)
+                if timing_service is not None
+                else DisabledOutputTimingCollector()
+            )
+        output_timing_enabled = output_collector.enabled
+        if entrance_timing is not None and (
+            entrance_timing.handler_started_at_ns is None
+        ):
+            entrance_timing.handler_started_at_ns = monotonic_ns()
 
         try:
             messages = data.get("messages", [])
             sampling_params = self._build_sampling_params(data)
 
-            req = self.engine.add_chat_request(
+            req = await self.engine.add_chat_request_async(
                 messages=messages,
                 sampling_params=sampling_params,
                 request_id=request_id,
@@ -591,19 +907,40 @@ class InferenceServer:
                 add_generation_prompt=bool(data.get("add_generation_prompt", True)),
                 chat_template_kwargs=data.get("chat_template_kwargs") or {},
                 server_received_at_ns=server_received_at_ns,
+                entrance_timing=entrance_timing,
             )
 
             # Collect all generated tokens
             output_text = ""
+            received_token_outputs = 0
             async for token_output in self.engine.stream_request(
                 req,
                 timeout=DEFAULT_STREAM_TIMEOUT,
                 request_timeout=DEFAULT_REQUEST_TIMEOUT,
             ):
-                # Check client disconnect
-                if await http_request.is_disconnected():
-                    logger.info(f"Client disconnected for request {request_id}")
-                    break
+                received_token_outputs += 1
+                token_timing = getattr(token_output, "output_timing", None)
+                if token_timing is not None:
+                    token_timing.route_received_at_ns = monotonic_ns()
+                    output_collector.record_token(token_timing, token_output.token_id)
+
+                # Keep the non-streaming disconnect probe on the same cadence as
+                # SSE. Per-token receive probes dominate long chat completions.
+                should_check_disconnect = (
+                    received_token_outputs % DISCONNECT_CHECK_TOKEN_INTERVAL == 0
+                    or token_output.finished
+                )
+                if should_check_disconnect:
+                    disconnect_started_at_ns = (
+                        monotonic_ns() if output_timing_enabled else None
+                    )
+                    if await http_request.is_disconnected():
+                        logger.info(f"Client disconnected for request {request_id}")
+                        break
+                    if output_timing_enabled:
+                        output_collector.record_disconnect(
+                            disconnect_started_at_ns, monotonic_ns()
+                        )
 
                 # Request-level timeout is handled inside stream_request.
                 if token_output.finish_reason == FinishReason.TIMEOUT:
@@ -665,9 +1002,7 @@ class InferenceServer:
     def _cache_stats(req) -> dict:
         """Return the local prefix-cache hit observed for this request."""
         prompt_tokens = req.get_prompt_length() if req is not None else 0
-        cached_tokens = (
-            req.num_local_prefix_cache_hit_tokens if req is not None else 0
-        )
+        cached_tokens = req.num_local_prefix_cache_hit_tokens if req is not None else 0
         return {
             "hit": cached_tokens > 0,
             "matched_tokens": cached_tokens,

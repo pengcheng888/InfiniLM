@@ -35,6 +35,19 @@ class BasicLLMProcessor(InfinilmProcessor):
         # "pt" or "np" or "tf".
         return self.tokenizer(prompt, return_tensors="pt", add_special_tokens=False)
 
+    @property
+    def supports_fast_text_tokenize(self) -> bool:
+        """Whether this class preserves Basic text tokenization semantics.
+
+        Subclasses that override ``__call__`` must also override
+        ``fast_text_tokenize`` to opt back into the worker fast path.
+        """
+        return (
+            self.__class__.__call__ is BasicLLMProcessor.__call__
+            or self.__class__.fast_text_tokenize
+            is not BasicLLMProcessor.fast_text_tokenize
+        )
+
     @override
     def apply_chat_template(
         self,
@@ -265,6 +278,18 @@ class BasicLLMProcessor(InfinilmProcessor):
     @override
     def get_tokenizer(self):
         return self.tokenizer
+
+    @override
+    def fast_text_tokenize(self, prompt: str, *, tokenizer=None) -> list[int]:
+        """Tokenize text with the same semantics as ``__call__``.
+
+        The normal path creates a torch tensor only to immediately flatten it
+        back to a Python list.  For text-only requests, `encode` avoids that
+        round trip while preserving `add_special_tokens=False`.
+        """
+        return (tokenizer or self.tokenizer).encode(
+            prompt, add_special_tokens=False
+        )
 
     @override
     def get_mm_token_index_list(
