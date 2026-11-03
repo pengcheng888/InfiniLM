@@ -58,6 +58,8 @@ class ModelForwardTiming:
 
 
 class ModelRunner:
+    supports_non_block = False
+
     def __init__(self, config: EngineConfig, initialize_processor: bool = True):
         self.config = config
         self._closed = False
@@ -251,7 +253,13 @@ class ModelRunner:
 
         self.dtype = dtype_map[self.config.dtype]
 
-    def execute_model(self, scheduler_output) -> ModelRunnerOutput:
+    def execute_model(
+        self, scheduler_output, non_block: bool = False
+    ) -> ModelRunnerOutput:
+        if non_block:
+            raise NotImplementedError(
+                "non_block execution requires the process ModelRunner"
+            )
         sampled_tokens_list = []
         kv_connector_output = None
 

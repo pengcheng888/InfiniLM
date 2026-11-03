@@ -13,6 +13,7 @@ import os
 import threading
 import time
 import uuid
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import dataclass
@@ -111,6 +112,27 @@ def stream_ready_drain_items_from_environment() -> int:
     return drain_items
 
 
+def model_runner_batch_queue_size_from_environment() -> int:
+    """读取异步 ModelRunner batch queue 深度。
+
+    只有支持 ``non_block=True`` 的进程 runner 使用该队列；普通单进程 runner
+    始终保持原有同步路径。深度 1 等价于同步执行，默认 2 对应 vLLM 的
+    bounded batch queue 初始形态。
+    """
+    raw_value = os.environ.get("INFINILM_MODEL_RUNNER_BATCH_QUEUE_SIZE", "2")
+    try:
+        queue_size = int(raw_value)
+    except ValueError as exc:
+        raise RuntimeError(
+            "INFINILM_MODEL_RUNNER_BATCH_QUEUE_SIZE must be an integer"
+        ) from exc
+    if queue_size < 1 or queue_size > 4:
+        raise RuntimeError(
+            "INFINILM_MODEL_RUNNER_BATCH_QUEUE_SIZE must be between 1 and 4"
+        )
+    return queue_size
+
+
 @dataclass(frozen=True)
 class _TokenizedChatInput:
     processed_inputs: dict | None
@@ -168,7 +190,9 @@ class LLMEngine:
                 "with inference_server.py --node-rank=N"
             )
 
-        # hf_config 已在 Engine 初始化时读取；轻量通信 runner 直接复用它。
+        # 工厂负责选择普通 runner 或独立进程 runner。进程模式只把纯数据
+        # batch 发送给子进程；模型、GPU KV cache 和 worker-side connector
+        # 都留在子进程。
         self.model_runner = create_model_runner(config, hf_config=hf_config)
 
         self.device = self.model_runner.device
@@ -234,6 +258,12 @@ class LLMEngine:
             raise ValueError(f"Unsupported cache_type: {config.cache_type}")
 
         self.cache_type = config.cache_type
+        self._model_batch_queue = deque()
+        self._model_batch_queue_size = (
+            model_runner_batch_queue_size_from_environment()
+            if getattr(self.model_runner, "supports_non_block", False)
+            else 1
+        )
 
         # Get EOS token IDs from model config
         self.eos_token_ids = self.model_runner.eos_token_id or []
@@ -263,6 +293,36 @@ class LLMEngine:
         self.request_timing_recorder.close()
         self.model_runner.close()
 
+    def step_with_batch_queue(self) -> tuple[bool, list[tuple]]:
+        """按 vLLM ``step_with_batch_queue`` 方式重叠调度和 ModelRunner。
+
+        队列中的 scheduler output 保持不可变的 step 上下文，结果只按 FIFO
+        顺序提交给 scheduler。scheduler 只有在完成前一个 batch 的输出更新
+        后，才会把该 batch 的请求重新放回 running queue，因此同一个 decode
+        请求不会被提前提交两次。
+        """
+        if len(self._model_batch_queue) < self._model_batch_queue_size:
+            scheduler_output = self.scheduler.schedule()
+            if scheduler_output is not None:
+                future = self.model_runner.execute_model(
+                    scheduler_output,
+                    non_block=True,
+                )
+                self._model_batch_queue.appendleft((future, scheduler_output))
+
+                # 队列尚未满时立即返回，让 step loop 继续准备下一个 batch，
+                # 同时 worker 进程执行当前 batch。
+                if len(self._model_batch_queue) < self._model_batch_queue_size:
+                    return True, []
+            elif not self._model_batch_queue:
+                return False, []
+
+        # 队列满，或 scheduler 暂时没有新请求：等待最早提交的 batch。
+        future, scheduler_output = self._model_batch_queue.pop()
+        runner_output = future.result()
+
+        return self._commit_model_step(scheduler_output, runner_output)
+
     def step(self) -> tuple[bool, list[tuple]]:
         """Run one inference step.
 
@@ -271,13 +331,25 @@ class LLMEngine:
             - did_work
             - pending: Pending streaming outputs as (async_queue, TokenOutput) pairs.
         """
+        if self._model_batch_queue_size > 1:
+            return self.step_with_batch_queue()
+
         # Schedule the next unit of work, which may be model execution,
         # connector control metadata, or both.
         scheduler_output = self.scheduler.schedule()
         if scheduler_output is None:
             return False, []
 
-        runner_output = self.model_runner.execute_model(scheduler_output)
+        runner_output = self.model_runner.execute_model(
+            scheduler_output,
+            non_block=False,
+        )
+        return self._commit_model_step(scheduler_output, runner_output)
+
+    def _commit_model_step(
+        self, scheduler_output, runner_output
+    ) -> tuple[bool, list[tuple]]:
+        """将已完成 ModelRunner step 提交到 scheduler 侧状态。"""
         output_timing_enabled = getattr(self, "_output_timing_enabled", False)
         sampled_ready_at_ns = monotonic_ns() if output_timing_enabled else None
         if (

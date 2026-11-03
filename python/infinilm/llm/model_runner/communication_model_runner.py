@@ -90,6 +90,8 @@ def create_communication_test_kv_caches(
 
 
 class CommunicationModelRunner:
+    supports_non_block = False
+
     """不加载模型、只验证集群和 KV 传输链路的轻量通信 runner。"""
 
     def __init__(
@@ -230,8 +232,14 @@ class CommunicationModelRunner:
         """测试 token 不作为 EOS，保证请求不会被提前终止。"""
         return []
 
-    def execute_model(self, scheduler_output) -> ModelRunnerOutput:
+    def execute_model(
+        self, scheduler_output, non_block: bool = False
+    ) -> ModelRunnerOutput:
         """执行一次假 forward，并保留 KV connector 的收发状态收集。"""
+        if non_block:
+            raise NotImplementedError(
+                "non_block execution requires the process ModelRunner"
+            )
         sampled_tokens_list = []
         kv_connector_output = None
         forward_timing: ModelForwardTiming | None = None

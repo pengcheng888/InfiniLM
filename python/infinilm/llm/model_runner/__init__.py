@@ -14,11 +14,23 @@ def create_model_runner(
     hf_config: Mapping[str, Any] | None = None,
     initialize_processor: bool = True,
 ) -> Any:
-    """根据环境变量选择普通 runner 或轻量通信 runner。
+    """创建 ModelRunner，并按配置选择进程边界和 runner 实现。
 
-    两个 runner 都在函数内延迟导入，避免包初始化阶段形成循环导入，也让
-    普通进程在没有通信测试环境变量时不额外构造轻量通信 runner 的依赖。
+    是否启用独立 ModelRunner 进程统一由环境变量决定。
     """
+    from infinilm.llm.model_runner.model_runner_process import (
+        model_runner_process_enabled,
+    )
+
+    use_process = model_runner_process_enabled()
+
+    if use_process:
+        from infinilm.llm.model_runner.model_runner_process import (
+            ModelRunnerProcessClient,
+        )
+
+        return ModelRunnerProcessClient(config, dict(hf_config or {}))
+
     if cluster_communication_test():
         from infinilm.llm.model_runner.communication_model_runner import (
             CommunicationModelRunner,
