@@ -116,10 +116,10 @@ def model_runner_batch_queue_size_from_environment() -> int:
     """读取异步 ModelRunner batch queue 深度。
 
     只有支持 ``non_block=True`` 的进程 runner 使用该队列；普通单进程 runner
-    始终保持原有同步路径。深度 1 等价于同步执行，默认 2 对应 vLLM 的
-    bounded batch queue 初始形态。
+    始终保持原有同步路径。深度 1 是安全默认值；深度大于 1 时 prefill 仍
+    同步执行，只有 decode batch 进入 bounded queue。
     """
-    raw_value = os.environ.get("INFINILM_MODEL_RUNNER_BATCH_QUEUE_SIZE", "2")
+    raw_value = os.environ.get("INFINILM_MODEL_RUNNER_BATCH_QUEUE_SIZE", "1")
     try:
         queue_size = int(raw_value)
     except ValueError as exc:
@@ -258,8 +258,8 @@ class LLMEngine:
             raise ValueError(f"Unsupported cache_type: {config.cache_type}")
 
         self.cache_type = config.cache_type
-        self._model_batch_queue = deque()
-        self._model_batch_queue_size = (
+        self._inflight_decode_batches = deque()
+        self._decode_batch_queue_size = (
             model_runner_batch_queue_size_from_environment()
             if getattr(self.model_runner, "supports_non_block", False)
             else 1
@@ -293,35 +293,126 @@ class LLMEngine:
         self.request_timing_recorder.close()
         self.model_runner.close()
 
-    def step_with_batch_queue(self) -> tuple[bool, list[tuple]]:
-        """按 vLLM ``step_with_batch_queue`` 方式重叠调度和 ModelRunner。
-
-        队列中的 scheduler output 保持不可变的 step 上下文，结果只按 FIFO
-        顺序提交给 scheduler。scheduler 只有在完成前一个 batch 的输出更新
-        后，才会把该 batch 的请求重新放回 running queue，因此同一个 decode
-        请求不会被提前提交两次。
-        """
-        if len(self._model_batch_queue) < self._model_batch_queue_size:
-            scheduler_output = self.scheduler.schedule()
-            if scheduler_output is not None:
-                future = self.model_runner.execute_model(
-                    scheduler_output,
-                    non_block=True,
-                )
-                self._model_batch_queue.appendleft((future, scheduler_output))
-
-                # 队列尚未满时立即返回，让 step loop 继续准备下一个 batch，
-                # 同时 worker 进程执行当前 batch。
-                if len(self._model_batch_queue) < self._model_batch_queue_size:
-                    return True, []
-            elif not self._model_batch_queue:
-                return False, []
-
-        # 队列满，或 scheduler 暂时没有新请求：等待最早提交的 batch。
-        future, scheduler_output = self._model_batch_queue.pop()
+    def _commit_oldest_decode_batch(self) -> tuple[bool, list[tuple]]:
+        future, scheduler_output = self._inflight_decode_batches.pop()
         runner_output = future.result()
-
         return self._commit_model_step(scheduler_output, runner_output)
+
+    def _release_completed_request_cache(self) -> None:
+        """释放所有 terminal request 的进程侧增量同步状态。"""
+        pop_completed = getattr(
+            self.scheduler,
+            "pop_completed_request_ids",
+            None,
+        )
+        finished_request_ids = pop_completed() if pop_completed is not None else []
+        release_requests = getattr(self.model_runner, "release_requests", None)
+        if release_requests is not None and finished_request_ids:
+            release_requests(finished_request_ids)
+
+    def step_with_batch_queue(self) -> tuple[bool, list[tuple]]:
+        """调度 decode batch 并与 ModelRunner 重叠执行。
+
+        该函数只在使用进程版 ModelRunner 且 batch queue 深度大于 1 时生效。
+        队列中的元素是 ``(Future, SchedulerOutput)``，并且只允许保存 decode
+        batch；prefill 和 connector-only 控制步骤始终同步执行。
+
+        这样做的原因是：单个 ModelRunner 子进程内部仍是串行执行。若把第一
+        个 partial prefill 过早提交到队列，后续请求会形成另一个 prefill
+        batch，最终把 decode 长期固化成 ``1 + 7`` 等小请求组。让 prefill
+        同步执行后，第一个 prefill forward 本身成为后续请求的自然聚合窗口；
+        prefill commit 后，scheduler 再基于更完整的 waiting/running queue 形
+        成后续 decode batch。
+
+        connector-only output 也必须同步执行。它虽然没有 scheduled request，
+        但可能携带 KV connector 的收发控制事件；同步处理可以避免 P/D 场景
+        中的 KV readiness 事件被 decode 队列延迟。
+        """
+        # _inflight_decode_batches 非空表示已有 decode batch 已提交给 ModelRunner。
+        # 此时只有两种情况需要停止继续填充队列：
+        # 1. 队列已经达到配置的最大深度；
+        # 2. waiting queue 中出现了新的 prefill 请求。
+        #
+        # 第二点尤其重要：如果 decode 正在执行时直接调度 prefill，prefill
+        # 的同步执行会排在 worker 当前 decode 之后，scheduler 线程也会等待
+        # 这个 prefill 完成，导致已经完成的 decode 输出不能及时 commit 和
+        # streaming。因此先提交最早的 decode batch，下一次 step 再处理
+        # prefill。
+        if self._inflight_decode_batches and (
+            len(self._inflight_decode_batches) >= self._decode_batch_queue_size
+            or self.scheduler.has_waiting_requests()
+        ):
+            return self._commit_oldest_decode_batch()
+
+        # 到这里时，要么队列为空，要么队列未满且没有新的 prefill 工作。
+        # scheduler.schedule() 会按原有优先级从 waiting/running queue 生成
+        # SchedulerOutput，也可能返回 connector-only 控制 output。
+        scheduler_output = self.scheduler.schedule()
+        self._release_completed_request_cache()
+        if scheduler_output is None:
+            # 没有新的可调度工作。如果仍有已提交的 decode batch，等待最早
+            # 的 Future 完成并提交结果；否则本 step 确实没有工作，返回
+            # False 让外层 step loop 进入短暂睡眠。
+            if self._inflight_decode_batches:
+                return self._commit_oldest_decode_batch()
+            return False, []
+
+        # prefill 和 connector-only step 都走同步路径。
+        #
+        # has_waiting_requests() 与 schedule() 之间存在很小的竞态：检查时
+        # waiting queue 可能为空，但刚好在 schedule() 前有新 prefill 入队。
+        # 如果此时队列中已有 in-flight decode，不能直接同步执行这个 prefill；
+        # 否则它会作为下一条命令排在 decode 后面，而 scheduler 线程会一直
+        # 等到 prefill 返回，延迟 decode 输出。因此这里先提交旧的 decode
+        # 结果，再执行当前同步 output。
+        if scheduler_output.is_prefill or not scheduler_output.scheduled_requests:
+            # old_pending 保存旧 decode batch commit 后产生的 streaming 输出。
+            # 当前 prefill/connector-only step 完成后，把两部分的 pending 合并
+            # 返回，保证外层 _step_loop 能统一发布输出。
+            pending: list[tuple] = []
+            if self._inflight_decode_batches:
+                _, old_pending = self._commit_oldest_decode_batch()
+                pending.extend(old_pending)
+
+            # non_block=False 表示当前线程会等待 ModelRunner 子进程返回。
+            # prefill 使用同步等待是刻意设计：它避免 partial prefill 被提前
+            # 固化成多个小 batch，也让后续请求在 forward 期间继续进入
+            # waiting queue。connector-only output 同步执行则是为了避免 KV
+            # 控制事件被异步 decode 队列延迟。
+            runner_output = self.model_runner.execute_model(
+                scheduler_output,
+                non_block=False,
+            )
+            # 将 sampled token、connector 输出、timing 和请求生命周期更新回
+            # scheduler 侧；返回值中的 pending 交给 AsyncLLMEngine 发布。
+            did_work, new_pending = self._commit_model_step(
+                scheduler_output,
+                runner_output,
+            )
+            combined_pending = pending + new_pending
+            # A connector-only step may return did_work=False while carrying
+            # streaming output committed from an older decode batch. Pending
+            # output is itself work; otherwise the step loop skips submission.
+            return did_work or bool(combined_pending), combined_pending
+
+        # 剩余情况是包含请求的 decode batch。它可以使用 non_block=True 提交，
+        # 让 scheduler 线程在 ModelRunner 计算期间继续推进事件循环。
+        # appendleft() 与 _commit_oldest_decode_batch() 中的 pop() 配合，保证
+        # 多个 in-flight decode batch 严格按提交顺序 commit。
+        future = self.model_runner.execute_model(
+            scheduler_output,
+            non_block=True,
+        )
+        self._inflight_decode_batches.appendleft((future, scheduler_output))
+
+        # 队列未满时立即返回，让外层 loop 有机会调度下一个 batch 或处理其他
+        # CPU 工作。此时本 step 尚未产生 streaming token，因此 pending 为空。
+        if len(self._inflight_decode_batches) < self._decode_batch_queue_size:
+            return True, []
+
+        # 队列已满时不能再提前提交更多 batch。等待最早提交的 decode Future
+        # 完成，并按 FIFO 顺序把结果提交给 scheduler，防止乱序更新请求状态。
+        return self._commit_oldest_decode_batch()
 
     def step(self) -> tuple[bool, list[tuple]]:
         """Run one inference step.
@@ -331,12 +422,13 @@ class LLMEngine:
             - did_work
             - pending: Pending streaming outputs as (async_queue, TokenOutput) pairs.
         """
-        if self._model_batch_queue_size > 1:
+        if getattr(self, "_decode_batch_queue_size", 1) > 1:
             return self.step_with_batch_queue()
 
         # Schedule the next unit of work, which may be model execution,
         # connector control metadata, or both.
         scheduler_output = self.scheduler.schedule()
+        self._release_completed_request_cache()
         if scheduler_output is None:
             return False, []
 
@@ -373,6 +465,9 @@ class LLMEngine:
             sampled_token_ids,
             sampled_ready_at_ns=sampled_ready_at_ns,
         )
+        # _update_requests() 会调用 Scheduler.complete_requests()。这里统一
+        # 清理 schedule 阶段和本 batch commit 后产生的 terminal request。
+        self._release_completed_request_cache()
 
         # Return False (no immediate work) only when no requests were scheduled
         # and no KV transfers completed in this step.

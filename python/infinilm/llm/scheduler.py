@@ -108,6 +108,9 @@ class Scheduler:
         # Worker connector 产生的 KV transfer timing 先放入这里，由
         # LLMEngine 在 update_from_output() 后统一交给 JSONL recorder。
         self._pending_timing_events: list[dict] = []
+        # 请求可能在 schedule() 清理队列时终止，而不属于当前 ModelRunner
+        # batch。先记录 terminal id，由 LLMEngine 统一清理进程侧缓存。
+        self._completed_request_ids: list[str] = []
 
     def add_request(self, request: InferenceRequest):
         if request is not None:
@@ -132,6 +135,10 @@ class Scheduler:
             if self.request_timing_enabled:
                 request.scheduler_enqueued_at_ns = monotonic_ns()
             self.waiting_queue.sync_q.put(request)
+
+    def has_waiting_requests(self) -> bool:
+        """Return whether prefill work is available without draining it."""
+        return not self.waiting_queue.sync_q.empty()
 
     def _note_scheduler_polled(self, request: InferenceRequest) -> None:
         if not self.request_timing_enabled:
@@ -525,6 +532,7 @@ class Scheduler:
                 RequestStatus.FAILED,
                 RequestStatus.TIMEOUT,
             ]:
+                self._completed_request_ids.append(req.request_id)
                 delay_free_blocks = False
                 if self.connector is not None:
                     delay_free_blocks, _ = self.connector.request_finished(
@@ -564,6 +572,12 @@ class Scheduler:
             else:
                 # Still running, put back in running queue
                 self.running_queue.sync_q.put(req)
+
+    def pop_completed_request_ids(self) -> list[str]:
+        """取出并清空 terminal request id，保持首次完成顺序并去重。"""
+        request_ids = list(dict.fromkeys(self._completed_request_ids))
+        self._completed_request_ids.clear()
+        return request_ids
 
     def can_accept_request(
         self,

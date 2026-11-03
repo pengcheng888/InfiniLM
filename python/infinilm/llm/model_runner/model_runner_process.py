@@ -5,28 +5,44 @@
 侧的 KV connector。两个进程之间只传输可序列化的普通 Python 数据，不传递
 GPU tensor 或完整的 ``InferenceRequest`` 对象。
 
-该模块采用 ``multiprocessing`` 的 ``spawn`` 模式，并通过 ``Pipe`` 传递两类
-消息：主进程发送待执行 batch，子进程返回 forward 和 KV connector 的结果。
+传输实现位于 ``model_runner_channel.py``；request/batch/response 协议编解码
+位于 ``model_runner_wire.py``。本模块只负责子进程生命周期、worker 循环和
+scheduler 侧代理。
 """
 
 from __future__ import annotations
 
+import logging
 import multiprocessing as mp
 import os
-from collections import deque
-from concurrent.futures import Future, TimeoutError as FutureTimeoutError
-from dataclasses import asdict
-from multiprocessing.connection import Connection
+import statistics
 import time
+from collections import deque
+from concurrent.futures import Future
+from concurrent.futures import TimeoutError as FutureTimeoutError
+from multiprocessing.connection import Connection
 from typing import TYPE_CHECKING, Any, Deque
 
-from infinilm.llm.sampling_params import SamplingParams
+from infinilm.llm.model_runner.model_runner_channel import (
+    PipeChannel,
+    VLLMMessageQueueChannel,
+    model_runner_ipc_mode,
+)
+from infinilm.llm.model_runner.model_runner_wire import (
+    WireRequest,
+    batch_to_wire,
+    metadata_from_wire,
+    model_runner_request_cache_enabled,
+    requests_from_wire,
+    response_from_wire,
+    response_to_wire,
+)
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from infinilm.config.engine_config import EngineConfig
     from infinilm.llm.model_runner.model_runner import ModelRunnerOutput
-    from infinilm.llm.request import InferenceRequest
-    from infinilm.llm.scheduler import SchedulerOutput
 
 
 def model_runner_process_enabled() -> bool:
@@ -38,231 +54,21 @@ def model_runner_process_enabled() -> bool:
     value = os.environ.get("INFINILM_MODEL_RUNNER_PROCESS", "0").strip().lower()
     if value not in {"0", "1", "false", "true", "no", "yes", "off", "on"}:
         raise RuntimeError(
-            "INFINILM_MODEL_RUNNER_PROCESS must be a boolean, got "
-            f"{value!r}"
+            f"INFINILM_MODEL_RUNNER_PROCESS must be a boolean, got {value!r}"
         )
     return value in {"1", "true", "yes", "on"}
 
 
-def _sampling_to_dict(params: SamplingParams) -> dict[str, Any]:
-    """将采样参数转换成 Pipe 可以传输的字典。"""
-    return asdict(params)
-
-
-def _metadata_to_wire(metadata: Any) -> dict[str, Any] | None:
-    """序列化 scheduler 侧的 Mooncake 元数据。
-
-    P/D 场景中，scheduler 会先为请求决定发送或接收哪些 KV block。元数据
-    中包含远端 engine、transfer id、远端 bootstrap 地址和本地 block id，
-    worker 侧需要这些信息才能真正执行 Mooncake transfer。
-
-    这里不能直接传输 MooncakeConnectorMetadata 实例：它包含默认字典、集合
-    以及 connector 专用对象。显式转换为字典后，协议内容也更容易审查和扩展。
-    """
-    if metadata is None:
-        return None
-    return {
-        "reqs_to_recv": {
-            engine_id: {
-                request_id: {
-                    "d_req_id": meta.d_req_id,
-                    "transfer_id": meta.transfer_id,
-                    "local_block_ids": list(meta.local_block_ids),
-                    "remote_engine_id": meta.remote_engine_id,
-                    "remote_bootstrap_addr": meta.remote_bootstrap_addr,
-                }
-                for request_id, meta in requests.items()
-            }
-            for engine_id, requests in metadata.reqs_to_recv.items()
-        },
-        "reqs_to_send": {
-            request_id: [transfer_id, list(block_ids)]
-            for request_id, (transfer_id, block_ids) in metadata.reqs_to_send.items()
-        },
-        "reqs_not_processed": list(metadata.reqs_not_processed),
-    }
-
-
-def _metadata_from_wire(payload: dict[str, Any] | None):
-    """将 Pipe 中的 Mooncake 元数据恢复成 connector 使用的对象。"""
-    from infinilm.kv_connector.mooncake.mooncake_connector import (
-        MooncakeConnectorMetadata,
-        PullReqMeta,
-    )
-
-    if payload is None:
-        return None
-    metadata = MooncakeConnectorMetadata()
-    for engine_id, requests in payload.get("reqs_to_recv", {}).items():
-        for request_id, raw in requests.items():
-            metadata.reqs_to_recv[engine_id][request_id] = PullReqMeta(
-                d_req_id=raw["d_req_id"],
-                transfer_id=raw["transfer_id"],
-                local_block_ids=list(raw["local_block_ids"]),
-                remote_engine_id=raw["remote_engine_id"],
-                remote_bootstrap_addr=raw["remote_bootstrap_addr"],
-            )
-    metadata.reqs_to_send = {
-        request_id: (raw[0], list(raw[1]))
-        for request_id, raw in payload.get("reqs_to_send", {}).items()
-    }
-    metadata.reqs_not_processed = set(payload.get("reqs_not_processed", []))
-    return metadata
-
-
-def _request_to_wire(request: "InferenceRequest") -> dict[str, Any]:
-    """提取 ModelRunner 执行一个请求所需的最小状态。
-
-    ``InferenceRequest`` 由 scheduler 管理，不能直接跨进程传递。这里保留
-    prompt、已生成 token、paged KV cache 的 block table/slot mapping、采样
-    参数和 KV transfer 参数；请求对象中的锁、future、回调等运行时状态全部
-    留在 scheduler 进程。
-
-    当前进程模式只支持纯文本请求。多模态输入通常包含不可直接 pickle 的
-    tensor 或处理器状态，暂时由旧的单进程路径处理。
-    """
-    if request.has_multimodal_inputs:
-        raise NotImplementedError(
-            "INFINILM_MODEL_RUNNER_PROCESS currently supports text requests only"
-        )
-    if request.processed_inputs is not None:
-        raise NotImplementedError(
-            "INFINILM_MODEL_RUNNER_PROCESS does not transfer processed multimodal inputs"
-        )
-    return {
-        "request_id": request.request_id,
-        "prompt_token_ids": list(request.prompt_token_ids),
-        "generated_token_ids": list(request.generated_token_ids),
-        "block_table": list(request.block_table),
-        "slot_mapping": list(request.slot_mapping),
-        "num_local_cached_tokens": request.num_local_cached_tokens,
-        "num_computed_tokens": request.num_computed_tokens,
-        "num_blocks": request.num_blocks,
-        "kv_transfer_params": request.kv_transfer_params,
-        "sampling_params": _sampling_to_dict(request.sampling_params),
-        "is_multimodal": False,
-    }
-
-
-class _WireRequest:
-    """子进程中供 processor、ModelRunner 和 connector 使用的轻量请求视图。
-
-    这不是 ``InferenceRequest`` 的完整替代品，只实现当前 forward 和 KV
-    connector 访问到的字段及方法。这样可以避免把 scheduler 的请求对象、
-    asyncio 状态和线程相关对象带入子进程。
-    """
-
-    def __init__(self, payload: dict[str, Any]):
-        self.request_id = payload["request_id"]
-        self.prompt_token_ids = tuple(payload["prompt_token_ids"])
-        self.generated_token_ids = list(payload["generated_token_ids"])
-        self.block_table = list(payload["block_table"])
-        self.slot_mapping = list(payload["slot_mapping"])
-        self.num_local_cached_tokens = payload["num_local_cached_tokens"]
-        self.num_computed_tokens = payload["num_computed_tokens"]
-        self.num_blocks = payload["num_blocks"]
-        self.kv_transfer_params = payload["kv_transfer_params"]
-        self.sampling_params = SamplingParams(**payload["sampling_params"])
-        self.has_multimodal_inputs = payload.get("is_multimodal", False)
-        self.processed_inputs = None
-        self.timing_steps = []
-        self.timing_mode = "full"
-        self.mamba_cache_index = None
-
-    def get_prompt_length(self) -> int:
-        return len(self.prompt_token_ids)
-
-    def get_input_tokens(self):
-        return self.prompt_token_ids
-
-    def get_total_length(self) -> int:
-        return len(self.prompt_token_ids) + len(self.generated_token_ids)
-
-
-def _batch_to_wire(scheduler_output: "SchedulerOutput") -> dict[str, Any]:
-    """将一次 scheduler 调度结果编码成跨进程 batch 消息。
-
-    消息中的 ``is_prefill`` 决定 ModelRunner 执行 prefill 还是 decode；
-    ``requests`` 保存轻量请求状态；``kv_connector_metadata`` 保存 P/D
-    transfer 所需的发送/接收计划。
-    """
-    return {
-        "is_prefill": scheduler_output.is_prefill,
-        "requests": [_request_to_wire(req) for req in scheduler_output.scheduled_requests],
-        "kv_connector_metadata": _metadata_to_wire(
-            scheduler_output.kv_connector_metadata
-        ),
-    }
-
-
-def _response_to_wire(output: "ModelRunnerOutput") -> dict[str, Any]:
-    """将 ModelRunner 输出编码成 scheduler 可以消费的普通数据。
-
-    除采样 token 外，还要返回 KV connector 的完成集合，否则 scheduler 无法
-    更新 P/D 请求状态。forward timing 也必须跨进程带回，才能继续写入请求
-    timing 日志并分析 scheduler、forward 和 KV transfer 的时间关系。
-    """
-    connector = output.kv_connector_output
-    timing = output.forward_timing
-    return {
-        "req_ids": list(output.req_ids),
-        "sampled_token_ids": output.sampled_token_ids,
-        "kv_connector_output": None
-        if connector is None
-        else {
-            "finished_sending": list(connector.finished_sending or []),
-            "finished_recving": list(connector.finished_recving or []),
-            "failed_recving": list(connector.failed_recving or []),
-            "invalid_block_ids": list(connector.invalid_block_ids),
-            "kv_connector_stats": connector.kv_connector_stats,
-        },
-        "forward_timing": None
-        if timing is None
-        else {
-            "started_at_ns": timing.engine_forward_started_at_ns,
-            "completed_at_ns": timing.engine_forward_completed_at_ns,
-            "forward_batch_id": timing.forward_batch_id,
-            "source": timing.source,
-        },
-    }
-
-
-def _response_from_wire(payload: dict[str, Any]) -> ModelRunnerOutput:
-    """恢复 scheduler 侧的 ModelRunnerOutput、KV 输出和 forward timing。"""
-    from infinilm.llm.model_runner.model_runner import (
-        KVConnectorOutput,
-        ModelForwardTiming,
-        ModelRunnerOutput,
-    )
-
-    raw_connector = payload.get("kv_connector_output")
-    connector = None
-    if raw_connector is not None:
-        connector = KVConnectorOutput(
-            finished_sending=set(raw_connector["finished_sending"]),
-            finished_recving=set(raw_connector["finished_recving"]),
-            failed_recving=set(raw_connector["failed_recving"]),
-            invalid_block_ids=set(raw_connector["invalid_block_ids"]),
-            kv_connector_stats=raw_connector["kv_connector_stats"],
-        )
-    raw_timing = payload.get("forward_timing")
-    timing = None
-    if raw_timing is not None:
-        timing = ModelForwardTiming(
-            engine_forward_started_at_ns=raw_timing["started_at_ns"],
-            engine_forward_completed_at_ns=raw_timing["completed_at_ns"],
-            forward_batch_id=raw_timing["forward_batch_id"],
-            source=raw_timing["source"],
-        )
-    return ModelRunnerOutput(
-        req_ids=list(payload["req_ids"]),
-        sampled_token_ids=payload["sampled_token_ids"],
-        kv_connector_output=connector,
-        forward_timing=timing,
-    )
-
-
-def _worker_main(conn: Connection, config: EngineConfig) -> None:
+def _worker_main(
+    conn: Connection,
+    config: EngineConfig,
+    ipc_mode: str = "pipe",
+    request_name: str | None = None,
+    response_name: str | None = None,
+    request_address: str | None = None,
+    response_address: str | None = None,
+    slot_bytes: int = 0,
+) -> None:
     """ModelRunner 子进程入口。
 
     子进程启动后只初始化一次模型和 worker-side connector，然后循环处理
@@ -277,7 +83,23 @@ def _worker_main(conn: Connection, config: EngineConfig) -> None:
     from infinilm.llm.model_runner import create_model_runner
     from infinilm.llm.scheduler import SchedulerOutput
 
+    channel: PipeChannel | VLLMMessageQueueChannel | None = None
+    request_slot = 0
+    command: dict[str, Any] = {}
+    ready_sent = False
+    request_cache: dict[str, WireRequest] = {}
     try:
+        if ipc_mode == "vllm_message_queue":
+            channel = VLLMMessageQueueChannel.attach_worker(
+                request_name,
+                response_name,
+                request_address,
+                response_address,
+                slot_bytes,
+            )
+        else:
+            channel = PipeChannel(conn)
+
         # worker 本身就是计算进程，必须在其中创建真实 ModelRunner，而不是
         # 再通过工厂创建另一个 ModelRunnerProcessClient。
         previous_process_mode = os.environ.get("INFINILM_MODEL_RUNNER_PROCESS")
@@ -300,14 +122,22 @@ def _worker_main(conn: Connection, config: EngineConfig) -> None:
                 "eos_token_ids": runner.eos_token_id,
             }
         )
+        ready_sent = True
 
         while True:
-            command = conn.recv()
+            request_slot, command = channel.recv_request()
+            worker_received_at_ns = time.monotonic_ns()
             if command["op"] == "close":
                 # 正常关闭时让 runner 释放模型、KV cache 和 connector 资源。
                 runner.close()
-                conn.send({"ok": True})
+                request_cache.clear()
+                channel.send_response(request_slot, {"ok": True})
                 return
+
+            if command["op"] == "release":
+                for request_id in command["request_ids"]:
+                    request_cache.pop(request_id, None)
+                continue
 
             if command["op"] != "execute":
                 raise RuntimeError(f"unknown ModelRunner command: {command['op']}")
@@ -315,28 +145,73 @@ def _worker_main(conn: Connection, config: EngineConfig) -> None:
             # execute 消息只包含普通 Python 数据；GPU tensor 在子进程内由
             # ModelRunner 根据这些 token/block 信息重新构造。
             batch = command["batch"]
-            requests = [_WireRequest(item) for item in batch["requests"]]
+            request_rebuild_started_at_ns = time.monotonic_ns()
+            requests = requests_from_wire(batch, request_cache)
+            request_rebuild_completed_at_ns = time.monotonic_ns()
             scheduler_output = SchedulerOutput(
                 scheduled_requests=requests,
                 is_prefill=batch["is_prefill"],
             )
-            scheduler_output.kv_connector_metadata = _metadata_from_wire(
+            metadata_started_at_ns = time.monotonic_ns()
+            scheduler_output.kv_connector_metadata = metadata_from_wire(
                 batch["kv_connector_metadata"]
             )
+            metadata_completed_at_ns = time.monotonic_ns()
+            runner_execute_started_at_ns = time.monotonic_ns()
             output = runner.execute_model(scheduler_output)
-            conn.send(
+            runner_execute_completed_at_ns = time.monotonic_ns()
+            response_wire_started_at_ns = time.monotonic_ns()
+            response_payload = response_to_wire(output)
+            response_wire_completed_at_ns = time.monotonic_ns()
+            response_send_started_at_ns = time.monotonic_ns()
+            channel.send_response(
+                request_slot,
                 {
                     "ok": True,
                     "batch_id": command.get("batch_id"),
-                    "output": _response_to_wire(output),
-                }
+                    "output": response_payload,
+                    "ipc_timing": {
+                        "worker_received_at_ns": worker_received_at_ns,
+                        "request_rebuild_ns": (
+                            request_rebuild_completed_at_ns
+                            - request_rebuild_started_at_ns
+                        ),
+                        "metadata_from_wire_ns": (
+                            metadata_completed_at_ns - metadata_started_at_ns
+                        ),
+                        "worker_recv_to_execute_start_ns": (
+                            runner_execute_started_at_ns - worker_received_at_ns
+                        ),
+                        "runner_execute_ns": (
+                            runner_execute_completed_at_ns
+                            - runner_execute_started_at_ns
+                        ),
+                        "response_wire_ns": (
+                            response_wire_completed_at_ns - response_wire_started_at_ns
+                        ),
+                        "response_send_started_at_ns": response_send_started_at_ns,
+                    },
+                },
             )
     except BaseException as exc:
         try:
-            conn.send({"ok": False, "error": repr(exc)})
+            if ready_sent:
+                channel.send_response(
+                    request_slot,
+                    {
+                        "ok": False,
+                        "batch_id": command.get("batch_id"),
+                        "error": repr(exc),
+                    },
+                )
+            else:
+                conn.send({"ok": False, "error": repr(exc)})
         except (BrokenPipeError, EOFError, OSError):
             pass
         raise
+    finally:
+        if channel is not None:
+            channel.close()
 
 
 class ModelRunnerProcessClient:
@@ -351,6 +226,10 @@ class ModelRunnerProcessClient:
     supports_non_block = True
     startup_timeout_s = 300.0
     close_timeout_s = 10.0
+
+    def _record_ipc_timing(self, name: str, duration_ns: int | None) -> None:
+        if duration_ns is not None:
+            self._ipc_timing_samples.setdefault(name, []).append(duration_ns)
 
     def __init__(self, config: "EngineConfig", hf_config: dict[str, Any]):
         """创建 Pipe、启动子进程，并等待子进程完成初始化。
@@ -376,43 +255,71 @@ class ModelRunnerProcessClient:
         # Pipe() 返回两个连接对象，构成一条双向管道：
         # self._parent_conn：留给父进程用，之后通过 send() / recv() 与子进程通信。
         self._parent_conn, child_conn = self._ctx.Pipe()
-
-        # 创建子进程对象
-        self._process = self._ctx.Process(
-            target=_worker_main, # 子进程启动后执行的函数
-            args=(child_conn, config),
-            name="InfiniLMModelRunner",
-            daemon=True, # 守护进程：主进程退出时，该子进程会被自动终止，不会留下孤儿进程。
-        )
-        self._process.start()
-
-        # 初始化阶段采用同步握手：没有 ready 消息就不能继续创建 scheduler，
-        # 否则后续 block 数和 EOS token 配置可能与子进程不一致。
-        startup_deadline = time.monotonic() + self.startup_timeout_s
-        while not self._parent_conn.poll(0.1):
-            if not self._process.is_alive():
-                self._process.join(timeout=5)
-                raise RuntimeError(
-                    "ModelRunner process exited during startup: "
-                    f"exitcode={self._process.exitcode}"
-                )
-            if time.monotonic() >= startup_deadline:
-                self._process.terminate()
-                self._process.join(timeout=5)
-                raise TimeoutError(
-                    "timed out waiting for ModelRunner process startup"
-                )
-        ready = self._parent_conn.recv()
-        if not ready.get("ok"):
-            self.close()
-            raise RuntimeError(f"ModelRunner process failed: {ready.get('error')}")
-
-        config.effective_num_blocks = int(ready["effective_num_blocks"])
-        self._eos_token_ids = ready.get("eos_token_ids") or []
-
         self._pending_futures: Deque[ModelRunnerFuture] = deque()
         self._next_batch_id = 0
         self._closed = False
+        self._ipc_mode = model_runner_ipc_mode()
+        self._request_cache_enabled = model_runner_request_cache_enabled()
+        self._worker_request_state: dict[str, int] = {}
+        self._ipc_timing_samples: dict[str, list[int]] = {}
+        self._ipc_timing_batches = 0
+        self._ipc_timing_requests = 0
+        self._ipc_timing_full_requests = 0
+        self._ipc_timing_diff_requests = 0
+
+        process_args: tuple[Any, ...] = (child_conn, config)
+        if self._ipc_mode == "vllm_message_queue":
+            self._channel = VLLMMessageQueueChannel.create_parent()
+            process_args = (
+                child_conn,
+                config,
+                self._ipc_mode,
+                self._channel.request_ring.shm.name,
+                self._channel.response_ring.shm.name,
+                self._channel.request_address,
+                self._channel.response_address,
+                self._channel.slot_bytes,
+            )
+        else:
+            self._channel = PipeChannel(self._parent_conn)
+
+        # 创建子进程对象
+        self._process = self._ctx.Process(
+            target=_worker_main,  # 子进程启动后执行的函数
+            args=process_args,
+            name="InfiniLMModelRunner",
+            daemon=True,  # 守护进程：主进程退出时，该子进程会被自动终止，不会留下孤儿进程。
+        )
+        try:
+            self._process.start()
+
+            # 初始化阶段采用同步握手：没有 ready 消息就不能继续创建
+            # scheduler，否则后续 block 数和 EOS token 配置可能与子进程不一致。
+            startup_deadline = time.monotonic() + self.startup_timeout_s
+            while not self._parent_conn.poll(0.1):
+                if not self._process.is_alive():
+                    self._process.join(timeout=5)
+                    raise RuntimeError(
+                        "ModelRunner process exited during startup: "
+                        f"exitcode={self._process.exitcode}"
+                    )
+                if time.monotonic() >= startup_deadline:
+                    self._process.terminate()
+                    self._process.join(timeout=5)
+                    raise TimeoutError(
+                        "timed out waiting for ModelRunner process startup"
+                    )
+            ready = self._parent_conn.recv()
+            if not ready.get("ok"):
+                raise RuntimeError(f"ModelRunner process failed: {ready.get('error')}")
+        except BaseException:
+            # start/handshake 任一阶段失败都可能已经创建子进程、shared memory
+            # 或 ZMQ IPC 文件；统一走 close() 清理后再抛出原始异常。
+            self.close()
+            raise
+
+        config.effective_num_blocks = int(ready["effective_num_blocks"])
+        self._eos_token_ids = ready.get("eos_token_ids") or []
 
     @property
     def eos_token_id(self):
@@ -435,8 +342,10 @@ class ModelRunnerProcessClient:
                             "timed out waiting for ModelRunner response"
                         )
                     poll_timeout = min(0.1, remaining)
-                if self._parent_conn.poll(poll_timeout):
-                    response = self._parent_conn.recv()
+                if self._channel.poll(poll_timeout):
+                    receive_started_at_ns = time.monotonic_ns()
+                    response = self._channel.recv()
+                    response_received_at_ns = time.monotonic_ns()
                     break
                 if not self._process.is_alive():
                     raise RuntimeError(
@@ -452,7 +361,52 @@ class ModelRunnerProcessClient:
                     "ModelRunner response batch id mismatch: "
                     f"expected={future.batch_id}, got={response.get('batch_id')}"
                 )
-            output = _response_from_wire(response["output"])
+            output = response_from_wire(response["output"])
+            worker_timing = response.get("ipc_timing", {})
+            parent_timing = future.parent_ipc_timing
+            self._ipc_timing_batches += 1
+            self._ipc_timing_requests += len(future.scheduler_output.scheduled_requests)
+            cache_stats = future.request_cache_stats
+            self._ipc_timing_full_requests += cache_stats.get("full", 0)
+            self._ipc_timing_diff_requests += cache_stats.get("diff", 0)
+            self._record_ipc_timing(
+                "parent_wire", parent_timing.get("wire_duration_ns")
+            )
+            self._record_ipc_timing(
+                "parent_send", parent_timing.get("send_duration_ns")
+            )
+            self._record_ipc_timing(
+                "send_start_to_worker_recv",
+                (
+                    worker_timing.get("worker_received_at_ns")
+                    - parent_timing.get("send_started_at_ns")
+                    if worker_timing.get("worker_received_at_ns") is not None
+                    and parent_timing.get("send_started_at_ns") is not None
+                    else None
+                ),
+            )
+            for name in (
+                "request_rebuild",
+                "metadata_from_wire",
+                "worker_recv_to_execute_start",
+                "runner_execute",
+                "response_wire",
+            ):
+                self._record_ipc_timing(name, worker_timing.get(f"{name}_ns"))
+            self._record_ipc_timing(
+                "parent_response_decode",
+                response_received_at_ns - receive_started_at_ns,
+            )
+            if worker_timing.get("response_send_started_at_ns") is not None:
+                self._record_ipc_timing(
+                    "response_send_start_to_parent_recv",
+                    response_received_at_ns
+                    - worker_timing["response_send_started_at_ns"],
+                )
+            self._record_ipc_timing(
+                "submit_to_response_decoded",
+                response_received_at_ns - future.submit_started_at_ns,
+            )
             _update_forward_timing(future.scheduler_output, output)
             self._pending_futures.popleft()
             future.set_result(output)
@@ -485,15 +439,42 @@ class ModelRunnerProcessClient:
         batch_id = self._next_batch_id
         self._next_batch_id += 1
         future = ModelRunnerFuture(self, scheduler_output, batch_id)
-        self._parent_conn.send(
+        wire_started_at_ns = time.monotonic_ns()
+        batch = batch_to_wire(
+            scheduler_output,
+            self._worker_request_state if self._request_cache_enabled else None,
+        )
+        wire_completed_at_ns = time.monotonic_ns()
+        send_started_at_ns = time.monotonic_ns()
+        self._channel.send(
             {
                 "op": "execute",
                 "batch_id": batch_id,
-                "batch": _batch_to_wire(scheduler_output),
+                "batch": batch,
+                "ipc_timing": {
+                    "wire_started_at_ns": wire_started_at_ns,
+                    "wire_completed_at_ns": wire_completed_at_ns,
+                    "send_started_at_ns": send_started_at_ns,
+                },
             }
         )
+        future.submit_started_at_ns = wire_started_at_ns
+        future.parent_ipc_timing = {
+            "wire_duration_ns": wire_completed_at_ns - wire_started_at_ns,
+            "send_started_at_ns": send_started_at_ns,
+            "send_duration_ns": time.monotonic_ns() - send_started_at_ns,
+        }
+        future.request_cache_stats = batch["request_cache"]
         self._pending_futures.append(future)
         return future if non_block else future.result()
+
+    def release_requests(self, request_ids: list[str]) -> None:
+        """释放已经结束的请求在父/子进程中的增量同步状态。"""
+        if self._closed or not request_ids:
+            return
+        for request_id in request_ids:
+            self._worker_request_state.pop(request_id, None)
+        self._channel.send({"op": "release", "request_ids": list(request_ids)})
 
     def close(self) -> None:
         """优雅关闭子进程，超时后再强制终止。
@@ -515,22 +496,50 @@ class ModelRunnerProcessClient:
             pass
         if self._process.is_alive():
             try:
-                self._parent_conn.send({"op": "close"})
+                self._channel.send({"op": "close"})
                 close_deadline = time.monotonic() + self.close_timeout_s
-                while not self._parent_conn.poll(0.1):
+                while not self._channel.poll(0.1):
                     if not self._process.is_alive():
                         break
                     if time.monotonic() >= close_deadline:
                         break
-                if self._parent_conn.poll(0):
-                    self._parent_conn.recv()
+                if self._channel.poll(0):
+                    self._channel.recv()
             except (BrokenPipeError, EOFError, OSError):
                 pass
             self._process.join(timeout=self.close_timeout_s)
         if self._process.is_alive():
             self._process.terminate()
             self._process.join(timeout=5)
+        if self._ipc_timing_batches:
+            logger.info(
+                "ModelRunner IPC timing summary: %s",
+                self.get_ipc_timing_stats(),
+            )
+        self._channel.close()
         self._closed = True
+
+    def get_ipc_timing_stats(self) -> dict[str, Any]:
+        """返回进程通信路径的聚合耗时，单位毫秒。"""
+        result: dict[str, Any] = {
+            "batches": self._ipc_timing_batches,
+            "requests": self._ipc_timing_requests,
+            "full_requests": self._ipc_timing_full_requests,
+            "diff_requests": self._ipc_timing_diff_requests,
+        }
+        for name, values in self._ipc_timing_samples.items():
+            if not values:
+                continue
+            ordered = sorted(values)
+            result[name] = {
+                "count": len(values),
+                "mean_ms": statistics.mean(values) / 1_000_000,
+                "median_ms": statistics.median(values) / 1_000_000,
+                "p95_ms": ordered[min(len(ordered) - 1, int((len(ordered) - 1) * 0.95))]
+                / 1_000_000,
+                "max_ms": ordered[-1] / 1_000_000,
+            }
+        return result
 
 
 def _update_forward_timing(scheduler_output, output: "ModelRunnerOutput") -> None:
@@ -547,6 +556,21 @@ def _update_forward_timing(scheduler_output, output: "ModelRunnerOutput") -> Non
                 output.forward_timing.engine_forward_completed_at_ns
             )
             timing.forward_batch_id = output.forward_timing.forward_batch_id
+            continue
+
+        if getattr(request, "timing_mode", "full") != "summary":
+            continue
+
+        if scheduler_output.is_prefill:
+            request.record_summary_prefill_forward(
+                output.forward_timing.engine_forward_started_at_ns,
+                output.forward_timing.engine_forward_completed_at_ns,
+            )
+        else:
+            request.record_summary_decode_forward(
+                output.forward_timing.engine_forward_started_at_ns,
+                output.forward_timing.engine_forward_completed_at_ns,
+            )
 
 
 class ModelRunnerFuture(Future):
@@ -559,6 +583,9 @@ class ModelRunnerFuture(Future):
         self.client = client
         self.scheduler_output = scheduler_output
         self.batch_id = batch_id
+        self.submit_started_at_ns = 0
+        self.parent_ipc_timing: dict[str, int] = {}
+        self.request_cache_stats: dict[str, int] = {}
 
     def result(self, timeout=None):
         deadline = None if timeout is None else time.monotonic() + timeout

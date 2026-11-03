@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import os
 from contextlib import contextmanager
-from time import monotonic_ns
+from time import monotonic_ns, sleep
 from typing import Any, Generator, Mapping
 
 import infinicore
@@ -25,6 +25,10 @@ from infinilm.llm.model_runner.model_runner import (
 from infinilm.processors import AutoInfinilmProcessor
 
 logger = logging.getLogger(__name__)
+
+# Communication-test mode has no real engine forward. Keep a fixed batch-level
+# delay so forward timing is non-zero and the engine step loop cannot busy-spin.
+COMMUNICATION_TEST_FORWARD_DELAY_SECONDS = 0.003
 
 
 def _required_positive_int(config: Mapping[str, Any], name: str) -> int:
@@ -321,7 +325,8 @@ class CommunicationModelRunner:
         )
 
     def _model_forward(self, scheduler_output) -> list[int]:
-        """返回固定 token id，只驱动 scheduler 和 KV 传输流程。"""
+        """返回固定 token id，并用固定延迟模拟一次 batch 级假 forward。"""
+        sleep(COMMUNICATION_TEST_FORWARD_DELAY_SECONDS)
         return [self._communication_test_token_id] * scheduler_output.num_requests
 
     @contextmanager
