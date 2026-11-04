@@ -26,6 +26,7 @@ from infinilm.config.kv_transfer import KVTransferConfig
 from infinilm.infer_engine import model_uses_mamba_cache, read_hf_config
 from infinilm.kv_connector import KVConnectorFactory, KVConnectorRole
 from infinilm.llm.model_runner import create_model_runner
+from infinilm.llm.model_runner.model_runner import ModelRunnerOutput
 from infinilm.llm.output_timing import OutputTimingConfig, OutputTokenTiming
 from infinilm.llm.request import (
     FinishReason,
@@ -310,6 +311,9 @@ class LLMEngine:
             and not scheduler_output.scheduled_requests
             and getattr(self.model_runner, "supports_connector_control", False)
         ):
+            metadata = scheduler_output.kv_connector_metadata
+            if not self.model_runner.should_poll_connector(metadata):
+                return ModelRunnerOutput()
             return self.model_runner.execute_connector_control(scheduler_output)
         return self.model_runner.execute_model(
             scheduler_output,

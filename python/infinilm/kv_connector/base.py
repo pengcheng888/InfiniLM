@@ -226,6 +226,10 @@ class KVConnectorBase(ABC):
         """
         pass
 
+    def set_completion_callback(self, callback) -> None:
+        """注册传输完成通知回调；默认 connector 无异步 completion。"""
+
+
     @abstractmethod
     def start_load_kv(self, **kwargs: Any) -> None:
         """

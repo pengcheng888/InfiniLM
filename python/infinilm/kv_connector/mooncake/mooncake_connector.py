@@ -157,6 +157,10 @@ class MooncakeConnector(KVConnectorBase):
         assert self.connector_worker is not None
         self.connector_worker.register_kv_caches(kv_caches)
 
+    def set_completion_callback(self, callback) -> None:
+        assert self.connector_worker is not None
+        self.connector_worker.set_completion_callback(callback)
+
     def start_load_kv(
         self,
         **kwargs,

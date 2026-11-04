@@ -1,5 +1,7 @@
 from collections import deque
 from concurrent.futures import TimeoutError as FutureTimeoutError
+import threading
+import time
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -24,6 +26,8 @@ from infinilm.llm.model_runner.model_runner_process import (
     ModelRunnerFuture,
     ModelRunnerProcessClient,
     _update_forward_timing,
+    model_runner_connector_completion_event_enabled,
+    model_runner_connector_poll_interval_s,
     model_runner_process_enabled,
 )
 from infinilm.llm.model_runner.model_runner_wire import (
@@ -207,9 +211,7 @@ def test_single_process_connector_control_accepts_empty_metadata_step():
 
     runner.kv_connector.bind_connector_metadata.assert_not_called()
     runner.kv_connector.start_load_kv.assert_not_called()
-    runner.kv_connector.get_finished.assert_called_once_with(
-        "finished_req_ids"
-    )
+    runner.kv_connector.get_finished.assert_called_once_with("finished_req_ids")
     assert output.req_ids == []
     assert output.sampled_token_ids == []
     assert output.kv_connector_output.is_empty()
@@ -260,6 +262,163 @@ def test_process_mode_accepts_boolean_environment_values(monkeypatch):
     assert model_runner_process_enabled()
     monkeypatch.setenv("INFINILM_MODEL_RUNNER_PROCESS", "0")
     assert not model_runner_process_enabled()
+
+
+def _connector_poll_client(interval_s=1.0, next_poll_at=None):
+    client = object.__new__(ModelRunnerProcessClient)
+    client._connector_completion_event = threading.Event()
+    client._connector_completion_lock = threading.Lock()
+    client._connector_completion_generation = 0
+    client._connector_consumed_generation = 0
+    client._connector_completion_event_enabled = True
+    client._last_connector_poll_reason = "skip"
+    client._connector_poll_interval_s = interval_s
+    client._next_connector_fallback_poll_at = (
+        next_poll_at if next_poll_at is not None else time.monotonic() + interval_s
+    )
+    client._connector_completion_notifications = 0
+    client._connector_completion_coalesced = 0
+    client._connector_completion_last_lag_ms = 0.0
+    client._connector_completion_max_lag_ms = 0.0
+    client._connector_metadata_triggered_polls = 0
+    client._connector_event_triggered_polls = 0
+    client._connector_timer_triggered_polls = 0
+    client._connector_skipped_empty_polls = 0
+    client._connector_completion_channel_closed = False
+    return client
+
+
+def test_connector_poll_interval_environment(monkeypatch):
+    monkeypatch.setenv("INFINILM_MODEL_RUNNER_CONNECTOR_POLL_INTERVAL_MS", "50")
+    assert model_runner_connector_poll_interval_s() == 0.05
+
+
+def test_connector_completion_event_environment(monkeypatch):
+    monkeypatch.delenv(
+        "INFINILM_MODEL_RUNNER_CONNECTOR_COMPLETION_EVENT", raising=False
+    )
+    assert not model_runner_connector_completion_event_enabled()
+
+    monkeypatch.setenv("INFINILM_MODEL_RUNNER_CONNECTOR_COMPLETION_EVENT", "1")
+    assert model_runner_connector_completion_event_enabled()
+
+
+def test_should_poll_connector_uses_skip_metadata_event_and_timer():
+    client = _connector_poll_client(interval_s=1.0)
+
+    assert not client.should_poll_connector(None)
+    assert client._connector_skipped_empty_polls == 1
+
+    assert client.should_poll_connector(object())
+    assert client._connector_metadata_triggered_polls == 1
+
+    with client._connector_completion_lock:
+        client._connector_completion_generation += 1
+        client._connector_completion_event.set()
+    assert client.should_poll_connector(None)
+    assert client._connector_event_triggered_polls == 1
+
+    client._note_connector_polled(1)
+    client._next_connector_fallback_poll_at = time.monotonic() - 0.001
+    assert client.should_poll_connector(None)
+    assert client._connector_timer_triggered_polls == 1
+
+
+def test_connector_generation_note_preserves_notification_during_control():
+    client = _connector_poll_client()
+
+    with client._connector_completion_lock:
+        client._connector_completion_generation = 1
+        client._connector_completion_event.set()
+
+    client._note_connector_polled(0)
+
+    assert client._connector_consumed_generation == 0
+    assert client.should_poll_connector(None)
+
+
+def test_connector_poll_reason_controls_fallback_deadline():
+    client = _connector_poll_client(interval_s=1.0)
+    old_deadline = client._next_connector_fallback_poll_at
+
+    client._note_connector_polled(0, update_fallback_deadline=False)
+    assert client._next_connector_fallback_poll_at == old_deadline
+
+    client._note_connector_polled(0, update_fallback_deadline=True)
+    assert client._next_connector_fallback_poll_at > old_deadline
+
+
+def test_execute_response_updates_fallback_deadline():
+    class ExecuteResponseConnection:
+        def __init__(self):
+            self._response = {
+                "ok": True,
+                "batch_id": 11,
+                "output": response_to_wire(ModelRunnerOutput()),
+                "ipc_timing": {"worker_received_at_ns": 101},
+            }
+
+        def poll(self, timeout):
+            return True
+
+        def recv(self):
+            return self._response
+
+    client = object.__new__(ModelRunnerProcessClient)
+    client._pending_futures = deque()
+    client._channel = ExecuteResponseConnection()
+    client._process = _FakeProcess(True)
+    client._connector_completion_event = threading.Event()
+    client._connector_completion_lock = threading.Lock()
+    client._connector_completion_generation = 0
+    client._connector_consumed_generation = 0
+    client._connector_completion_event_enabled = True
+    client._last_connector_poll_reason = "skip"
+    client._connector_poll_interval_s = 1.0
+    client._next_connector_fallback_poll_at = time.monotonic() - 1.0
+    client._connector_completion_notifications = 0
+    client._connector_completion_coalesced = 0
+    client._connector_completion_last_lag_ms = 0.0
+    client._connector_completion_max_lag_ms = 0.0
+    client._connector_metadata_triggered_polls = 0
+    client._connector_event_triggered_polls = 0
+    client._connector_timer_triggered_polls = 0
+    client._connector_skipped_empty_polls = 0
+    client._connector_completion_channel_closed = False
+    client._ipc_timing_samples = {}
+    client._ipc_timing_batches = 0
+    client._ipc_timing_execute_batches = 0
+    client._ipc_timing_connector_control_batches = 0
+    client._ipc_timing_connector_metadata_empty = 0
+    client._ipc_timing_connector_metadata_nonempty = 0
+    client._ipc_timing_connector_empty_output = 0
+    client._ipc_timing_connector_nonempty_output = 0
+    client._ipc_timing_connector_finished_sending = 0
+    client._ipc_timing_connector_finished_recving = 0
+    client._ipc_timing_connector_failed_recving = 0
+    client._ipc_timing_requests = 0
+    client._ipc_timing_full_requests = 0
+    client._ipc_timing_diff_requests = 0
+
+    scheduler_output = SimpleNamespace(scheduled_requests=[], is_prefill=False)
+    future = ModelRunnerFuture(client, scheduler_output, batch_id=11)
+    future.connector_poll_reason = "execute"
+    future.connector_observed_generation = 0
+    future.parent_ipc_timing = {
+        "wire_duration_ns": 10,
+        "send_started_at_ns": 100,
+        "send_duration_ns": 5,
+    }
+    future.request_cache_stats = {"full": 0, "diff": 0}
+    future.submit_started_at_ns = 90
+    client._pending_futures.append(future)
+    old_deadline = client._next_connector_fallback_poll_at
+
+    client._resolve_next()
+
+    assert future.result().sampled_token_ids == []
+    assert client._ipc_timing_execute_batches == 1
+    assert client._next_connector_fallback_poll_at > old_deadline
 
 
 def test_request_cache_mode_accepts_boolean_environment_values(monkeypatch):

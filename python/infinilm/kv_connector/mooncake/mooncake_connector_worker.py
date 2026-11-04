@@ -8,7 +8,7 @@ import logging
 import os
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import IntEnum
@@ -184,6 +184,7 @@ class MooncakeConnectorWorker:
         # 传输线程和调度线程都会访问 timing，使用独立小锁保护快照交换。
         self._kv_transfer_stats: dict[ReqId, dict] = {}
         self._kv_transfer_stats_lock = threading.Lock()
+        self._completion_callback: Callable[[dict], None] | None = None
         # 只在 P 进程内递增，配合 PID 生成全局唯一的 producer batch ID。
         self._kv_transfer_batch_sequence = 0
 
@@ -248,6 +249,27 @@ class MooncakeConnectorWorker:
     def _async_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         asyncio.set_event_loop(loop)
         loop.run_forever()
+
+    def set_completion_callback(self, callback: Callable[[dict], None]) -> None:
+        """注册 Mooncake completion 到 ModelRunner worker 的非阻塞回调。"""
+        self._completion_callback = callback
+
+    def _notify_completion(self) -> None:
+        """通知 ModelRunner worker 进程有 KV 传输完成事件待 drain。
+
+        该回调运行在 sender/receiver asyncio event loop 中，只允许做
+        ``queue.put_nowait`` 这类非阻塞操作。completion set 仍由原 event loop
+        拥有，真正的消费仍发生在 ``get_finished()`` 中。
+        """
+        callback = self._completion_callback
+        if callback is None:
+            return
+        try:
+            callback({"completed_at_ns": time.monotonic_ns()})
+        except Exception as exc:
+            # 通知失败不能影响 Mooncake 传输线程；父进程仍会通过兜底
+            # connector control 检查 completion。
+            logger.debug("Mooncake completion notification failed: %s", exc)
 
     def _record_transfer_stats(
         self,
@@ -612,6 +634,7 @@ class MooncakeConnectorWorker:
                     if send_meta.sent == send_meta.need_send:
                         del self.reqs_need_send[send_meta.transfer_id]
                         self.finished_sending_reqs.add(send_meta.p_req_id)
+                        self._notify_completion()
 
                 response = MooncakeXferResponse(
                     status=response_status,
@@ -1086,6 +1109,7 @@ class MooncakeConnectorWorker:
                         data_transfer_bypassed=self.mooncake_data_transfer_bypass,
                     )
                 self.finished_recving_reqs.update(finished_recving_reqs)
+                self._notify_completion()
 
         except zmq.ContextTerminated:
             logger.debug("ZMQ context terminated, exiting Mooncake receiver thread.")

@@ -15,7 +15,9 @@ from __future__ import annotations
 import logging
 import multiprocessing as mp
 import os
+import queue
 import statistics
+import threading
 import time
 from collections import deque
 from concurrent.futures import Future
@@ -62,6 +64,47 @@ def model_runner_process_enabled() -> bool:
     return value in {"1", "true", "yes", "on"}
 
 
+def model_runner_connector_poll_interval_s() -> float:
+    """读取 connector completion 兜底检查间隔，单位秒。"""
+    raw_value = os.environ.get(
+        "INFINILM_MODEL_RUNNER_CONNECTOR_POLL_INTERVAL_MS", "1000"
+    )
+    try:
+        interval_ms = int(raw_value)
+    except ValueError as exc:
+        raise RuntimeError(
+            "INFINILM_MODEL_RUNNER_CONNECTOR_POLL_INTERVAL_MS must be an integer: "
+            f"{raw_value!r}"
+        ) from exc
+    if not 1 <= interval_ms <= 600_000:
+        raise RuntimeError(
+            "INFINILM_MODEL_RUNNER_CONNECTOR_POLL_INTERVAL_MS must be between "
+            f"1 and 600000 ms, got {interval_ms}"
+        )
+    return interval_ms / 1_000
+
+
+def model_runner_connector_completion_event_enabled() -> bool:
+    """读取是否启用 connector completion event 驱动的跳过策略。"""
+    value = os.environ.get("INFINILM_MODEL_RUNNER_CONNECTOR_COMPLETION_EVENT", "0")
+    normalized = value.strip().lower()
+    if normalized not in {
+        "0",
+        "1",
+        "false",
+        "true",
+        "no",
+        "yes",
+        "off",
+        "on",
+    }:
+        raise RuntimeError(
+            "INFINILM_MODEL_RUNNER_CONNECTOR_COMPLETION_EVENT must be a boolean: "
+            f"{value!r}"
+        )
+    return normalized in {"1", "true", "yes", "on"}
+
+
 def _worker_main(
     conn: Connection,
     config: EngineConfig,
@@ -71,6 +114,7 @@ def _worker_main(
     request_address: str | None = None,
     response_address: str | None = None,
     slot_bytes: int = 0,
+    completion_conn: Connection | None = None,
 ) -> None:
     """ModelRunner 子进程入口。
 
@@ -91,6 +135,48 @@ def _worker_main(
     command: dict[str, Any] = {}
     ready_sent = False
     request_cache: dict[str, WireRequest] = {}
+    completion_queue: queue.Queue[dict | None] = queue.Queue()
+    completion_notifier: threading.Thread | None = None
+    completion_state_lock = threading.Lock()
+    completion_channel_failed = False
+
+    def queue_completion_notification(item: dict) -> None:
+        """把 Mooncake completion 放入 worker 本地通知队列。
+
+        Pipe 断开后 notifier 会将 ``completion_channel_failed`` 置位。之后
+        event loop callback 不再向无消费者的 queue 继续追加消息，避免内存
+        无限增长。
+        """
+        with completion_state_lock:
+            if completion_channel_failed:
+                return
+            completion_queue.put_nowait(item)
+
+    def disable_completion_notifications() -> None:
+        """标记 completion Pipe 不可用并丢弃尚未发送的通知。"""
+        nonlocal completion_channel_failed
+        with completion_state_lock:
+            completion_channel_failed = True
+        while True:
+            try:
+                completion_queue.get_nowait()
+            except queue.Empty:
+                break
+
+    def send_completion_notifications() -> None:
+        """单线程串行写 completion Pipe，避免 event loop 并发写 Connection。"""
+        while True:
+            item = completion_queue.get()
+            if item is None:
+                break
+            try:
+                completion_conn.send(item)
+            except (BrokenPipeError, EOFError, OSError) as exc:
+                logger.debug("ModelRunner completion channel closed: %s", exc)
+                disable_completion_notifications()
+                break
+        completion_conn.close()
+
     try:
         if ipc_mode == "vllm_message_queue":
             channel = VLLMMessageQueueChannel.attach_worker(
@@ -115,6 +201,17 @@ def _worker_main(
             else:
                 os.environ["INFINILM_MODEL_RUNNER_PROCESS"] = previous_process_mode
 
+        # Mooncake event loop 只向本地 queue 投递非阻塞通知；Pipe 写入由
+        # 单个 notifier 线程串行完成，避免和 response channel 混用。
+        if completion_conn is not None:
+            runner.set_connector_completion_callback(queue_completion_notification)
+            completion_notifier = threading.Thread(
+                target=send_completion_notifications,
+                name="InfiniLMConnectorCompletionNotifier",
+                daemon=True,
+            )
+            completion_notifier.start()
+
         # ready 消息用于把子进程计算出的有效 block 数和 EOS token id 同步
         # 回 scheduler 侧。主进程收到该消息后才会继续初始化 scheduler。
         # 通知父进程：子进程创建完毕了
@@ -134,6 +231,11 @@ def _worker_main(
                 # 正常关闭时让 runner 释放模型、KV cache 和 connector 资源。
                 runner.close()
                 request_cache.clear()
+                if completion_notifier is not None:
+                    completion_queue.put(None)
+                    completion_notifier.join(timeout=5)
+                elif completion_conn is not None:
+                    completion_conn.close()
                 channel.send_response(request_slot, {"ok": True})
                 return
 
@@ -261,6 +363,10 @@ def _worker_main(
     finally:
         if channel is not None:
             channel.close()
+        if completion_conn is not None and (
+            completion_notifier is None or completion_notifier.is_alive()
+        ):
+            completion_conn.close()
 
 
 class ModelRunnerProcessClient:
@@ -280,6 +386,106 @@ class ModelRunnerProcessClient:
     def _record_ipc_timing(self, name: str, duration_ns: int | None) -> None:
         if duration_ns is not None:
             self._ipc_timing_samples.setdefault(name, []).append(duration_ns)
+
+    def _read_connector_completions(self) -> None:
+        """读取 worker -> parent 的 completion notification。
+
+        reader thread 只更新本地 generation/Event，不直接调用
+        ``execute_connector_control()``，避免从后台线程修改 scheduler 状态。
+        """
+        while True:
+            try:
+                notification = self._completion_read_conn.recv()
+            except (EOFError, BrokenPipeError, OSError):
+                break
+
+            received_at_ns = time.monotonic_ns()
+            with self._connector_completion_lock:
+                if self._connector_completion_event.is_set():
+                    self._connector_completion_coalesced += 1
+                self._connector_completion_generation += 1
+                self._connector_completion_event.set()
+                self._connector_completion_notifications += 1
+                completed_at_ns = notification.get("completed_at_ns")
+                if isinstance(completed_at_ns, int):
+                    lag_ms = (received_at_ns - completed_at_ns) / 1_000_000
+                    self._connector_completion_last_lag_ms = lag_ms
+                    self._connector_completion_max_lag_ms = max(
+                        self._connector_completion_max_lag_ms,
+                        lag_ms,
+                    )
+        with self._connector_completion_lock:
+            self._connector_completion_channel_closed = True
+
+    def _current_connector_generation(self) -> int:
+        with self._connector_completion_lock:
+            return self._connector_completion_generation
+
+    def should_poll_connector(self, metadata) -> bool:
+        """判断 connector-only step 是否值得发起一次 IPC。
+
+        只有新的 connector metadata、未消费 completion generation 或兜底
+        deadline 到期时才执行 IPC。普通空调度直接由 engine 侧跳过。
+        """
+        if not self._connector_completion_event_enabled:
+            self._last_connector_poll_reason = "disabled"
+            return True
+
+        if metadata is not None:
+            with self._connector_completion_lock:
+                self._connector_metadata_triggered_polls += 1
+                self._last_connector_poll_reason = "metadata"
+            return True
+
+        with self._connector_completion_lock:
+            if (
+                self._connector_completion_generation
+                != self._connector_consumed_generation
+            ):
+                self._connector_event_triggered_polls += 1
+                self._last_connector_poll_reason = "event"
+                return True
+            if time.monotonic() >= self._next_connector_fallback_poll_at:
+                self._connector_timer_triggered_polls += 1
+                self._last_connector_poll_reason = "timer"
+                return True
+            self._connector_skipped_empty_polls += 1
+            self._last_connector_poll_reason = "skip"
+            return False
+
+    def _note_connector_polled(
+        self,
+        observed_generation: int,
+        *,
+        update_fallback_deadline: bool = False,
+    ) -> None:
+        """消费 response 前观察到的 completion generation。
+
+        普通 execute response 和 connector control response 都会 worker 侧
+        调用 ``get_finished()``。response 期间新到达的 generation 不会被消费，
+        会继续触发下一次 connector control。
+
+        ``update_fallback_deadline`` 只在两类 response 后置位：普通 execute
+        response，以及由 timer 触发的 connector control response。metadata/event
+        触发的 control 不重置兜底 deadline，避免把固定兜底周期改成“任意
+        control 后 interval”。
+        """
+        if getattr(self, "_connector_completion_lock", None) is None:
+            return
+        with self._connector_completion_lock:
+            self._connector_consumed_generation = max(
+                self._connector_consumed_generation,
+                observed_generation,
+            )
+            if (
+                self._connector_completion_generation
+                == self._connector_consumed_generation
+            ):
+                self._connector_completion_event.clear()
+            if update_fallback_deadline:
+                self._next_connector_fallback_poll_at = (
+                    time.monotonic() + self._connector_poll_interval_s
+                )
 
     def __init__(self, config: "EngineConfig", hf_config: dict[str, Any]):
         """创建 Pipe、启动子进程，并等待子进程完成初始化。
@@ -312,6 +518,35 @@ class ModelRunnerProcessClient:
         self._request_cache_enabled = model_runner_request_cache_enabled()
         self._worker_request_state: dict[str, int] = {}
         self._ipc_timing_samples: dict[str, list[int]] = {}
+        self._connector_completion_event = threading.Event()
+        self._connector_completion_lock = threading.Lock()
+        self._connector_completion_generation = 0
+        self._connector_consumed_generation = 0
+        self._connector_completion_event_enabled = (
+            model_runner_connector_completion_event_enabled()
+        )
+        self._last_connector_poll_reason = "skip"
+        self._connector_poll_interval_s = model_runner_connector_poll_interval_s()
+        self._next_connector_fallback_poll_at = (
+            time.monotonic() + self._connector_poll_interval_s
+        )
+        self._connector_completion_notifications = 0
+        self._connector_completion_coalesced = 0
+        self._connector_completion_last_lag_ms = 0.0
+        self._connector_completion_max_lag_ms = 0.0
+        self._connector_metadata_triggered_polls = 0
+        self._connector_event_triggered_polls = 0
+        self._connector_timer_triggered_polls = 0
+        self._connector_skipped_empty_polls = 0
+        self._connector_completion_channel_closed = False
+        if self._connector_completion_event_enabled:
+            self._completion_read_conn, self._completion_write_conn = self._ctx.Pipe(
+                duplex=False
+            )
+        else:
+            self._completion_read_conn = None
+            self._completion_write_conn = None
+        self._completion_reader: threading.Thread | None = None
         self._ipc_timing_batches = 0
         self._ipc_timing_execute_batches = 0
         self._ipc_timing_connector_control_batches = 0
@@ -346,11 +581,17 @@ class ModelRunnerProcessClient:
         self._process = self._ctx.Process(
             target=_worker_main,  # 子进程启动后执行的函数
             args=process_args,
+            kwargs={"completion_conn": self._completion_write_conn},
             name="InfiniLMModelRunner",
             daemon=True,  # 守护进程：主进程退出时，该子进程会被自动终止，不会留下孤儿进程。
         )
         try:
             self._process.start()
+            if self._completion_write_conn is not None:
+                # 父进程不发送 completion，只读取。spawn 成功后必须关闭本地
+                # 写端，否则 worker 退出时 read end 无法收到 EOF。
+                self._completion_write_conn.close()
+                self._completion_write_conn = None
 
             # 初始化阶段采用同步握手：没有 ready 消息就不能继续创建
             # scheduler，否则后续 block 数和 EOS token 配置可能与子进程不一致。
@@ -371,6 +612,13 @@ class ModelRunnerProcessClient:
             ready = self._parent_conn.recv()
             if not ready.get("ok"):
                 raise RuntimeError(f"ModelRunner process failed: {ready.get('error')}")
+            if self._connector_completion_event_enabled:
+                self._completion_reader = threading.Thread(
+                    target=self._read_connector_completions,
+                    name="InfiniLMConnectorCompletionReader",
+                    daemon=True,
+                )
+                self._completion_reader.start()
         except BaseException:
             # start/handshake 任一阶段失败都可能已经创建子进程、shared memory
             # 或 ZMQ IPC 文件；统一走 close() 清理后再抛出原始异常。
@@ -507,6 +755,15 @@ class ModelRunnerProcessClient:
                 response_received_at_ns - future.submit_started_at_ns,
             )
             _update_forward_timing(future.scheduler_output, output)
+            self._note_connector_polled(
+                future.connector_observed_generation,
+                # 普通 execute 会在 worker 侧调用 get_finished()，因此也视为
+                # 一次 completion 检查。connector control 中只有 timer 触发的
+                # control 才重置兜底 deadline。
+                update_fallback_deadline=(
+                    not is_connector_control or future.connector_poll_reason == "timer"
+                ),
+            )
             self._pending_futures.popleft()
             future.set_result(output)
         except FutureTimeoutError:
@@ -524,6 +781,33 @@ class ModelRunnerProcessClient:
                 pending.set_exception(exc)
         self._pending_futures.clear()
 
+    def _close_completion_channel(self) -> None:
+        """关闭 completion Pipe 并回收父进程 reader 线程。"""
+        if getattr(self, "_completion_write_conn", None) is not None:
+            try:
+                self._completion_write_conn.close()
+            except OSError:
+                pass
+            self._completion_write_conn = None
+
+        reader = getattr(self, "_completion_reader", None)
+        connection = getattr(self, "_completion_read_conn", None)
+        if reader is not None and reader.is_alive():
+            if connection is not None:
+                try:
+                    connection.close()
+                except OSError:
+                    pass
+            reader.join(timeout=5)
+        if connection is not None:
+            try:
+                connection.close()
+            except OSError:
+                pass
+        self._completion_read_conn = None
+        if not self._connector_completion_event_enabled:
+            self._connector_completion_channel_closed = True
+
     def execute_connector_control(self, scheduler_output):
         """同步执行一个 connector-only 控制步。
 
@@ -535,16 +819,18 @@ class ModelRunnerProcessClient:
 
         batch_id = self._next_batch_id
         self._next_batch_id += 1
-        wire_started_at_ns = time.monotonic_ns()
-        metadata = metadata_to_wire(scheduler_output.kv_connector_metadata)
-        wire_completed_at_ns = time.monotonic_ns()
-        send_started_at_ns = time.monotonic_ns()
         future = ModelRunnerFuture(
             self,
             scheduler_output,
             batch_id,
             command="connector_control",
         )
+        future.connector_observed_generation = self._current_connector_generation()
+        future.connector_poll_reason = self._last_connector_poll_reason
+        wire_started_at_ns = time.monotonic_ns()
+        metadata = metadata_to_wire(scheduler_output.kv_connector_metadata)
+        wire_completed_at_ns = time.monotonic_ns()
+        send_started_at_ns = time.monotonic_ns()
         future.connector_metadata_empty = metadata is None
         self._channel.send(
             {
@@ -582,6 +868,8 @@ class ModelRunnerProcessClient:
         batch_id = self._next_batch_id
         self._next_batch_id += 1
         future = ModelRunnerFuture(self, scheduler_output, batch_id)
+        future.connector_observed_generation = self._current_connector_generation()
+        future.connector_poll_reason = "execute"
         wire_started_at_ns = time.monotonic_ns()
         batch = batch_to_wire(
             scheduler_output,
@@ -654,6 +942,7 @@ class ModelRunnerProcessClient:
         if self._process.is_alive():
             self._process.terminate()
             self._process.join(timeout=5)
+        self._close_completion_channel()
         if self._ipc_timing_batches:
             logger.info(
                 "ModelRunner IPC timing summary: %s",
@@ -683,6 +972,26 @@ class ModelRunnerProcessClient:
             "connector_failed_recving_requests": (
                 self._ipc_timing_connector_failed_recving
             ),
+            "connector_completion_notifications": (
+                self._connector_completion_notifications
+            ),
+            "connector_completion_coalesced": (self._connector_completion_coalesced),
+            "connector_completion_last_lag_ms": (
+                self._connector_completion_last_lag_ms
+            ),
+            "connector_completion_max_lag_ms": (self._connector_completion_max_lag_ms),
+            "connector_completion_channel_closed": (
+                self._connector_completion_channel_closed
+            ),
+            "connector_completion_event_enabled": (
+                self._connector_completion_event_enabled
+            ),
+            "connector_metadata_triggered_polls": (
+                self._connector_metadata_triggered_polls
+            ),
+            "connector_event_triggered_polls": (self._connector_event_triggered_polls),
+            "connector_timer_triggered_polls": (self._connector_timer_triggered_polls),
+            "connector_skipped_empty_polls": (self._connector_skipped_empty_polls),
             "requests": self._ipc_timing_requests,
             "full_requests": self._ipc_timing_full_requests,
             "diff_requests": self._ipc_timing_diff_requests,
@@ -749,6 +1058,8 @@ class ModelRunnerFuture(Future):
         self.batch_id = batch_id
         self.command = command
         self.connector_metadata_empty = False
+        self.connector_observed_generation = 0
+        self.connector_poll_reason = "execute"
         self.submit_started_at_ns = 0
         self.parent_ipc_timing: dict[str, int] = {}
         self.request_cache_stats: dict[str, int] = {}

@@ -201,6 +201,14 @@ metadata_to_wire()       # 空 metadata 时为 None
 connector output 为空，response 使用 `None` 表示，避免完整空
 `ModelRunnerOutput` 序列化。
 
+进程模式还使用独立的 worker -> parent completion notification Pipe。
+Mooncake event loop 只向 worker 内部 queue 投递非阻塞通知，由单个
+notifier 线程串行写 Pipe。父进程 reader thread 使用 `Event + generation`
+合并通知；engine step 线程只在 metadata 非空、存在未消费 completion
+generation 或兜底 deadline 到期时发起 connector-only IPC。
+该跳过策略默认关闭；当前 TCP PD 单轮实测 connector IPC 次数明显下降，
+但端到端性能未提升，需要显式开启后继续评估。
+
 #### fixed array layout
 
 `INFINILM_MODEL_RUNNER_FIXED_ARRAY=1` 会把 decode diff 编码为平铺
@@ -365,6 +373,26 @@ pipe
 本地部署脚本 `run_server.sh` 当前默认设置为 `20000`；该脚本被当前
 `.gitignore` 排除，不随 Python 包代码发布。P/D 本地脚本没有默认开启，
 P/D 场景应先使用 `0` 验证，再单独评估 CPU 干扰。
+
+### connector completion 兜底检查
+
+| 环境变量 | 默认值 | 约束 | 说明 |
+|---|---:|---:|---|
+| `INFINILM_MODEL_RUNNER_CONNECTOR_COMPLETION_EVENT` | `0` | boolean | 是否启用 completion event 驱动的空调度跳过 |
+| `INFINILM_MODEL_RUNNER_CONNECTOR_POLL_INTERVAL_MS` | `1000` | `1~600000` | completion notification 丢失时的兜底 connector control 间隔，单位毫秒 |
+
+正常路径由 completion notification 触发，不等待该间隔。该兜底同时覆盖
+P 侧 send timeout scan 等只在 `get_finished()` 中暴露的状态。
+
+fallback deadline 只在两类 completion 检查后顺延：
+
+```text
+1. 普通 execute response；
+2. 由 timer 触发的 connector control response。
+```
+
+metadata 或 completion event 触发的 connector control 不重置该 deadline，避免
+兜底周期被高频事件无限推迟或提前。
 
 ### request cache
 

@@ -343,6 +343,15 @@ class ModelRunner:
             kv_connector_output=self._collect_kv_connector_output()
         )
 
+    def should_poll_connector(self, metadata) -> bool:
+        """单进程模式暂不做事件跳过，保持原有 connector 检查语义。"""
+        return True
+
+    def set_connector_completion_callback(self, callback) -> None:
+        """注册 worker 内部 connector completion 通知回调。"""
+        if self.kv_connector is not None:
+            self.kv_connector.set_completion_callback(callback)
+
     def _model_forward(self, scheduler_output):
         # Build model inputs
         model_input = self.processor.build_model_inputs(
