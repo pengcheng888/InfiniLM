@@ -95,6 +95,9 @@ def create_communication_test_kv_caches(
 
 class CommunicationModelRunner:
     supports_non_block = False
+    # 该轻量 runner 仍复用 execute_model() 的 no-forward 分支，不声明
+    # connector-control fast path 能力，避免调度侧做隐式 hasattr 探测。
+    supports_connector_control = False
 
     """不加载模型、只验证集群和 KV 传输链路的轻量通信 runner。"""
 
@@ -336,12 +339,12 @@ class CommunicationModelRunner:
     ) -> Generator[KVConnectorOutput, None, None]:
         """在假 forward 前后绑定 Mooncake metadata 并收集传输结果。"""
         output = KVConnectorOutput()
-        assert scheduler_output.kv_connector_metadata is not None
-
-        self.kv_connector.bind_connector_metadata(
-            scheduler_output.kv_connector_metadata
-        )
-        self.kv_connector.start_load_kv()
+        # 空 metadata 表示本步没有新的收发任务，但仍要查询已有异步传输结果。
+        if scheduler_output.kv_connector_metadata is not None:
+            self.kv_connector.bind_connector_metadata(
+                scheduler_output.kv_connector_metadata
+            )
+            self.kv_connector.start_load_kv()
         try:
             yield output
         finally:

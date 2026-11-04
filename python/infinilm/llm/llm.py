@@ -298,6 +298,24 @@ class LLMEngine:
         runner_output = future.result()
         return self._commit_model_step(scheduler_output, runner_output)
 
+    def _execute_synchronous_step(self, scheduler_output):
+        """同步执行 prefill 或 connector-only step。
+
+        connector-only step 没有 scheduled request，不需要构造 ModelRunner
+        batch；优先使用专用 ``execute_connector_control`` 轻量协议。
+        """
+        is_prefill = getattr(scheduler_output, "is_prefill", False)
+        if (
+            not is_prefill
+            and not scheduler_output.scheduled_requests
+            and getattr(self.model_runner, "supports_connector_control", False)
+        ):
+            return self.model_runner.execute_connector_control(scheduler_output)
+        return self.model_runner.execute_model(
+            scheduler_output,
+            non_block=False,
+        )
+
     def _release_completed_request_cache(self) -> None:
         """释放所有 terminal request 的进程侧增量同步状态。"""
         pop_completed = getattr(
@@ -379,10 +397,7 @@ class LLMEngine:
             # 固化成多个小 batch，也让后续请求在 forward 期间继续进入
             # waiting queue。connector-only output 同步执行则是为了避免 KV
             # 控制事件被异步 decode 队列延迟。
-            runner_output = self.model_runner.execute_model(
-                scheduler_output,
-                non_block=False,
-            )
+            runner_output = self._execute_synchronous_step(scheduler_output)
             # 将 sampled token、connector 输出、timing 和请求生命周期更新回
             # scheduler 侧；返回值中的 pending 交给 AsyncLLMEngine 发布。
             did_work, new_pending = self._commit_model_step(
@@ -432,10 +447,7 @@ class LLMEngine:
         if scheduler_output is None:
             return False, []
 
-        runner_output = self.model_runner.execute_model(
-            scheduler_output,
-            non_block=False,
-        )
+        runner_output = self._execute_synchronous_step(scheduler_output)
         return self._commit_model_step(scheduler_output, runner_output)
 
     def _commit_model_step(
@@ -1004,6 +1016,7 @@ class AsyncLLMEngine:
         self.config = config
 
         self._running = False
+        self._stopped = False
         self._step_thread: Optional[threading.Thread] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._healthy = True
@@ -1091,6 +1104,7 @@ class AsyncLLMEngine:
         if self._running:
             logger.warning("AsyncLLMEngine is already running")
             return
+        self._stopped = False
 
         self._loop = asyncio.get_running_loop()
         self._abort_queue = janus.Queue()
@@ -1121,21 +1135,35 @@ class AsyncLLMEngine:
         logger.info("AsyncLLMEngine started")
 
     def stop(self):
-        """Stop the background inference loop."""
-        if not self._running:
-            logger.warning("AsyncLLMEngine is not running")
+        """Stop the inference loop and release engine resources.
+
+        ``stop()`` 必须保持幂等，并且即使 step loop 已经因 worker 异常退出，
+        也要继续调用 ``LLMEngine.close()``。否则 Ctrl-C 打断 ModelRunner
+        worker 时，进程客户端没有机会 drain response，也不会输出 IPC summary。
+        """
+        if self._stopped:
             return
 
+        self._stopped = True
+        if not self._running:
+            logger.warning(
+                "AsyncLLMEngine step loop is not running; closing engine resources"
+            )
         self._running = False
-        if self._step_thread:
+        if self._step_thread and self._step_thread.is_alive():
             self._step_thread.join(timeout=5)
         if self._preprocess_executor is not None:
             self._preprocess_executor.shutdown(wait=True, cancel_futures=True)
             self._preprocess_executor = None
-        self._flush_pending_outputs_if_on_loop()
-        logger.info("Output callback stats: %s", self.get_output_flush_stats())
-        self.engine.close()
-        logger.info("AsyncLLMEngine stopped")
+        try:
+            self._flush_pending_outputs_if_on_loop()
+            logger.info("Output callback stats: %s", self.get_output_flush_stats())
+        finally:
+            # LLMEngine.close() 会先关闭 request timing，再关闭 ModelRunner
+            # 进程客户端。进程客户端在 close 中 drain pending response 并输出
+            # IPC summary；即使 step loop 已异常退出，这里也不能跳过。
+            self.engine.close()
+            logger.info("AsyncLLMEngine stopped")
 
     def get_output_flush_stats(self) -> dict[str, int | float]:
         with self._pending_output_lock:

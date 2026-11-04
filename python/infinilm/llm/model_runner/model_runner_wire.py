@@ -440,6 +440,15 @@ def response_to_wire(output: "ModelRunnerOutput") -> dict[str, Any]:
     timing 日志并分析 scheduler、forward 和 KV transfer 的时间关系。
     """
     connector = output.kv_connector_output
+    connector_payload = None
+    if connector is not None and not connector.is_empty():
+        connector_payload = {
+            "finished_sending": list(connector.finished_sending or []),
+            "finished_recving": list(connector.finished_recving or []),
+            "failed_recving": list(connector.failed_recving or []),
+            "invalid_block_ids": list(connector.invalid_block_ids),
+            "kv_connector_stats": connector.kv_connector_stats,
+        }
     timing = output.forward_timing
     sampled_token_ids = output.sampled_token_ids
     flat_sampled_token_ids: list[int] | None = None
@@ -462,17 +471,7 @@ def response_to_wire(output: "ModelRunnerOutput") -> dict[str, Any]:
             if flat_sampled_token_ids is not None
             else sampled_token_ids
         ),
-        "kv_connector_output": (
-            None
-            if connector is None
-            else {
-                "finished_sending": list(connector.finished_sending or []),
-                "finished_recving": list(connector.finished_recving or []),
-                "failed_recving": list(connector.failed_recving or []),
-                "invalid_block_ids": list(connector.invalid_block_ids),
-                "kv_connector_stats": connector.kv_connector_stats,
-            }
-        ),
+        "kv_connector_output": connector_payload,
         "forward_timing": (
             None
             if timing is None
@@ -522,4 +521,47 @@ def response_from_wire(payload: dict[str, Any]) -> ModelRunnerOutput:
         ),
         kv_connector_output=connector,
         forward_timing=timing,
+    )
+
+
+def connector_control_response_to_wire(
+    output: "ModelRunnerOutput",
+) -> dict[str, Any] | None:
+    """只编码 connector-only 控制步需要跨进程返回的信息。
+
+    控制步没有 sampled token 和 forward timing。如果 connector output 也为
+    空，则返回 ``None``，让父进程直接构造空 ``ModelRunnerOutput``，避免空
+    output 的完整序列化。
+    """
+    connector = output.kv_connector_output
+    if connector is None or connector.is_empty():
+        return None
+    return {
+        "finished_sending": list(connector.finished_sending or []),
+        "finished_recving": list(connector.finished_recving or []),
+        "failed_recving": list(connector.failed_recving or []),
+        "invalid_block_ids": list(connector.invalid_block_ids),
+        "kv_connector_stats": connector.kv_connector_stats,
+    }
+
+
+def connector_control_response_from_wire(
+    payload: dict[str, Any] | None,
+) -> ModelRunnerOutput:
+    """恢复 connector-only 控制步结果；空 payload 表示空 output。"""
+    from infinilm.llm.model_runner.model_runner import (
+        KVConnectorOutput,
+        ModelRunnerOutput,
+    )
+
+    if payload is None:
+        return ModelRunnerOutput()
+    return ModelRunnerOutput(
+        kv_connector_output=KVConnectorOutput(
+            finished_sending=set(payload["finished_sending"]),
+            finished_recving=set(payload["finished_recving"]),
+            failed_recving=set(payload["failed_recving"]),
+            invalid_block_ids=set(payload["invalid_block_ids"]),
+            kv_connector_stats=payload["kv_connector_stats"],
+        )
     )

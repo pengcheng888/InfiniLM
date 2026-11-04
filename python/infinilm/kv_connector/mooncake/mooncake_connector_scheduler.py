@@ -163,7 +163,9 @@ class MooncakeConnectorScheduler:
         meta.reqs_not_processed = self._reqs_not_processed
         self._reqs_not_processed = set()
 
-        return meta
+        # 空 metadata 不应进入进程协议。connector-only 控制步仍可携带
+        # ``metadata=None``，由 worker 查询异步传输完成事件。
+        return None if meta.is_empty() else meta
 
     def request_finished(
         self,

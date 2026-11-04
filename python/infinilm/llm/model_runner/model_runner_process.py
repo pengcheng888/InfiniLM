@@ -31,7 +31,10 @@ from infinilm.llm.model_runner.model_runner_channel import (
 from infinilm.llm.model_runner.model_runner_wire import (
     WireRequest,
     batch_to_wire,
+    connector_control_response_from_wire,
+    connector_control_response_to_wire,
     metadata_from_wire,
+    metadata_to_wire,
     model_runner_request_cache_enabled,
     requests_from_wire,
     response_from_wire,
@@ -139,6 +142,52 @@ def _worker_main(
                     request_cache.pop(request_id, None)
                 continue
 
+            if command["op"] == "connector_control":
+                # connector-only 控制步没有 scheduled request，也不做模型
+                # forward，因此跳过 request cache 和完整 batch/response 协议。
+                metadata_started_at_ns = time.monotonic_ns()
+                metadata = metadata_from_wire(command["kv_connector_metadata"])
+                metadata_completed_at_ns = time.monotonic_ns()
+                control_scheduler_output = SchedulerOutput(
+                    scheduled_requests=[],
+                    is_prefill=False,
+                )
+                control_scheduler_output.kv_connector_metadata = metadata
+                runner_execute_started_at_ns = time.monotonic_ns()
+                output = runner.execute_connector_control(control_scheduler_output)
+                runner_execute_completed_at_ns = time.monotonic_ns()
+                response_wire_started_at_ns = time.monotonic_ns()
+                control_payload = connector_control_response_to_wire(output)
+                response_wire_completed_at_ns = time.monotonic_ns()
+                response_send_started_at_ns = time.monotonic_ns()
+                channel.send_response(
+                    request_slot,
+                    {
+                        "ok": True,
+                        "batch_id": command.get("batch_id"),
+                        "control_output": control_payload,
+                        "ipc_timing": {
+                            "worker_received_at_ns": worker_received_at_ns,
+                            "metadata_from_wire_ns": (
+                                metadata_completed_at_ns - metadata_started_at_ns
+                            ),
+                            "worker_recv_to_execute_start_ns": (
+                                runner_execute_started_at_ns - worker_received_at_ns
+                            ),
+                            "runner_execute_ns": (
+                                runner_execute_completed_at_ns
+                                - runner_execute_started_at_ns
+                            ),
+                            "response_wire_ns": (
+                                response_wire_completed_at_ns
+                                - response_wire_started_at_ns
+                            ),
+                            "response_send_started_at_ns": response_send_started_at_ns,
+                        },
+                    },
+                )
+                continue
+
             if command["op"] != "execute":
                 raise RuntimeError(f"unknown ModelRunner command: {command['op']}")
 
@@ -224,6 +273,7 @@ class ModelRunnerProcessClient:
     """
 
     supports_non_block = True
+    supports_connector_control = True
     startup_timeout_s = 300.0
     close_timeout_s = 10.0
 
@@ -263,6 +313,15 @@ class ModelRunnerProcessClient:
         self._worker_request_state: dict[str, int] = {}
         self._ipc_timing_samples: dict[str, list[int]] = {}
         self._ipc_timing_batches = 0
+        self._ipc_timing_execute_batches = 0
+        self._ipc_timing_connector_control_batches = 0
+        self._ipc_timing_connector_metadata_empty = 0
+        self._ipc_timing_connector_metadata_nonempty = 0
+        self._ipc_timing_connector_empty_output = 0
+        self._ipc_timing_connector_nonempty_output = 0
+        self._ipc_timing_connector_finished_sending = 0
+        self._ipc_timing_connector_finished_recving = 0
+        self._ipc_timing_connector_failed_recving = 0
         self._ipc_timing_requests = 0
         self._ipc_timing_full_requests = 0
         self._ipc_timing_diff_requests = 0
@@ -361,22 +420,56 @@ class ModelRunnerProcessClient:
                     "ModelRunner response batch id mismatch: "
                     f"expected={future.batch_id}, got={response.get('batch_id')}"
                 )
-            output = response_from_wire(response["output"])
             worker_timing = response.get("ipc_timing", {})
             parent_timing = future.parent_ipc_timing
+            is_connector_control = future.command == "connector_control"
+            if is_connector_control:
+                output = connector_control_response_from_wire(
+                    response.get("control_output")
+                )
+            else:
+                output = response_from_wire(response["output"])
             self._ipc_timing_batches += 1
-            self._ipc_timing_requests += len(future.scheduler_output.scheduled_requests)
-            cache_stats = future.request_cache_stats
-            self._ipc_timing_full_requests += cache_stats.get("full", 0)
-            self._ipc_timing_diff_requests += cache_stats.get("diff", 0)
+            if is_connector_control:
+                self._ipc_timing_connector_control_batches += 1
+                if future.connector_metadata_empty:
+                    self._ipc_timing_connector_metadata_empty += 1
+                else:
+                    self._ipc_timing_connector_metadata_nonempty += 1
+                connector = output.kv_connector_output
+                if connector is None:
+                    self._ipc_timing_connector_empty_output += 1
+                    finished_sending = 0
+                    finished_recving = 0
+                    failed_recving = 0
+                else:
+                    if connector.is_empty():
+                        self._ipc_timing_connector_empty_output += 1
+                    else:
+                        self._ipc_timing_connector_nonempty_output += 1
+                    finished_sending = len(connector.finished_sending or [])
+                    finished_recving = len(connector.finished_recving or [])
+                    failed_recving = len(connector.failed_recving or [])
+                self._ipc_timing_connector_finished_sending += finished_sending
+                self._ipc_timing_connector_finished_recving += finished_recving
+                self._ipc_timing_connector_failed_recving += failed_recving
+            else:
+                self._ipc_timing_execute_batches += 1
+                self._ipc_timing_requests += len(
+                    future.scheduler_output.scheduled_requests
+                )
+                cache_stats = future.request_cache_stats
+                self._ipc_timing_full_requests += cache_stats.get("full", 0)
+                self._ipc_timing_diff_requests += cache_stats.get("diff", 0)
+            timing_prefix = "connector_control_" if is_connector_control else ""
             self._record_ipc_timing(
-                "parent_wire", parent_timing.get("wire_duration_ns")
+                f"{timing_prefix}parent_wire", parent_timing.get("wire_duration_ns")
             )
             self._record_ipc_timing(
-                "parent_send", parent_timing.get("send_duration_ns")
+                f"{timing_prefix}parent_send", parent_timing.get("send_duration_ns")
             )
             self._record_ipc_timing(
-                "send_start_to_worker_recv",
+                f"{timing_prefix}send_start_to_worker_recv",
                 (
                     worker_timing.get("worker_received_at_ns")
                     - parent_timing.get("send_started_at_ns")
@@ -385,26 +478,32 @@ class ModelRunnerProcessClient:
                     else None
                 ),
             )
-            for name in (
+            worker_timing_names = (
                 "request_rebuild",
                 "metadata_from_wire",
                 "worker_recv_to_execute_start",
                 "runner_execute",
                 "response_wire",
-            ):
-                self._record_ipc_timing(name, worker_timing.get(f"{name}_ns"))
+            )
+            if is_connector_control:
+                # 控制步没有 request rebuild。
+                worker_timing_names = worker_timing_names[1:]
+            for name in worker_timing_names:
+                self._record_ipc_timing(
+                    f"{timing_prefix}{name}", worker_timing.get(f"{name}_ns")
+                )
             self._record_ipc_timing(
-                "parent_response_decode",
+                f"{timing_prefix}parent_response_decode",
                 response_received_at_ns - receive_started_at_ns,
             )
             if worker_timing.get("response_send_started_at_ns") is not None:
                 self._record_ipc_timing(
-                    "response_send_start_to_parent_recv",
+                    f"{timing_prefix}response_send_start_to_parent_recv",
                     response_received_at_ns
                     - worker_timing["response_send_started_at_ns"],
                 )
             self._record_ipc_timing(
-                "submit_to_response_decoded",
+                f"{timing_prefix}submit_to_response_decoded",
                 response_received_at_ns - future.submit_started_at_ns,
             )
             _update_forward_timing(future.scheduler_output, output)
@@ -424,6 +523,50 @@ class ModelRunnerProcessClient:
             if not pending.done():
                 pending.set_exception(exc)
         self._pending_futures.clear()
+
+    def execute_connector_control(self, scheduler_output):
+        """同步执行一个 connector-only 控制步。
+
+        该路径只传输 Mooncake metadata 和 completion output，不构造 request
+        cache diff，也不走完整 ``execute_model`` batch/response 协议。
+        """
+        if self._closed:
+            raise RuntimeError("ModelRunner process client is closed")
+
+        batch_id = self._next_batch_id
+        self._next_batch_id += 1
+        wire_started_at_ns = time.monotonic_ns()
+        metadata = metadata_to_wire(scheduler_output.kv_connector_metadata)
+        wire_completed_at_ns = time.monotonic_ns()
+        send_started_at_ns = time.monotonic_ns()
+        future = ModelRunnerFuture(
+            self,
+            scheduler_output,
+            batch_id,
+            command="connector_control",
+        )
+        future.connector_metadata_empty = metadata is None
+        self._channel.send(
+            {
+                "op": "connector_control",
+                "batch_id": batch_id,
+                "kv_connector_metadata": metadata,
+                "ipc_timing": {
+                    "wire_started_at_ns": wire_started_at_ns,
+                    "wire_completed_at_ns": wire_completed_at_ns,
+                    "send_started_at_ns": send_started_at_ns,
+                },
+            }
+        )
+        future.submit_started_at_ns = wire_started_at_ns
+        future.parent_ipc_timing = {
+            "wire_duration_ns": wire_completed_at_ns - wire_started_at_ns,
+            "send_started_at_ns": send_started_at_ns,
+            "send_duration_ns": time.monotonic_ns() - send_started_at_ns,
+        }
+        future.request_cache_stats = {"full": 0, "diff": 0}
+        self._pending_futures.append(future)
+        return future.result()
 
     def execute_model(
         self, scheduler_output, non_block: bool = False
@@ -523,6 +666,23 @@ class ModelRunnerProcessClient:
         """返回进程通信路径的聚合耗时，单位毫秒。"""
         result: dict[str, Any] = {
             "batches": self._ipc_timing_batches,
+            "execute_batches": self._ipc_timing_execute_batches,
+            "connector_control_batches": self._ipc_timing_connector_control_batches,
+            "connector_metadata_empty": self._ipc_timing_connector_metadata_empty,
+            "connector_metadata_nonempty": (
+                self._ipc_timing_connector_metadata_nonempty
+            ),
+            "connector_empty_output": self._ipc_timing_connector_empty_output,
+            "connector_nonempty_output": self._ipc_timing_connector_nonempty_output,
+            "connector_finished_sending_requests": (
+                self._ipc_timing_connector_finished_sending
+            ),
+            "connector_finished_recving_requests": (
+                self._ipc_timing_connector_finished_recving
+            ),
+            "connector_failed_recving_requests": (
+                self._ipc_timing_connector_failed_recving
+            ),
             "requests": self._ipc_timing_requests,
             "full_requests": self._ipc_timing_full_requests,
             "diff_requests": self._ipc_timing_diff_requests,
@@ -577,12 +737,18 @@ class ModelRunnerFuture(Future):
     """按提交顺序从 ModelRunnerProcessClient 取结果的 Future。"""
 
     def __init__(
-        self, client: ModelRunnerProcessClient, scheduler_output, batch_id: int
+        self,
+        client: ModelRunnerProcessClient,
+        scheduler_output,
+        batch_id: int,
+        command: str = "execute",
     ):
         super().__init__()
         self.client = client
         self.scheduler_output = scheduler_output
         self.batch_id = batch_id
+        self.command = command
+        self.connector_metadata_empty = False
         self.submit_started_at_ns = 0
         self.parent_ipc_timing: dict[str, int] = {}
         self.request_cache_stats: dict[str, int] = {}

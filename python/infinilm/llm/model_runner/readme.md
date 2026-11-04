@@ -131,6 +131,7 @@ zero-copy 协议的基础。
 - batch wire layout；
 - Mooncake connector metadata 编解码；
 - `ModelRunnerOutput` response 编解码；
+- connector-only 控制步轻量 response 编解码；
 - request cache 和 fixed array 配置。
 
 进程模式的数据边界：
@@ -183,6 +184,23 @@ worker 复用 `WireRequest` 对象。请求结束后，scheduler 调用
 `release_requests()` 清理父子两侧缓存。如果生成 token 长度回退，协议会
 自动降级为 full snapshot。
 
+#### connector-only 控制步
+
+P/D 场景中，scheduler 可能在没有 scheduled request 时仍需要查询 Mooncake
+发送/接收完成事件。这类 step 不构造 ModelRunner batch，而是走专用
+`connector_control` 命令：
+
+```text
+metadata_to_wire()       # 空 metadata 时为 None
+    -> connector_control
+    -> worker execute_connector_control()
+    -> connector_control_response_to_wire()
+```
+
+控制步没有 request cache diff、sampled token 和 forward timing。如果
+connector output 为空，response 使用 `None` 表示，避免完整空
+`ModelRunnerOutput` 序列化。
+
 #### fixed array layout
 
 `INFINILM_MODEL_RUNNER_FIXED_ARRAY=1` 会把 decode diff 编码为平铺
@@ -225,6 +243,17 @@ LLMEngine
 ```text
 LLMEngine.step()
     -> scheduler.schedule()
+
+connector-only 分支:
+    -> channel.send()
+    -> metadata_from_wire()
+    -> 真实 ModelRunner.execute_connector_control()
+    -> connector_control_response_to_wire()
+    -> channel response
+    -> ModelRunnerFuture.result()
+    -> scheduler.update_from_output()
+
+prefill/decode 分支:
     -> batch_to_wire()
     -> channel.send()
     -> worker recv
@@ -236,6 +265,10 @@ LLMEngine.step()
     -> response_from_wire()
     -> scheduler.update_from_output()
 ```
+
+`LLMEngine` 通过 runner 的 `supports_connector_control` 显式判断是否可用
+轻量控制路径；单进程真实 runner 和进程代理声明为 true，轻量通信测试 runner
+声明为 false。
 
 ### prefill / decode 调度策略
 
@@ -506,6 +539,15 @@ ModelRunner IPC timing summary: {...}
 
 ```text
 batches
+execute_batches
+connector_control_batches
+connector_metadata_empty
+connector_metadata_nonempty
+connector_empty_output
+connector_nonempty_output
+connector_finished_sending_requests
+connector_finished_recving_requests
+connector_failed_recving_requests
 requests
 full_requests
 diff_requests
@@ -521,6 +563,9 @@ parent_response_decode
 response_send_start_to_parent_recv
 submit_to_response_decoded
 ```
+
+connector-only 控制步的耗时统计使用 `connector_control_` 前缀，例如
+`connector_control_runner_execute`；普通 execute batch 保持原有字段名。
 
 这些统计用于定位跨进程通信和 forward 准备开销。
 

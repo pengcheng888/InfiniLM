@@ -66,6 +66,10 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
             f"reqs_not_processed={self.reqs_not_processed})"
         )
 
+    def is_empty(self) -> bool:
+        """判断本步是否没有新的 Mooncake 收发控制任务。"""
+        return not (self.reqs_to_recv or self.reqs_to_send or self.reqs_not_processed)
+
 
 class MooncakeConnector(KVConnectorBase):
     def __init__(

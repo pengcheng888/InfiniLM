@@ -8,7 +8,15 @@ from infinilm.kv_connector.mooncake.mooncake_connector import (
     MooncakeConnectorMetadata,
     PullReqMeta,
 )
-from infinilm.llm.model_runner.model_runner import ModelForwardTiming
+from infinilm.kv_connector.mooncake.mooncake_connector_scheduler import (
+    MooncakeConnectorScheduler,
+)
+from infinilm.llm.model_runner.model_runner import (
+    KVConnectorOutput,
+    ModelForwardTiming,
+    ModelRunner,
+    ModelRunnerOutput,
+)
 from infinilm.llm.model_runner.model_runner_channel import (
     model_runner_ipc_busy_loop_us,
 )
@@ -21,6 +29,8 @@ from infinilm.llm.model_runner.model_runner_process import (
 from infinilm.llm.model_runner.model_runner_wire import (
     WireRequest,
     batch_to_wire,
+    connector_control_response_from_wire,
+    connector_control_response_to_wire,
     metadata_from_wire,
     metadata_to_wire,
     model_runner_fixed_array_enabled,
@@ -175,6 +185,75 @@ def test_connector_metadata_wire_round_trip_preserves_pd_send_and_receive():
     assert restored.reqs_not_processed == {"transfer-aborted"}
 
 
+def test_empty_mooncake_connector_metadata_is_not_dispatched():
+    scheduler = MooncakeConnectorScheduler(
+        SimpleNamespace(kv_role="kv_producer"),
+        engine_id="prefill-engine",
+    )
+
+    assert scheduler.build_connector_meta() is None
+    assert MooncakeConnectorMetadata().is_empty()
+
+
+def test_single_process_connector_control_accepts_empty_metadata_step():
+    runner = object.__new__(ModelRunner)
+    runner.kv_connector = Mock()
+    runner.kv_connector.get_finished.return_value = (set(), set(), set())
+    runner.kv_connector.get_block_ids_with_load_errors.return_value = set()
+    runner.kv_connector.get_kv_connector_stats.return_value = {}
+    scheduler_output = SchedulerOutput(scheduled_requests=[])
+
+    output = runner.execute_connector_control(scheduler_output)
+
+    runner.kv_connector.bind_connector_metadata.assert_not_called()
+    runner.kv_connector.start_load_kv.assert_not_called()
+    runner.kv_connector.get_finished.assert_called_once_with(
+        "finished_req_ids"
+    )
+    assert output.req_ids == []
+    assert output.sampled_token_ids == []
+    assert output.kv_connector_output.is_empty()
+
+
+def test_connector_control_response_omits_empty_output_and_round_trips_events():
+    empty_payload = connector_control_response_to_wire(
+        ModelRunnerOutput(kv_connector_output=KVConnectorOutput())
+    )
+    assert empty_payload is None
+    restored_empty = connector_control_response_from_wire(empty_payload)
+    assert restored_empty.kv_connector_output is None
+
+    output = ModelRunnerOutput(
+        kv_connector_output=KVConnectorOutput(
+            finished_sending={"p-request"},
+            kv_connector_stats={"p-request": {"duration_ns": 123}},
+        )
+    )
+    payload = connector_control_response_to_wire(output)
+    restored = connector_control_response_from_wire(payload)
+
+    assert payload is not None
+    assert restored.kv_connector_output.finished_sending == {"p-request"}
+    assert restored.kv_connector_output.kv_connector_stats == {
+        "p-request": {"duration_ns": 123}
+    }
+
+
+def test_model_response_omits_empty_connector_output():
+    output = ModelRunnerOutput(
+        req_ids=["request-1"],
+        sampled_token_ids=[7],
+        kv_connector_output=KVConnectorOutput(),
+    )
+
+    payload = response_to_wire(output)
+    restored = response_from_wire(payload)
+
+    assert payload["kv_connector_output"] is None
+    assert restored.sampled_token_ids == [7]
+    assert restored.kv_connector_output is None
+
+
 def test_process_mode_accepts_boolean_environment_values(monkeypatch):
 
     monkeypatch.setenv("INFINILM_MODEL_RUNNER_PROCESS", "yes")
@@ -301,6 +380,71 @@ def test_model_runner_future_fails_when_worker_dies():
     assert isinstance(future.exception(), RuntimeError)
 
 
+def test_connector_control_empty_output_updates_ipc_counters():
+    class ResponseConnection:
+        def __init__(self):
+            self._response = {
+                "ok": True,
+                "batch_id": 9,
+                "control_output": None,
+                "ipc_timing": {
+                    "worker_received_at_ns": 101,
+                    "runner_execute_ns": 3,
+                },
+            }
+
+        def poll(self, timeout):
+            return True
+
+        def recv(self):
+            return self._response
+
+    client = object.__new__(ModelRunnerProcessClient)
+    client._pending_futures = deque()
+    client._channel = ResponseConnection()
+    client._process = _FakeProcess(True)
+    client._ipc_timing_samples = {}
+    client._ipc_timing_batches = 0
+    client._ipc_timing_execute_batches = 0
+    client._ipc_timing_connector_control_batches = 0
+    client._ipc_timing_connector_metadata_empty = 0
+    client._ipc_timing_connector_metadata_nonempty = 0
+    client._ipc_timing_connector_empty_output = 0
+    client._ipc_timing_connector_nonempty_output = 0
+    client._ipc_timing_connector_finished_sending = 0
+    client._ipc_timing_connector_finished_recving = 0
+    client._ipc_timing_connector_failed_recving = 0
+    client._ipc_timing_requests = 0
+    client._ipc_timing_full_requests = 0
+    client._ipc_timing_diff_requests = 0
+
+    scheduler_output = SimpleNamespace(scheduled_requests=[])
+    future = ModelRunnerFuture(
+        client,
+        scheduler_output,
+        batch_id=9,
+        command="connector_control",
+    )
+    future.connector_metadata_empty = True
+    future.parent_ipc_timing = {
+        "wire_duration_ns": 10,
+        "send_started_at_ns": 100,
+        "send_duration_ns": 5,
+    }
+    future.request_cache_stats = {"full": 0, "diff": 0}
+    future.submit_started_at_ns = 90
+    client._pending_futures.append(future)
+
+    client._resolve_next()
+
+    assert future.result().kv_connector_output is None
+    assert client._ipc_timing_connector_control_batches == 1
+    assert client._ipc_timing_connector_metadata_empty == 1
+    assert client._ipc_timing_connector_empty_output == 1
+    assert client._ipc_timing_connector_nonempty_output == 0
+    assert "connector_control_runner_execute" in client._ipc_timing_samples
+
+
 def test_batch_queue_prefill_executes_synchronously(monkeypatch):
     scheduler = Mock()
     scheduler.has_waiting_requests.return_value = False
@@ -410,6 +554,8 @@ def test_batch_queue_connector_only_step_preserves_pending_output(monkeypatch):
     result = engine.step_with_batch_queue()
 
     assert result == (True, old_pending + new_pending)
+    model_runner.execute_connector_control.assert_called_once_with(connector_output)
+    model_runner.execute_model.assert_not_called()
 
 
 def test_scheduler_records_requests_completed_outside_model_batch():

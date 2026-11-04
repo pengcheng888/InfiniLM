@@ -37,6 +37,16 @@ class KVConnectorOutput:
     # request_id -> 本轮完成的 Mooncake 传输 timing；scheduler 会取出并清空。
     kv_connector_stats: dict = field(default_factory=dict)
 
+    def is_empty(self) -> bool:
+        """判断 connector output 是否没有需要提交给 scheduler 的信息。"""
+        return not (
+            self.finished_sending
+            or self.finished_recving
+            or self.failed_recving
+            or self.invalid_block_ids
+            or self.kv_connector_stats
+        )
+
 
 @dataclass
 class ModelRunnerOutput:
@@ -59,6 +69,7 @@ class ModelForwardTiming:
 
 class ModelRunner:
     supports_non_block = False
+    supports_connector_control = True
 
     def __init__(self, config: EngineConfig, initialize_processor: bool = True):
         self.config = config
@@ -312,6 +323,26 @@ class ModelRunner:
             forward_timing=forward_timing,
         )
 
+    def execute_connector_control(self, scheduler_output) -> ModelRunnerOutput:
+        """执行不做模型 forward 的 KV connector 控制步。
+
+        与进程代理保持相同输入接口：这里接收 ``SchedulerOutput``，但不会
+        构造模型输入或执行 forward。``kv_connector_metadata is None`` 表示
+        本步没有新的 KV 收发任务，worker 侧仍需要查询异步传输完成事件，
+        用于释放 P block 或推进 D 侧等待请求。
+        """
+        if self.kv_connector is None:
+            return ModelRunnerOutput()
+
+        metadata = scheduler_output.kv_connector_metadata
+        if metadata is not None:
+            self.kv_connector.bind_connector_metadata(metadata)
+            self.kv_connector.start_load_kv()
+
+        return ModelRunnerOutput(
+            kv_connector_output=self._collect_kv_connector_output()
+        )
+
     def _model_forward(self, scheduler_output):
         # Build model inputs
         model_input = self.processor.build_model_inputs(
@@ -371,24 +402,35 @@ class ModelRunner:
         """Context manager for KV connector operations around model forward."""
 
         output = KVConnectorOutput()
-        assert scheduler_output.kv_connector_metadata is not None
-
-        self.kv_connector.bind_connector_metadata(
-            scheduler_output.kv_connector_metadata
-        )
-
-        self.kv_connector.start_load_kv()
+        # 空 metadata 只表示本步没有新的 KV 收发任务；finally 中仍要查询
+        # 已有异步传输的完成事件。
+        if scheduler_output.kv_connector_metadata is not None:
+            self.kv_connector.bind_connector_metadata(
+                scheduler_output.kv_connector_metadata
+            )
+            self.kv_connector.start_load_kv()
 
         try:
             yield output
         finally:
-            output.finished_sending, output.failed_recving, output.finished_recving = (
-                self.kv_connector.get_finished("finished_req_ids")
-            )
-            output.invalid_block_ids = (
-                self.kv_connector.get_block_ids_with_load_errors()
-            )
-            output.kv_connector_stats = self.kv_connector.get_kv_connector_stats()
+            collected = self._collect_kv_connector_output()
+            output.finished_sending = collected.finished_sending
+            output.failed_recving = collected.failed_recving
+            output.finished_recving = collected.finished_recving
+            output.invalid_block_ids = collected.invalid_block_ids
+            output.kv_connector_stats = collected.kv_connector_stats
+
+    def _collect_kv_connector_output(self) -> KVConnectorOutput:
+        """收集 worker connector 的完成、失败和 timing 信息。"""
+        output = KVConnectorOutput()
+        if self.kv_connector is None:
+            return output
+        output.finished_sending, output.failed_recving, output.finished_recving = (
+            self.kv_connector.get_finished("finished_req_ids")
+        )
+        output.invalid_block_ids = self.kv_connector.get_block_ids_with_load_errors()
+        output.kv_connector_stats = self.kv_connector.get_kv_connector_stats()
+        return output
 
     def close(self) -> None:
         """Release resources held by the KV connector."""
