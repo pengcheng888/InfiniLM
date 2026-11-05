@@ -163,6 +163,10 @@ class MooncakeConnectorWorker:
         self.num_blocks = 0
         self.kv_caches_base_addr: list[int] = []
         self.device_kv_caches: dict[str, infinicore.Tensor] = {}
+        # MACA transport in Mooncake v0.3.14 only accepts GPU memory.
+        # Keep the wire-format fields, but do not advertise CPU ready-flag buffers.
+        self.kv_flag_ptrs: list[int] = []
+        self.kv_flag_src_ptrs: list[int] = []
 
         self.async_zmq_ctx = zmq.asyncio.Context()
         self._encoder = msgspec.msgpack.Encoder()
@@ -623,24 +627,25 @@ class MooncakeConnectorWorker:
             remote_session, src_ptrs, dst_ptrs, lengths
         )
 
-        if ret_value == 0 and len(kv_flag_addr) > 0:
-            n = len(xfer_block_ids)
-            flag_src_ptrs = [self.kv_flag_src_ptrs[b] for b in xfer_block_ids]
-            flag_dst_ptrs = [kv_flag_addr[b] for b in xfer_block_ids]
-            flag_lengths = [1] * n
-
-            flag_ret_value = self.engine.batch_transfer_sync_write(
-                remote_session, flag_src_ptrs, flag_dst_ptrs, flag_lengths
-            )
-
-            if flag_ret_value != 0:
-                ret_value = flag_ret_value
-
-            logger.debug(
-                "mooncake engine sending flag to %s done, ret_value: %s",
-                remote_session,
-                flag_ret_value,
-            )
+        # MACA transport in Mooncake v0.3.14 only accepts GPU memory.
+        # if ret_value == 0 and len(kv_flag_addr) > 0:
+        #     n = len(xfer_block_ids)
+        #     flag_src_ptrs = [self.kv_flag_src_ptrs[b] for b in xfer_block_ids]
+        #     flag_dst_ptrs = [kv_flag_addr[b] for b in xfer_block_ids]
+        #     flag_lengths = [1] * n
+        #
+        #     flag_ret_value = self.engine.batch_transfer_sync_write(
+        #         remote_session, flag_src_ptrs, flag_dst_ptrs, flag_lengths
+        #     )
+        #
+        #     if flag_ret_value != 0:
+        #         ret_value = flag_ret_value
+        #
+        #     logger.debug(
+        #         "mooncake engine sending flag to %s done, ret_value: %s",
+        #         remote_session,
+        #         flag_ret_value,
+        #     )
 
         if ret_value == 0:
             logger.debug(
@@ -723,36 +728,37 @@ class MooncakeConnectorWorker:
         )
         # logger.info("registered kv_caches_base_addr=%d", len(self.kv_caches_base_addr))
 
-        if self.is_kv_consumer:
-            self.kv_flag = np.zeros(self.num_blocks, dtype=np.uint8)
-            flag_base_ptr = self.kv_flag.ctypes.data
-            self.kv_flag_ptrs = [flag_base_ptr + i for i in range(self.num_blocks)]
-            self.kv_flag_lens = [1] * self.num_blocks
-
-            ret = self.engine.batch_register_memory(
-                self.kv_flag_ptrs, self.kv_flag_lens
-            )
-
-            if ret != 0:
-                raise RuntimeError(
-                    "Mooncake batch memory registration failed for kv block flags."
-                )
-
-        if self.is_kv_producer:
-            self.kv_flag_src = np.ones(self.num_blocks, dtype=np.uint8)
-            flag_src_base_ptr = self.kv_flag_src.ctypes.data
-            self.kv_flag_src_ptrs = [
-                flag_src_base_ptr + i for i in range(self.num_blocks)
-            ]
-            self.kv_flag_src_lens = [1] * self.num_blocks
-
-            ret = self.engine.batch_register_memory(
-                self.kv_flag_src_ptrs, self.kv_flag_src_lens
-            )
-            if ret != 0:
-                raise RuntimeError(
-                    "Mooncake batch memory registration failed for kv block src flag."
-                )
+        # MACA transport in Mooncake v0.3.14 only accepts GPU memory.
+        # if self.is_kv_consumer:
+        #     self.kv_flag = np.zeros(self.num_blocks, dtype=np.uint8)
+        #     flag_base_ptr = self.kv_flag.ctypes.data
+        #     self.kv_flag_ptrs = [flag_base_ptr + i for i in range(self.num_blocks)]
+        #     self.kv_flag_lens = [1] * self.num_blocks
+        #
+        #     ret = self.engine.batch_register_memory(
+        #         self.kv_flag_ptrs, self.kv_flag_lens
+        #     )
+        #
+        #     if ret != 0:
+        #         raise RuntimeError(
+        #             "Mooncake batch memory registration failed for kv block flags."
+        #         )
+        #
+        # if self.is_kv_producer:
+        #     self.kv_flag_src = np.ones(self.num_blocks, dtype=np.uint8)
+        #     flag_src_base_ptr = self.kv_flag_src.ctypes.data
+        #     self.kv_flag_src_ptrs = [
+        #         flag_src_base_ptr + i for i in range(self.num_blocks)
+        #     ]
+        #     self.kv_flag_src_lens = [1] * self.num_blocks
+        #
+        #     ret = self.engine.batch_register_memory(
+        #         self.kv_flag_src_ptrs, self.kv_flag_src_lens
+        #     )
+        #     if ret != 0:
+        #         raise RuntimeError(
+        #             "Mooncake batch memory registration failed for kv block src flag."
+        #         )
 
         # No need to launch server for D node.
         if self.is_kv_consumer:
@@ -843,15 +849,13 @@ class MooncakeConnectorWorker:
         )
 
     async def _wait_for_kv_flags_ready(self, block_ids: list[int]) -> None:
-        """Wait until Mooncake sets all kv_flag entries for the given blocks to 1."""
-        if not block_ids:
-            return
-
-        indices = np.asarray(block_ids, dtype=np.intp)
-        while not np.all(self.kv_flag[indices] == 1):
-            await asyncio.sleep(0.012)
-
-        self.kv_flag[indices] = 0
+        """No-op until Mooncake MACA supports CPU ready-flag memory."""
+        # MACA transport in Mooncake v0.3.14 only accepts GPU memory.
+        # indices = np.asarray(block_ids, dtype=np.intp)
+        # while not np.all(self.kv_flag[indices] == 1):
+        #     await asyncio.sleep(0.012)
+        #
+        # self.kv_flag[indices] = 0
 
     async def receive_kv_from_single_worker(
         self,
@@ -870,7 +874,8 @@ class MooncakeConnectorWorker:
                 for req_id, pull_meta in pull_metas.items()
             },
             kv_caches_base_addr=self.kv_caches_base_addr,
-            kv_flag_addr=self.kv_flag_ptrs,
+            # MACA transport in Mooncake v0.3.14 only accepts GPU memory.
+            kv_flag_addr=[],
         )
 
         encoded_data = self._encoder.encode(metadata)
@@ -927,7 +932,8 @@ class MooncakeConnectorWorker:
                     "processed_reqs_count must be equal to the number of pull_metas"
                 )
 
-                await self._wait_for_kv_flags_ready(success_block_ids)
+                # MACA transport in Mooncake v0.3.14 only accepts GPU memory.
+                # await self._wait_for_kv_flags_ready(success_block_ids)
 
                 self.finished_recving_reqs.update(finished_recving_reqs)
 
