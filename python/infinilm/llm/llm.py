@@ -202,6 +202,33 @@ class LLMEngine:
                     req.mark_canceled()
                 continue
 
+            if not isinstance(token_ids, list) and token_ids < 0:
+                # logger.info(
+                #     "Skipping invalid sampled token %s for request %s",
+                #     token_ids,
+                #     req.request_id,
+                # )
+                
+                # P 侧 prefill 响应只由 PD proxy 内部消费；这里的 LENGTH 仅是终止哨兵，
+                # 不表示真实生成长度。
+                req.finish_reason = FinishReason.LENGTH
+                req.mark_finished(req.finish_reason)
+                if req._output_queue is not None:
+                    pending.append(
+                        (
+                            req.output_queue.async_q,
+                            TokenOutput(
+                                request_id=req.request_id,
+                                token_id=token_ids,
+                                token_text="",
+                                finished=True,
+                                finish_reason=req.finish_reason,
+                                generated_text="",
+                            ),
+                        )
+                    )
+                continue
+
             if isinstance(token_ids, list):
                 num_computed_output_tokens = max(len(token_ids) - 1, 0)
             else:

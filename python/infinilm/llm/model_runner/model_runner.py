@@ -48,6 +48,18 @@ class ModelRunner:
         self._closed = False
         self.kv_transfer_config = config.kv_transfer_config
         logger.info(f"kv_transfer_config: {self.kv_transfer_config}")
+        self._is_pd_service = (
+            self.kv_transfer_config is not None
+            and bool(self.kv_transfer_config.kv_connector)
+        )
+        if config.pipeline_parallel_size > 1 and self._is_pd_service:
+            raise NotImplementedError(
+                "Pipeline parallelism is not supported with PD disaggregated serving."
+            )
+        if config.draft_model_path is not None and self._is_pd_service:
+            raise NotImplementedError(
+                "Speculative decoding is not supported with PD disaggregated serving."
+            )
 
         hf_config = read_hf_config(config.model_path)
         text_config = hf_config.get("text_config", hf_config)
@@ -230,6 +242,8 @@ class ModelRunner:
             self.config.top_p,
             self.config.top_k,
         )
+        if self._should_skip_prefill_sampling(scheduler_output):
+            model_input["skip_sampling"] = True
 
         if self.speculative_runner is not None:
             return self._model_forward_with_speculative(scheduler_output, model_input)
@@ -253,6 +267,20 @@ class ModelRunner:
         sampled_tokens_list = sampled_tokens.to_numpy().tolist()
 
         return sampled_tokens_list
+
+    def _should_skip_prefill_sampling(self, scheduler_output) -> bool:
+        if not scheduler_output.is_prefill:
+            return False
+        if not self._is_pd_service:
+            return False
+        if self.kv_transfer_config.kv_role != "kv_producer":
+            return False
+
+        return all(
+            req.kv_transfer_params
+            and req.kv_transfer_params.get("do_remote_decode")
+            for req in scheduler_output.scheduled_requests
+        )
 
     def _model_forward_with_speculative(self, scheduler_output, model_input):
         return self.speculative_runner.forward(scheduler_output, model_input)

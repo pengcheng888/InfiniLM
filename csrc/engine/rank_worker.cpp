@@ -272,6 +272,83 @@ RankWorker::Output RankWorker::get_output() {
 }
 
 //------------------------------------------------------
+// Output construction after model forward
+//------------------------------------------------------
+infinicore::Tensor RankWorker::sample_output_ids(
+    const Input &input,
+    const infinicore::Tensor &logits) {
+    auto temperature{input.temperature};
+    auto top_p{input.top_p};
+    auto top_k{input.top_k};
+
+    const auto &logits_shape{logits->shape()};
+    const auto &vocab_size{logits_shape[2]};
+    const auto &total_len{logits_shape[1]};
+    const auto &batch_size{logits_shape[0]};
+
+    const auto n_req = input.input_offsets.value()->size(0) - 1;
+    const auto *input_offsets = reinterpret_cast<const int32_t *>(
+        input.input_offsets.value()->data());
+
+    const bool sample_all_positions = input.sample_all_positions;
+    const size_t logits_positions = batch_size * total_len;
+    const bool logits_are_last_token_only = !sample_all_positions && logits_positions == n_req;
+    const size_t n_out = sample_all_positions
+                             ? static_cast<size_t>(input_offsets[n_req])
+                             : n_req;
+    auto output_ids{infinicore::Tensor::empty(
+        {n_out}, infinicore::DataType::I64, rank_info_.device)};
+
+    for (size_t i{0}; i < n_out; ++i) {
+        size_t score_idx = i;
+        if (!sample_all_positions && !logits_are_last_token_only) {
+            score_idx = static_cast<size_t>(input_offsets[i + 1] - 1);
+        }
+        auto score{logits->view({logits_positions, vocab_size})
+                       ->narrow({{0, score_idx, 1}})
+                       ->view({vocab_size})};
+        auto out{output_ids->narrow({{0, i, 1}})->view({})};
+        float random_val = std::uniform_real_distribution<float>(0, 1)(rng_);
+        infinicore::op::random_sample_(
+            out, score, random_val, top_p, top_k, temperature);
+    }
+
+    if (rank_info_.pp_size > 1) {
+        infinicore::op::distributed::send(
+            output_ids,
+            0,
+            rank_info_.world_comm);
+    }
+
+    output_ids = output_ids->to(infinicore::Device::cpu());
+    infinicore::context::syncStream();
+    return output_ids;
+}
+
+infinicore::Tensor RankWorker::skip_sample_output_ids(size_t num_outputs) {
+    if (rank_info_.pp_size > 1) {
+        throw std::invalid_argument(
+            "skip_sampling is not supported with pipeline parallelism");
+    }
+
+    // spdlog::info(
+    //     "[{}] skip_sample_output_ids: generating {} invalid token IDs",
+    //     info(),
+    //     num_outputs);
+
+    auto output_ids = infinicore::Tensor::empty(
+        {num_outputs},
+        infinicore::DataType::I64,
+        infinicore::Device::cpu());
+    auto *output_data = reinterpret_cast<int64_t *>(output_ids->data());
+    for (size_t i{0}; i < num_outputs; ++i) {
+        output_data[i] = -1;
+    }
+
+    return output_ids;
+}
+
+//------------------------------------------------------
 // thread_loop
 //------------------------------------------------------
 void RankWorker::thread_loop() {
@@ -477,46 +554,18 @@ void RankWorker::thread_loop() {
 
                         // Random sampling (rank 0 only)
                         if (rank_info_.tp_rank == 0) {
-                            auto temperature{local_args.temperature};
-                            auto top_p{local_args.top_p};
-                            auto top_k{local_args.top_k};
-
-                            const auto &logits_shape{logits->shape()};
-                            const auto &vocab_size{logits_shape[2]};
-                            const auto &total_len{logits_shape[1]};
-                            const auto &batch_size{logits_shape[0]};
-
                             auto n_req = local_args.input_offsets.value()->size(0) - 1;
-                            int32_t *input_offsets = (int32_t *)local_args.input_offsets.value()->data();
-
-                            const bool sample_all_positions = local_args.sample_all_positions;
-                            const size_t logits_positions = batch_size * total_len;
-                            const bool logits_are_last_token_only = !sample_all_positions && logits_positions == n_req;
-                            const size_t n_out = sample_all_positions ? static_cast<size_t>(input_offsets[n_req]) : n_req;
-                            auto output_ids{infinicore::Tensor::empty({n_out}, infinicore::DataType::I64, rank_info_.device)};
-
-                            for (size_t i{0}; i < n_out; ++i) {
-                                size_t score_idx = i;
-                                if (!sample_all_positions && !logits_are_last_token_only) {
-                                    score_idx = static_cast<size_t>(input_offsets[i + 1] - 1);
+                            infinicore::Tensor output_ids;
+                            if (local_args.skip_sampling) {
+                                if (local_args.sample_all_positions) {
+                                    throw std::invalid_argument(
+                                        "skip_sampling cannot be combined with sample_all_positions");
                                 }
-                                auto score{logits->view({logits_positions, vocab_size})->narrow({{0, score_idx, 1}})->view({vocab_size})};
-                                auto out{output_ids->narrow({{0, i, 1}})->view({})};
-                                float random_val = std::uniform_real_distribution<float>(0, 1)(rng_);
-                                infinicore::op::random_sample_(
-                                    out, score, random_val, top_p, top_k, temperature);
+
+                                output_ids = skip_sample_output_ids(n_req);
+                            } else {
+                                output_ids = sample_output_ids(local_args, logits);
                             }
-
-                            if (rank_info_.pp_size > 1) {
-                                infinicore::op::distributed::send(
-                                    output_ids,
-                                    0,
-                                    rank_info_.world_comm);
-                            }
-
-                            output_ids = output_ids->to(infinicore::Device::cpu());
-
-                            infinicore::context::syncStream();
 
                             auto out{Output{output_ids, logits, hidden_states}};
 

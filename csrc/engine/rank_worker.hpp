@@ -72,6 +72,8 @@ public:
         std::optional<infinicore::Tensor> target_hidden_states;
         /// Sample logits at every packed input position instead of one token per request.
         bool sample_all_positions{false};
+        /// Skip random sampling and return one invalid token ID per request.
+        bool skip_sampling{false};
 
         float temperature{1};
 
@@ -135,6 +137,12 @@ public:
     std::string info() const;
 
 private:
+    infinicore::Tensor sample_output_ids(
+        const Input &input,
+        const infinicore::Tensor &logits);
+
+    infinicore::Tensor skip_sample_output_ids(size_t num_outputs);
+
     void thread_loop();
 
 private:

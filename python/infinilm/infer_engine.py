@@ -279,6 +279,7 @@ class InferEngine(_infinilm.InferEngine):
         visual_token_ranges=None,
         target_hidden_states=None,
         sample_all_positions=False,
+        skip_sampling=False,
         temperature=None,
         top_k=None,
         top_p=None,
@@ -337,6 +338,7 @@ class InferEngine(_infinilm.InferEngine):
             visual_token_ranges=visual_token_ranges,
             target_hidden_states=target_hidden_states,
             sample_all_positions=sample_all_positions,
+            skip_sampling=skip_sampling,
             temperature=temperature,
             top_k=top_k,
             top_p=top_p,
@@ -365,6 +367,7 @@ class InferEngine(_infinilm.InferEngine):
         temperature=None,
         top_k=None,
         top_p=None,
+        skip_sampling=False,
     ):
         try:
             # TODO: Remove `_underlying` and simplify the corresponding code.
@@ -437,6 +440,7 @@ class InferEngine(_infinilm.InferEngine):
                         temperature=temperature,
                         top_k=top_k,
                         top_p=top_p,
+                        skip_sampling=skip_sampling,
                     )
                 )
                 .output_ids
