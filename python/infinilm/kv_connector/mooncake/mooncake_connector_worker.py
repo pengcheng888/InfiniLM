@@ -31,6 +31,7 @@ from infinilm.kv_connector.mooncake.mooncake_utils import (
     RegisterWorkerPayload,
     should_launch_bootstrap_server,
 )
+from infinilm.infinilm_environment import get_mooncake_kv_transfer_bypass_delay_ms
 from enum import IntEnum
 from typing import Any
 
@@ -125,6 +126,15 @@ class MooncakeConnectorWorker:
         self.parallel_config = MooncakeParallelConfig()
         self.is_kv_producer: bool = kv_transfer_config.kv_role == "kv_producer"
         self.is_kv_consumer: bool = kv_transfer_config.kv_role == "kv_consumer"
+        self.mooncake_kv_transfer_bypass_delay_ms = (
+            get_mooncake_kv_transfer_bypass_delay_ms()
+        )
+        if self.mooncake_kv_transfer_bypass_delay_ms is not None:
+            logger.warning(
+                "Mooncake KV transfer bypass is enabled with simulated delay "
+                "%d ms; generated outputs are not valid for correctness checks.",
+                self.mooncake_kv_transfer_bypass_delay_ms,
+            )
 
         self.num_sender_workers = kv_transfer_config.kv_connector_extra_config.get(
             "num_workers", 10
@@ -623,9 +633,15 @@ class MooncakeConnectorWorker:
         )
 
         start_time = time.perf_counter()
-        ret_value = self.engine.batch_transfer_sync_write(
-            remote_session, src_ptrs, dst_ptrs, lengths
-        )
+        if self.mooncake_kv_transfer_bypass_delay_ms is not None:
+            # This runs in a sender executor thread. Keep the ZMQ control
+            # plane intact while replacing only the KV data write.
+            time.sleep(self.mooncake_kv_transfer_bypass_delay_ms / 1000)
+            ret_value = 0
+        else:
+            ret_value = self.engine.batch_transfer_sync_write(
+                remote_session, src_ptrs, dst_ptrs, lengths
+            )
 
         # MACA transport in Mooncake v0.3.14 only accepts GPU memory.
         # if ret_value == 0 and len(kv_flag_addr) > 0:
