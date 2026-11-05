@@ -7,6 +7,7 @@ import infinicore
 
 from infinilm.cache import PagedKVCacheConfig
 from infinilm.distributed import DistConfig
+from infinilm.infinilm_environment import get_forward_bypass_delay_ms
 from infinilm.lib import _infinilm
 
 from .exception_utils import handle_oom_and_exit
@@ -193,13 +194,14 @@ class InferEngine(_infinilm.InferEngine):
             distributed_config.moe_ep_backend = moe_ep_backend
             distributed_config.moe_ep_size = moe_ep_size
 
+        forward_bypass_delay_ms = get_forward_bypass_delay_ms()
         hf_config_str = json.dumps(self.hf_config)
         super().__init__(
             hf_config_str,
             distributed_config._underlying,
             device._underlying.type,
             cache_config,
-            enable_graph_compiling,
+            enable_graph_compiling and forward_bypass_delay_ms is None,
             attention_backend,
             (
                 parse_dtype(kv_cache_dtype)._underlying
@@ -213,6 +215,8 @@ class InferEngine(_infinilm.InferEngine):
             max_num_batched_tokens,
         )
         self.use_cache = False
+        self.forward_bypass_delay_ms = forward_bypass_delay_ms
+        self._forward_bypass_token_id = 10
 
         self.enable_paged_attn = isinstance(cache_config, PagedKVCacheConfig)
         self.has_mamba_cache = model_uses_mamba_cache(self.hf_config)
@@ -369,6 +373,20 @@ class InferEngine(_infinilm.InferEngine):
         top_p=None,
         skip_sampling=False,
     ):
+        if self.forward_bypass_delay_ms is not None:
+            time.sleep(self.forward_bypass_delay_ms / 1000)
+            if input_offsets is not None:
+                request_count = int(input_offsets.shape[0]) - 1
+            elif input_ids is not None:
+                request_count = int(input_ids.shape[0])
+            else:
+                raise ValueError("Forward bypass requires input_ids or input_offsets")
+
+            return infinicore.from_list(
+                [self._forward_bypass_token_id] * request_count,
+                dtype=infinicore.int64,
+            )
+
         try:
             # TODO: Remove `_underlying` and simplify the corresponding code.
             input_ids = input_ids._underlying if input_ids is not None else None
@@ -471,6 +489,11 @@ class InferEngine(_infinilm.InferEngine):
         top_k=None,
         top_p=None,
     ):
+        if self.forward_bypass_delay_ms is not None:
+            raise NotImplementedError(
+                "INFINILM_FORWARD_BYPASS_DELAY_MS does not support forward_raw()"
+            )
+
         try:
             output = super().forward(
                 self._build_input(

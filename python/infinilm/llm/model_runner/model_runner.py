@@ -9,6 +9,7 @@ from infinilm.config.engine_config import EngineConfig
 from infinilm.distributed import DistConfig
 from infinilm.distributed.pipeline_transport import PipelineControlServer
 from infinilm.infer_engine import InferEngine, read_hf_config
+from infinilm.infinilm_environment import get_forward_bypass_delay_ms
 from infinilm.kv_connector import (
     KVConnectorFactory,
     KVConnectorRole,
@@ -59,6 +60,17 @@ class ModelRunner:
         if config.draft_model_path is not None and self._is_pd_service:
             raise NotImplementedError(
                 "Speculative decoding is not supported with PD disaggregated serving."
+            )
+        forward_bypass_delay_ms = get_forward_bypass_delay_ms()
+        if forward_bypass_delay_ms is not None:
+            if config.draft_model_path is not None:
+                raise NotImplementedError(
+                    "Forward bypass does not support speculative decoding."
+                )
+            logger.warning(
+                "Forward bypass is enabled with simulated delay=%d ms; "
+                "outputs are not valid for correctness checks.",
+                forward_bypass_delay_ms,
             )
 
         hf_config = read_hf_config(config.model_path)
@@ -126,7 +138,7 @@ class ModelRunner:
             )
 
         # Load model weights
-        if not self.config.skip_load:
+        if forward_bypass_delay_ms is None and not self.config.skip_load:
             load_model_state_dict_by_file(
                 self.model_engine, config.model_path, dtype=self.model_engine.dtype
             )
