@@ -698,9 +698,15 @@ class AsyncLLMEngine:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._healthy = True
         self._abort_queue: Optional[janus.Queue] = None
+        self._step_wakeup = threading.Event()
 
     def is_healthy(self) -> bool:
         return bool(self._healthy)
+
+    # TODO: Mooncake connector completion events should also notify the step
+    # thread here; that integration is not wired yet.
+    def _notify_step_thread(self):
+        self._step_wakeup.set()
 
     def start(self):
         """Start the background inference loop."""
@@ -711,6 +717,7 @@ class AsyncLLMEngine:
         self._loop = asyncio.get_running_loop()
         self._abort_queue = janus.Queue()
         self._running = True
+        self._step_wakeup.clear()
         self._step_thread = threading.Thread(
             target=self._step_loop, daemon=True, name="AsyncLLMEngineStepThread"
         )
@@ -724,6 +731,7 @@ class AsyncLLMEngine:
             return
 
         self._running = False
+        self._notify_step_thread()
         if self._step_thread:
             self._step_thread.join(timeout=5)
         self.engine.close()
@@ -740,6 +748,7 @@ class AsyncLLMEngine:
         """
         if self._abort_queue is not None:
             self._abort_queue.sync_q.put((req, reason))
+            self._notify_step_thread()
 
     def _drain_abort_queue(self):
         """Process all pending abort requests before each schedule() call.
@@ -786,12 +795,16 @@ class AsyncLLMEngine:
 
     def _step_loop(self):
         """Background loop that runs inference steps."""
-        while self._running:
+        while True:
+            self._step_wakeup.clear()
+            if not self._running:
+                break
+
             try:
                 self._drain_abort_queue()
                 did_work, pending = self.engine.step()
                 if not did_work:
-                    time.sleep(0.003)
+                    self._step_wakeup.wait(timeout=0.003)
                 elif pending:
                     self._loop.call_soon_threadsafe(self._batch_put, pending)
             except Exception as e:
@@ -926,6 +939,7 @@ class AsyncLLMEngine:
         _ = request.output_queue
 
         self.engine.add_request(request)
+        self._notify_step_thread()
         return request
 
     def add_chat_request(
@@ -985,11 +999,17 @@ class AsyncLLMEngine:
                         )
                         self.add_aborted_req(request, FinishReason.TIMEOUT)
 
-                    token_output = await asyncio.wait_for(
-                        request.output_queue.async_q.get(), timeout=timeout
-                    )
+                    output_queue = request.output_queue.async_q
+                    if output_queue.empty():
+                        token_output = await asyncio.wait_for(
+                            output_queue.get(), timeout=timeout
+                        )
+                    else:
+                        # No await can interleave empty() and get_nowait() on
+                        # this request-private queue in the API event loop.
+                        token_output = output_queue.get_nowait()
 
-                    request.output_queue.async_q.task_done()
+                    output_queue.task_done()
 
                     yield token_output
 
