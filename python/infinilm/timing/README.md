@@ -21,13 +21,13 @@ TIMING_SAMPLE_INTERVAL=32
 TIMING_DIR=<项目根目录>/timing
 ```
 
-当前只支持 `cache_type="paged"` 的普通流式服务路径。以下路径不支持 timing：
+当前支持 `cache_type="paged"` 的普通流式服务路径和 Mooncake PD 分离路径。
+以下路径不支持 timing：
 
 - `StaticScheduler`
 - 非流式 `_chat`
 - speculative decoding
 - pipeline parallel
-- Mooncake connector timing
 
 每个进程输出：
 
@@ -35,17 +35,20 @@ TIMING_DIR=<项目根目录>/timing
 <TIMING_DIR>/<pid>/timing.jsonl
 ```
 
-JSONL 中包含三类事件：
+JSONL 中包含五类事件：
 
 - `batch`：一次物理 prefill / decode batch，包含 batch size；`request_ids`
   包含物理 batch 内全部请求。timing 开启时，这些请求都必须是流式请求。
 - `token`：首 token、按采样间隔选中的 token、finished token。
 - token 采样与 SSE 文本解耦：空文本 token 也会进入采样判断。
 - `finish`：一个流式请求的汇总记录。
+- `kv_send`：P 侧 Mooncake producer batch timing。
+- `kv_receive`：D 侧 KV pull readiness timing。
 
-当前 timing schema version 为 `2`。该版本将 loop 提交时间点改为调用
+当前 timing schema version 为 `3`。v2 将 loop 提交时间点改为调用
 `call_soon_threadsafe()` 之前，并把字段重命名为
 `loop_submit_started_at_ns`。
+v3 增加 Mooncake timing event。
 
 记录的 9 个时间戳为：
 
@@ -60,6 +63,35 @@ batch_put_completed_at_ns
 route_token_received_at_ns
 route_token_end_at_ns
 ```
+
+Mooncake P 侧记录：
+
+```text
+kv_cache_send_ready_at_ns
+batch_transfer_sync_write_started_at_ns
+batch_transfer_sync_write_completed_at_ns
+```
+
+`kv_cache_send_ready_at_ns` 在 P 侧 request 的 KV blocks 准备好并置位
+`send_meta.ready` 前记录。后两个时间点紧贴 Mooncake
+`batch_transfer_sync_write()` 调用两侧，因此传输耗时不含 executor 排队。
+
+Mooncake D 侧记录：
+
+```text
+kv_cache_pull_started_at_ns
+kv_cache_pull_confirmed_at_ns
+```
+
+`kv_cache_pull_started_at_ns` 在 D 决定拉取远程 KV 时记录，timeout 重试时保留
+第一次开始时间。`kv_cache_pull_confirmed_at_ns` 在 ZMQ response 全部处理完成且
+调度器确认 KV 可用后记录。当前 MACA ready flags 被禁用，因此该确认点是 ZMQ
+control plane 的成功确认，不是 CPU flag polling。
+
+Mooncake 事件携带 `clock_domain="local-monotonic"` 和
+`cross_node_comparable=false`。P/D 时间戳不能跨节点相减；离线工具只计算本侧
+duration，或计算同一 D 进程内 `kv_cache_pull_confirmed_at_ns` 到首个 decode
+forward 开始之间的时间。
 
 ## 低开销策略
 

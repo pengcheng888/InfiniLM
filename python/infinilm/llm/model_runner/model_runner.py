@@ -36,7 +36,7 @@ class KVConnectorOutput:
     # IDs of externally computed KV blocks that failed to load.
     # Requests referencing these blocks should be rescheduled to recompute them
     invalid_block_ids: set[int] = field(default_factory=set)  # not used
-    kv_connector_stats = None  # not used
+    kv_connector_stats: dict = field(default_factory=dict)
 
 
 @dataclass

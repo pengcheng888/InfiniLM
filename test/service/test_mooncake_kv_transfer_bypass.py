@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 import pytest
+import threading
 
 from infinilm.kv_connector.mooncake import mooncake_connector_worker
 from infinilm.infinilm_environment import (
@@ -90,3 +91,49 @@ def test_send_blocks_sleeps_and_skips_engine_when_bypass_is_enabled(monkeypatch)
 
     assert result == 0
     assert sleeps == [0.005]
+
+
+def test_send_blocks_records_boundary_timestamps_when_timing_is_enabled(monkeypatch):
+    lock = threading.Lock()
+    worker = SimpleNamespace(
+        _timing_enabled=True,
+        mooncake_kv_transfer_bypass_delay_ms=None,
+        engine=SimpleNamespace(
+            batch_transfer_sync_write=(
+                lambda remote_session, src, dst, lengths: 0
+            )
+        ),
+        _kv_transfer_stats={},
+        _kv_transfer_stats_lock=lock,
+    )
+    worker._record_kv_send_stats = (
+        mooncake_connector_worker.MooncakeConnectorWorker._record_kv_send_stats.__get__(
+            worker
+        )
+    )
+    timestamps = iter([100, 200])
+    monkeypatch.setattr(
+        mooncake_connector_worker.time,
+        "monotonic_ns",
+        lambda: next(timestamps),
+    )
+
+    result = mooncake_connector_worker.MooncakeConnectorWorker._send_blocks(
+        worker,
+        remote_session="127.0.0.1:1234",
+        src_ptrs=[1],
+        dst_ptrs=[2],
+        lengths=[3],
+        xfer_reqs_ids=["req"],
+        xfer_block_ids=[0],
+        kv_flag_addr=[],
+        transfer_batch_id="kv-send-123-1",
+        request_block_counts={"req": 1},
+        request_send_ready_at_ns={"req": 50},
+    )
+
+    assert result == 0
+    event = worker._kv_transfer_stats["req"]
+    assert event["kv_cache_send_ready_at_ns"] == 50
+    assert event["batch_transfer_sync_write_started_at_ns"] == 100
+    assert event["batch_transfer_sync_write_completed_at_ns"] == 200

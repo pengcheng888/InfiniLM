@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -24,9 +25,136 @@ def _valid_timestamp(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
+def _valid_count(value: Any) -> bool:
+    return _valid_timestamp(value) and value >= 0
+
+
 def _ordered(values: list[Any]) -> bool:
     present = [value for value in values if _valid_timestamp(value)]
     return all(left <= right for left, right in zip(present, present[1:]))
+
+
+def _validate_common_kv_fields(
+    record: dict[str, Any],
+    location: str,
+    *,
+    event: str,
+) -> list[str]:
+    errors: list[str] = []
+    expected_role = "prefill" if event == "kv_send" else "decode"
+    expected_scope = (
+        "producer_batch_transfer"
+        if event == "kv_send"
+        else "decode_local_kv_readiness"
+    )
+    if record.get("role") != expected_role:
+        errors.append(f"{location}: invalid {event} role")
+    if record.get("scope") != expected_scope:
+        errors.append(f"{location}: invalid {event} scope")
+    if record.get("clock_domain") != "local-monotonic":
+        errors.append(f"{location}: invalid clock_domain")
+    if record.get("cross_node_comparable") is not False:
+        errors.append(f"{location}: kv timing must not be cross-node comparable")
+    if record.get("outcome") not in {"success", "failed"}:
+        errors.append(f"{location}: invalid {event} outcome")
+    if not _valid_count(record.get("bytes")):
+        errors.append(f"{location}: invalid {event} bytes")
+    if not _valid_count(record.get("block_count")):
+        errors.append(f"{location}: invalid {event} block_count")
+    if not isinstance(record.get("mooncake_kv_transfer_bypassed"), bool):
+        errors.append(f"{location}: invalid mooncake_kv_transfer_bypassed")
+    return errors
+
+
+def _validate_kv_timestamps(
+    record: dict[str, Any],
+    location: str,
+    *,
+    event: str,
+) -> list[str]:
+    if event == "kv_send":
+        fields = (
+            "kv_cache_send_ready_at_ns",
+            "batch_transfer_sync_write_started_at_ns",
+            "batch_transfer_sync_write_completed_at_ns",
+        )
+    else:
+        fields = (
+            "kv_cache_pull_started_at_ns",
+            "kv_cache_pull_confirmed_at_ns",
+        )
+
+    if not all(_valid_timestamp(record.get(field)) for field in fields):
+        return [f"{location}: missing or invalid {event} timestamps"]
+    if not _ordered([record.get(field) for field in fields]):
+        return [f"{location}: invalid {event} timestamp order"]
+    return []
+
+
+def _validate_kv_send_batch_fields(
+    record: dict[str, Any],
+    location: str,
+) -> list[str]:
+    errors: list[str] = []
+    count_fields = (
+        "batch_size",
+        "batch_request_count",
+        "batch_block_count",
+        "batch_bytes",
+        "request_block_count",
+    )
+    for field in count_fields:
+        if not _valid_count(record.get(field)):
+            errors.append(f"{location}: invalid {field}")
+    if not isinstance(record.get("batch_id"), str) or not record.get("batch_id"):
+        errors.append(f"{location}: invalid batch_id")
+    return errors
+
+
+def _validate_kv_send_batches(records: list[dict[str, Any]]) -> list[str]:
+    errors: list[str] = []
+    batches: dict[tuple[Any, str], list[dict[str, Any]]] = defaultdict(list)
+    for record in records:
+        if record.get("event") != "kv_send":
+            continue
+        batch_id = record.get("batch_id")
+        if isinstance(batch_id, str) and batch_id:
+            batches[(record.get("pid"), batch_id)].append(record)
+
+    for (_, batch_id), batch_records in batches.items():
+        common_fields = (
+            "batch_transfer_sync_write_started_at_ns",
+            "batch_transfer_sync_write_completed_at_ns",
+            "batch_request_count",
+            "batch_block_count",
+            "batch_bytes",
+            "block_count",
+            "bytes",
+        )
+        for field in common_fields:
+            if len({record.get(field) for record in batch_records}) != 1:
+                errors.append(f"kv_send batch {batch_id}: inconsistent {field}")
+
+        expected_count = batch_records[0].get("batch_request_count")
+        if expected_count != len(batch_records):
+            errors.append(
+                f"kv_send batch {batch_id}: expected {expected_count} requests, "
+                f"got {len(batch_records)}"
+            )
+
+        request_blocks = [
+            record.get("request_block_count")
+            for record in batch_records
+            if _valid_count(record.get("request_block_count"))
+        ]
+        if len(request_blocks) != len(batch_records) or sum(request_blocks) != (
+            batch_records[0].get("batch_block_count")
+        ):
+            errors.append(
+                f"kv_send batch {batch_id}: request_block_count does not sum "
+                "to batch_block_count"
+            )
+    return errors
 
 
 def validate_timing_root(root: Path | str) -> dict[str, Any]:
@@ -37,10 +165,11 @@ def validate_timing_root(root: Path | str) -> dict[str, Any]:
     warnings: list[str] = []
     finish_counts: dict[str, int] = {}
     record_count = 0
+    records: list[dict[str, Any]] = []
 
     for path in files:
         try:
-            records = [
+            file_records = [
                 json.loads(line)
                 for line in path.read_text(encoding="utf-8").splitlines()
                 if line.strip()
@@ -48,8 +177,9 @@ def validate_timing_root(root: Path | str) -> dict[str, Any]:
         except (OSError, json.JSONDecodeError) as exc:
             parse_errors.append(f"{path}: {exc}")
             continue
+        records.extend(file_records)
 
-        for line_number, record in enumerate(records, 1):
+        for line_number, record in enumerate(file_records, 1):
             record_count += 1
             location = f"{path}:{line_number}"
             event = record.get("event")
@@ -59,11 +189,11 @@ def validate_timing_root(root: Path | str) -> dict[str, Any]:
                     errors.append(f"{location}: missing request_id")
                     continue
                 finish_counts[request_id] = finish_counts.get(request_id, 0) + 1
-            elif event not in {"batch", "token"}:
+            elif event not in {"batch", "token", "kv_send", "kv_receive"}:
                 errors.append(f"{location}: unknown event {event!r}")
                 continue
 
-            if record.get("schema_version") != 2:
+            if record.get("schema_version") != 3:
                 errors.append(f"{location}: invalid schema_version")
 
             if event == "batch":
@@ -84,6 +214,15 @@ def validate_timing_root(root: Path | str) -> dict[str, Any]:
                     ]
                 ):
                     errors.append(f"{location}: invalid forward timestamps")
+                continue
+
+            if event in {"kv_send", "kv_receive"}:
+                if not isinstance(request_id, str) or not request_id:
+                    errors.append(f"{location}: missing request_id")
+                errors.extend(_validate_common_kv_fields(record, location, event=event))
+                errors.extend(_validate_kv_timestamps(record, location, event=event))
+                if event == "kv_send":
+                    errors.extend(_validate_kv_send_batch_fields(record, location))
                 continue
 
             if not isinstance(request_id, str) or not request_id:
@@ -113,8 +252,6 @@ def validate_timing_root(root: Path | str) -> dict[str, Any]:
             ):
                 errors.append(f"{location}: invalid StepThread timestamps")
 
-            # The submit timestamp is captured before call_soon_threadsafe(), so
-            # all thread-boundary timestamps have a strict order.
             if not _ordered(
                 [
                     record["forward_completed_at_ns"],
@@ -126,6 +263,8 @@ def validate_timing_root(root: Path | str) -> dict[str, Any]:
                 ]
             ):
                 errors.append(f"{location}: invalid API-loop timestamps")
+
+    errors.extend(_validate_kv_send_batches(records))
 
     duplicated = {
         request_id: count for request_id, count in finish_counts.items() if count > 1

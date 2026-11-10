@@ -16,7 +16,7 @@ from infinilm.timing.config import (
     timing_enabled_for,
 )
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 MAX_PENDING_RECORDS = 1024
 MAX_WRITE_BATCH_RECORDS = 128
 
@@ -31,6 +31,9 @@ class DisabledTimingRecorder:
         return
 
     def record_finish(self, payload: dict[str, Any]) -> None:
+        return
+
+    def record_event(self, event: str, payload: dict[str, Any]) -> None:
         return
 
     def should_record_token(self, token_index: int, finished: bool) -> bool:
@@ -92,6 +95,9 @@ class TimingRecorder:
 
     def record_finish(self, payload: dict[str, Any]) -> None:
         self._enqueue("finish", payload)
+
+    def record_event(self, event: str, payload: dict[str, Any]) -> None:
+        self._enqueue(event, payload)
 
     def stats(self) -> dict[str, int]:
         with self._lock:

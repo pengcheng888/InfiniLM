@@ -5,9 +5,11 @@ except ImportError as e:
 
 import asyncio
 import logging
+import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Mapping
 
 import httpx
 import infinicore
@@ -32,6 +34,7 @@ from infinilm.kv_connector.mooncake.mooncake_utils import (
     should_launch_bootstrap_server,
 )
 from infinilm.infinilm_environment import get_mooncake_kv_transfer_bypass_delay_ms
+from infinilm.timing.config import timing_enabled_for
 from enum import IntEnum
 from typing import Any
 
@@ -92,6 +95,7 @@ class SendBlockMeta:
     need_send: int = 0
     sent: int = 0
     sending: int = 0
+    kv_cache_send_ready_at_ns: int | None = None
 
 
 class MooncakeAgentMetadata(
@@ -126,6 +130,7 @@ class MooncakeConnectorWorker:
         self.parallel_config = MooncakeParallelConfig()
         self.is_kv_producer: bool = kv_transfer_config.kv_role == "kv_producer"
         self.is_kv_consumer: bool = kv_transfer_config.kv_role == "kv_consumer"
+        self._timing_enabled = timing_enabled_for("paged")
         self.mooncake_kv_transfer_bypass_delay_ms = (
             get_mooncake_kv_transfer_bypass_delay_ms()
         )
@@ -173,6 +178,9 @@ class MooncakeConnectorWorker:
         self.num_blocks = 0
         self.kv_caches_base_addr: list[int] = []
         self.device_kv_caches: dict[str, infinicore.Tensor] = {}
+        self._kv_transfer_stats: dict[ReqId, dict[str, Any]] = {}
+        self._kv_transfer_stats_lock = threading.Lock()
+        self._kv_transfer_batch_sequence = 0
         # MACA transport in Mooncake v0.3.14 only accepts GPU memory.
         # Keep the wire-format fields, but do not advertise CPU ready-flag buffers.
         self.kv_flag_ptrs: list[int] = []
@@ -238,6 +246,97 @@ class MooncakeConnectorWorker:
     def _async_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         asyncio.set_event_loop(loop)
         loop.run_forever()
+
+    def _record_kv_send_stats(
+        self,
+        request_ids: list[ReqId] | set[ReqId],
+        *,
+        started_at_ns: int,
+        completed_at_ns: int,
+        block_count: int,
+        bytes_count: int,
+        outcome: str,
+        batch_size: int,
+        batch_id: str,
+        request_block_counts: Mapping[ReqId, int],
+        request_send_ready_at_ns: Mapping[ReqId, int],
+    ) -> None:
+        """Cache P-local timing; the engine step drains and writes it later."""
+        if not self._timing_enabled:
+            return
+
+        payload = {
+            "event": "kv_send",
+            "request_id": None,
+            "role": "prefill",
+            "scope": "producer_batch_transfer",
+            "clock_domain": "local-monotonic",
+            "cross_node_comparable": False,
+            "kv_cache_send_ready_at_ns": None,
+            "batch_transfer_sync_write_started_at_ns": started_at_ns,
+            "batch_transfer_sync_write_completed_at_ns": completed_at_ns,
+            "bytes": bytes_count,
+            "block_count": block_count,
+            "batch_size": batch_size,
+            "batch_id": batch_id,
+            "batch_request_count": batch_size,
+            "batch_block_count": block_count,
+            "batch_bytes": bytes_count,
+            "request_block_count": None,
+            "mooncake_kv_transfer_bypassed": (
+                self.mooncake_kv_transfer_bypass_delay_ms is not None
+            ),
+            "outcome": outcome,
+        }
+        with self._kv_transfer_stats_lock:
+            for request_id in request_ids:
+                item = dict(payload)
+                item["request_id"] = request_id
+                item["request_block_count"] = request_block_counts.get(request_id, 0)
+                item["kv_cache_send_ready_at_ns"] = request_send_ready_at_ns.get(
+                    request_id
+                )
+                self._kv_transfer_stats[request_id] = item
+
+    def _record_kv_receive_stats(
+        self,
+        request_id: ReqId,
+        *,
+        started_at_ns: int,
+        confirmed_at_ns: int,
+        block_count: int,
+        bytes_count: int,
+        outcome: str,
+    ) -> None:
+        """Cache D-local KV readiness timing for the engine step."""
+        if not self._timing_enabled:
+            return
+
+        payload = {
+            "event": "kv_receive",
+            "request_id": request_id,
+            "role": "decode",
+            "scope": "decode_local_kv_readiness",
+            "clock_domain": "local-monotonic",
+            "cross_node_comparable": False,
+            "kv_cache_pull_started_at_ns": started_at_ns,
+            "kv_cache_pull_confirmed_at_ns": confirmed_at_ns,
+            "bytes": bytes_count,
+            "block_count": block_count,
+            "mooncake_kv_transfer_bypassed": (
+                self.mooncake_kv_transfer_bypass_delay_ms is not None
+            ),
+            "outcome": outcome,
+        }
+        with self._kv_transfer_stats_lock:
+            self._kv_transfer_stats[request_id] = payload
+
+    def get_kv_connector_stats(self) -> dict[ReqId, dict[str, Any]]:
+        """Drain timing events from the Mooncake sender/receiver loops."""
+        with self._kv_transfer_stats_lock:
+            stats = self._kv_transfer_stats
+            self._kv_transfer_stats = {}
+            return stats
 
     def __del__(self):
         self.shutdown()
@@ -477,6 +576,25 @@ class MooncakeConnectorWorker:
             ret_value = 0
             if len(xfer_reqs_ids) > 0 and src_ptrs:
                 remote_session = f"{meta.remote_hostname}:{meta.remote_port}"
+                transfer_batch_id = ""
+                request_block_counts: Mapping[ReqId, int] = {}
+                request_send_ready_at_ns: Mapping[ReqId, int] = {}
+                if self._timing_enabled:
+                    with self._kv_transfer_stats_lock:
+                        self._kv_transfer_batch_sequence += 1
+                        transfer_batch_id = (
+                            "kv-send-"
+                            f"{os.getpid()}-{self._kv_transfer_batch_sequence}"
+                        )
+                    request_block_counts = {
+                        d_req_id: len(meta.req_blocks[d_req_id][1])
+                        for d_req_id in xfer_reqs_ids
+                    }
+                    request_send_ready_at_ns = {
+                        d_req_id: send_meta.kv_cache_send_ready_at_ns
+                        for d_req_id, send_meta in ready_reqs
+                        if send_meta.kv_cache_send_ready_at_ns is not None
+                    }
 
                 # wait until return value
                 kv_flag_addr = meta.kv_flag_addr
@@ -490,6 +608,9 @@ class MooncakeConnectorWorker:
                     xfer_reqs_ids,
                     xfer_block_ids,
                     kv_flag_addr,
+                    transfer_batch_id,
+                    request_block_counts,
+                    request_send_ready_at_ns,
                 )
 
             if ret_value != 0:
@@ -625,6 +746,9 @@ class MooncakeConnectorWorker:
         xfer_reqs_ids: list[ReqId],
         xfer_block_ids: list[int],
         kv_flag_addr: list[int],
+        transfer_batch_id: str = "",
+        request_block_counts: Mapping[ReqId, int] | None = None,
+        request_send_ready_at_ns: Mapping[ReqId, int] | None = None,
     ) -> int:
         logger.debug(
             "mooncake engine batch_transfer_sync_write to %s start,xfer_reqs_ids: %s",
@@ -632,7 +756,8 @@ class MooncakeConnectorWorker:
             ", ".join(xfer_reqs_ids),
         )
 
-        start_time = time.perf_counter()
+        timing_enabled = bool(getattr(self, "_timing_enabled", False))
+        started_at_ns = time.monotonic_ns() if timing_enabled else 0
         if self.mooncake_kv_transfer_bypass_delay_ms is not None:
             # This runs in a sender executor thread. Keep the ZMQ control
             # plane intact while replacing only the KV data write.
@@ -642,6 +767,7 @@ class MooncakeConnectorWorker:
             ret_value = self.engine.batch_transfer_sync_write(
                 remote_session, src_ptrs, dst_ptrs, lengths
             )
+        completed_at_ns = time.monotonic_ns() if timing_enabled else 0
 
         # MACA transport in Mooncake v0.3.14 only accepts GPU memory.
         # if ret_value == 0 and len(kv_flag_addr) > 0:
@@ -667,7 +793,9 @@ class MooncakeConnectorWorker:
             logger.debug(
                 "mooncake engine sending to %s done, took %s, xfer_reqs_ids: %s",
                 remote_session,
-                time.perf_counter() - start_time,
+                (completed_at_ns - started_at_ns) / 1_000_000_000
+                if timing_enabled
+                else 0,
                 ", ".join(xfer_reqs_ids),
             )
         else:
@@ -676,6 +804,19 @@ class MooncakeConnectorWorker:
                 remote_session,
                 ret_value,
                 ", ".join(xfer_reqs_ids),
+            )
+        if timing_enabled:
+            self._record_kv_send_stats(
+                xfer_reqs_ids,
+                started_at_ns=started_at_ns,
+                completed_at_ns=completed_at_ns,
+                block_count=len(set(xfer_block_ids)),
+                bytes_count=sum(lengths),
+                outcome="success" if ret_value == 0 else "failed",
+                batch_size=len(xfer_reqs_ids),
+                batch_id=transfer_batch_id,
+                request_block_counts=request_block_counts or {},
+                request_send_ready_at_ns=request_send_ready_at_ns or {},
             )
         return ret_value
 
@@ -951,6 +1092,26 @@ class MooncakeConnectorWorker:
                 # MACA transport in Mooncake v0.3.14 only accepts GPU memory.
                 # await self._wait_for_kv_flags_ready(success_block_ids)
 
+                if self._timing_enabled:
+                    kv_cache_pull_confirmed_at_ns = time.monotonic_ns()
+                    failed_req_ids = set(self.xfer_failed_recving_reqs_ids)
+                    for req_id in finished_recving_reqs:
+                        pull_meta = pull_metas[req_id]
+                        self._record_kv_receive_stats(
+                            req_id,
+                            started_at_ns=pull_meta.kv_cache_pull_started_at_ns
+                            or kv_cache_pull_confirmed_at_ns,
+                            confirmed_at_ns=kv_cache_pull_confirmed_at_ns,
+                            block_count=len(pull_meta.local_block_ids),
+                            bytes_count=(
+                                len(pull_meta.local_block_ids)
+                                * self.block_len
+                                * len(self.kv_caches_base_addr)
+                            ),
+                            outcome="failed"
+                            if req_id in failed_req_ids
+                            else "success",
+                        )
                 self.finished_recving_reqs.update(finished_recving_reqs)
 
         except zmq.ContextTerminated:
@@ -1119,6 +1280,13 @@ class MooncakeConnectorWorker:
             self.timeout_reqs_to_recv.clear()
 
         for remote_engine_id, pull_metas in reqs_to_recv.items():
+            if self._timing_enabled:
+                kv_cache_pull_started_at_ns = time.monotonic_ns()
+                for pull_meta in pull_metas.values():
+                    if pull_meta.kv_cache_pull_started_at_ns is None:
+                        pull_meta.kv_cache_pull_started_at_ns = (
+                            kv_cache_pull_started_at_ns
+                        )
             if remote_engine_id not in self._remote_agents:
                 asyncio.create_task(
                     self.handle_new_engine_id(remote_engine_id, pull_metas)
@@ -1134,6 +1302,8 @@ class MooncakeConnectorWorker:
                 send_meta.p_req_id = p_req_id
                 send_meta.local_block_ids = block_ids
                 send_meta.expire_time = time.perf_counter() + 480
+                if self._timing_enabled:
+                    send_meta.kv_cache_send_ready_at_ns = time.monotonic_ns()
                 send_meta.ready.set()
             else:
                 # From update_state_after_alloc(),

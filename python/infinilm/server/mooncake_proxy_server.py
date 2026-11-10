@@ -297,7 +297,8 @@ async def send_request(
         "do_remote_decode": True,
         "transfer_id": f"xfer-{request_id}",
     }
-    req_data["stream"] = False
+    # The timing-enabled backend only accepts streaming requests.
+    req_data["stream"] = True
     req_data["max_tokens"] = 1
 
     if "max_completion_tokens" in req_data:

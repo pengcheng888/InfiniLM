@@ -82,6 +82,7 @@ class Scheduler:
         self.pending_free_blocks: dict[str, list[int]] = {}
         self.pending_kv_decode_blocks: int = 0
         self.remote_kv_requests: dict[str, InferenceRequest] = {}
+        self._pending_timing_events: list[dict] = []
 
         self.cache_manager = BlockManager(num_blocks=num_blocks, block_size=block_size)
         self.has_mamba_cache = has_mamba_cache
@@ -547,6 +548,12 @@ class Scheduler:
         invalid_block_ids = (
             getattr(model_output.kv_connector_output, "invalid_block_ids", None) or []
         )
+        timing_stats = (
+            getattr(model_output.kv_connector_output, "kv_connector_stats", None)
+            or {}
+        )
+        if isinstance(timing_stats, dict):
+            self._pending_timing_events.extend(timing_stats.values())
 
         for req_id in finished_recving_req_ids:
             if req_id in self.pending_free_blocks:
@@ -584,6 +591,12 @@ class Scheduler:
                     )
                     break
             req.num_computed_tokens = trusted_boundary
+
+    def pop_timing_events(self) -> list[dict]:
+        """Drain connector timing events collected during this model step."""
+        events = self._pending_timing_events
+        self._pending_timing_events = []
+        return events
 
     def get_cache_stats(self) -> dict:
         """Get cache statistics."""

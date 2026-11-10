@@ -63,6 +63,175 @@ def _load_records(root: Path) -> list[dict[str, Any]]:
     return records
 
 
+def _merged_interval_union_ms(
+    records: list[dict[str, Any]],
+    start_field: str,
+    end_field: str,
+) -> float:
+    by_pid: dict[Any, list[list[int]]] = defaultdict(list)
+    for record in records:
+        started = record.get(start_field)
+        completed = record.get(end_field)
+        if isinstance(started, int) and isinstance(completed, int):
+            by_pid[record.get("pid", "unknown")].append([started, completed])
+
+    total_ms = 0.0
+    for intervals in by_pid.values():
+        intervals.sort(key=lambda item: item[0])
+        merged: list[list[int]] = []
+        for started, completed in intervals:
+            if not merged or started > merged[-1][1]:
+                merged.append([started, completed])
+            else:
+                merged[-1][1] = max(merged[-1][1], completed)
+        total_ms += sum(
+            completed - started for started, completed in merged
+        ) / 1_000_000
+    return total_ms
+
+
+def _mooncake_metrics(records: list[dict[str, Any]]) -> dict[str, Any]:
+    sends = [record for record in records if record.get("event") == "kv_send"]
+    receives = [
+        record for record in records if record.get("event") == "kv_receive"
+    ]
+    unique_sends: dict[tuple[Any, str], dict[str, Any]] = {}
+    for record in sends:
+        batch_id = record.get("batch_id")
+        if isinstance(batch_id, str) and batch_id:
+            unique_sends[(record.get("pid"), batch_id)] = record
+    unique_send_records = list(unique_sends.values())
+
+    send_bytes = sum(
+        record.get("batch_bytes", 0)
+        for record in unique_send_records
+        if isinstance(record.get("batch_bytes", 0), int)
+    )
+    receive_bytes = sum(
+        record.get("bytes", 0)
+        for record in receives
+        if isinstance(record.get("bytes", 0), int)
+    )
+    send_busy_ms = _merged_interval_union_ms(
+        unique_send_records,
+        "batch_transfer_sync_write_started_at_ns",
+        "batch_transfer_sync_write_completed_at_ns",
+    )
+    receive_busy_ms = _merged_interval_union_ms(
+        receives,
+        "kv_cache_pull_started_at_ns",
+        "kv_cache_pull_confirmed_at_ns",
+    )
+
+    decode_batches_by_request: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for batch in records:
+        if batch.get("event") != "batch" or batch.get("phase") != "decode":
+            continue
+        for request_id in batch.get("request_ids", []):
+            if isinstance(request_id, str):
+                decode_batches_by_request[request_id].append(batch)
+
+    decode_start_delays: list[float] = []
+    for receive in receives:
+        confirmed = receive.get("kv_cache_pull_confirmed_at_ns")
+        request_id = receive.get("request_id")
+        if not isinstance(confirmed, int) or not isinstance(request_id, str):
+            continue
+        starts = [
+            batch.get("forward_started_at_ns")
+            for batch in decode_batches_by_request.get(request_id, [])
+            if isinstance(batch.get("forward_started_at_ns"), int)
+            and batch["forward_started_at_ns"] >= confirmed
+        ]
+        if starts:
+            decode_start_delays.append((min(starts) - confirmed) / 1_000_000)
+
+    return {
+        "kv_send": {
+            "request_event_count": len(sends),
+            "unique_batch_count": len(unique_send_records),
+            "kv_cache_send_ready_to_batch_transfer_sync_write_started_ms": (
+                _distribution(
+                    [
+                        value
+                        for record in sends
+                        if (
+                            value := _elapsed_ms(
+                                record,
+                                "kv_cache_send_ready_at_ns",
+                                "batch_transfer_sync_write_started_at_ns",
+                            )
+                        )
+                        is not None
+                    ]
+                )
+            ),
+            "batch_transfer_sync_write_request_weighted_ms": _distribution(
+                [
+                    value
+                    for record in sends
+                    if (
+                        value := _elapsed_ms(
+                            record,
+                            "batch_transfer_sync_write_started_at_ns",
+                            "batch_transfer_sync_write_completed_at_ns",
+                        )
+                    )
+                    is not None
+                ]
+            ),
+            "batch_transfer_sync_write_batch_weighted_ms": _distribution(
+                [
+                    value
+                    for record in unique_send_records
+                    if (
+                        value := _elapsed_ms(
+                            record,
+                            "batch_transfer_sync_write_started_at_ns",
+                            "batch_transfer_sync_write_completed_at_ns",
+                        )
+                    )
+                    is not None
+                ]
+            ),
+            "batch_bytes_total": send_bytes,
+            "busy_union_ms": send_busy_ms,
+            "throughput_during_busy_gbps": (
+                send_bytes / (send_busy_ms / 1000) / (1000**3)
+                if send_busy_ms > 0
+                else None
+            ),
+        },
+        "kv_receive": {
+            "request_event_count": len(receives),
+            "kv_cache_pull_readiness_ms": _distribution(
+                [
+                    value
+                    for record in receives
+                    if (
+                        value := _elapsed_ms(
+                            record,
+                            "kv_cache_pull_started_at_ns",
+                            "kv_cache_pull_confirmed_at_ns",
+                        )
+                    )
+                    is not None
+                ]
+            ),
+            "decode_start_after_kv_cache_pull_confirmed_ms": _distribution(
+                decode_start_delays
+            ),
+            "request_bytes_total": receive_bytes,
+            "busy_union_ms": receive_busy_ms,
+            "throughput_during_busy_gbps": (
+                receive_bytes / (receive_busy_ms / 1000) / (1000**3)
+                if receive_busy_ms > 0
+                else None
+            ),
+        },
+    }
+
+
 def compute_timing_metrics(root: Path | str) -> dict[str, Any]:
     records = _load_records(Path(root))
     tokens = [record for record in records if record.get("event") == "token"]
@@ -95,9 +264,7 @@ def compute_timing_metrics(root: Path | str) -> dict[str, Any]:
         for name, start, end in token_metric_edges
     }
 
-    first_tokens = [
-        record for record in tokens if record.get("token_index") == 0
-    ]
+    first_tokens = [record for record in tokens if record.get("token_index") == 0]
     finished_tokens = [
         record for record in tokens if record.get("finished") is True
     ]
@@ -179,6 +346,7 @@ def compute_timing_metrics(root: Path | str) -> dict[str, Any]:
             }
             for phase, phase_batches in batch_by_phase.items()
         },
+        "mooncake": _mooncake_metrics(records),
     }
 
 
@@ -194,6 +362,7 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(report["token_metrics_ms"], ensure_ascii=False, indent=2))
         print(json.dumps(report["request_metrics_ms"], ensure_ascii=False, indent=2))
         print(json.dumps(report["batch"], ensure_ascii=False, indent=2))
+        print(json.dumps(report["mooncake"], ensure_ascii=False, indent=2))
     return 0
 
 

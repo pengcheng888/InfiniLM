@@ -172,6 +172,11 @@ class LLMEngine:
         runner_output = self.model_runner.execute_model(scheduler_output)
         sampled_token_ids = runner_output.sampled_token_ids
         self.scheduler.update_from_output(runner_output)
+        if self.timing_recorder.enabled:
+            for timing_event in self.scheduler.pop_timing_events():
+                self.timing_recorder.record_event(
+                    timing_event["event"], timing_event
+                )
 
         forward_timing = runner_output.forward_timing
         phase = "prefill" if scheduler_output.is_prefill else "decode"

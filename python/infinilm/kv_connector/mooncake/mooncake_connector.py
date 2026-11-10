@@ -31,6 +31,7 @@ class PullReqMeta:
     remote_bootstrap_addr: str
     expire_time: float = float("inf")  # not used
     pull_tasks_count: int = 0
+    kv_cache_pull_started_at_ns: int | None = None
 
 
 class MooncakeConnectorMetadata(KVConnectorMetadata):
@@ -162,3 +163,8 @@ class MooncakeConnector(KVConnectorBase):
         """Return finished receive and send request id sets, if any."""
         assert self.connector_worker is not None
         return self.connector_worker.get_finished()
+
+    def get_kv_connector_stats(self):
+        """Return and clear timing events produced by the worker loops."""
+        assert self.connector_worker is not None
+        return self.connector_worker.get_kv_connector_stats()

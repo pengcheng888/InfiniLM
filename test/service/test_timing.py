@@ -434,6 +434,42 @@ def test_connector_only_step_without_forward_timing_keeps_step_thread_alive():
     assert captured == {"forward_timing": None, "timing_phase": "decode"}
 
 
+def test_connector_only_step_records_pending_timing_events():
+    engine = object.__new__(LLMEngine)
+    recorded = []
+    event = {"event": "kv_receive", "request_id": "request"}
+    engine.timing_recorder = SimpleNamespace(
+        enabled=True,
+        record_event=lambda event_name, payload: recorded.append(
+            (event_name, payload)
+        ),
+    )
+    engine.scheduler = SimpleNamespace(
+        schedule=lambda: SimpleNamespace(
+            scheduled_requests=[],
+            num_requests=0,
+            is_prefill=False,
+        ),
+        update_from_output=lambda output: None,
+        pop_timing_events=lambda: [event],
+    )
+    engine.model_runner = SimpleNamespace(
+        execute_model=lambda output: SimpleNamespace(
+            forward_timing=None,
+            sampled_token_ids=[],
+            kv_connector_output=SimpleNamespace(
+                finished_recving={"request"},
+                kv_connector_stats={"request": event},
+            ),
+        )
+    )
+    engine._update_requests = lambda *args: []
+
+    engine.step()
+
+    assert recorded == [("kv_receive", event)]
+
+
 def test_timing_enabled_engine_rejects_untimed_scheduled_request():
     engine = object.__new__(LLMEngine)
     untimed_request = InferenceRequest(
@@ -547,13 +583,28 @@ def test_recorder_writes_batch_token_and_finish_records(tmp_path):
     records = [json.loads(line) for line in files[0].read_text().splitlines()]
     assert [record["event"] for record in records] == ["batch", "token", "finish"]
     assert records[1] == {
-        "schema_version": 2,
+        "schema_version": 3,
         "event": "token",
         "pid": records[0]["pid"],
         "request_id": "request",
         **timestamps,
     }
     assert recorder.stats() == {"dropped_records": 0, "pending_records": 0}
+
+
+def test_recorder_writes_generic_timing_event(tmp_path):
+    recorder = TimingRecorder(root=tmp_path)
+    recorder.record_event("kv_receive", {"request_id": "request"})
+    recorder.close()
+
+    records = [
+        json.loads(line)
+        for line in next(tmp_path.glob("*/timing.jsonl")).read_text().splitlines()
+    ]
+
+    assert records[0]["event"] == "kv_receive"
+    assert records[0]["request_id"] == "request"
+    assert records[0]["schema_version"] == 3
 
 
 def test_recorder_writes_pending_records_in_batches(tmp_path):
@@ -599,7 +650,7 @@ def test_validate_and_compute_timing_records(tmp_path):
     }
     records = [
         {
-            "schema_version": 2,
+            "schema_version": 3,
             "event": "batch",
             "request_ids": ["request"],
             "phase": "prefill",
@@ -609,7 +660,7 @@ def test_validate_and_compute_timing_records(tmp_path):
             "forward_completed_at_ns": 130,
         },
         {
-            "schema_version": 2,
+            "schema_version": 3,
             "event": "token",
             "request_id": "request",
             "token_index": 0,
@@ -617,13 +668,13 @@ def test_validate_and_compute_timing_records(tmp_path):
             **first_timestamps,
         },
         {
-            "schema_version": 2,
+            "schema_version": 3,
             "event": "finish",
             "request_id": "request",
             **first_timestamps,
         },
         {
-            "schema_version": 2,
+            "schema_version": 3,
             "event": "token",
             "request_id": "request-2",
             "token_index": 0,
@@ -631,7 +682,7 @@ def test_validate_and_compute_timing_records(tmp_path):
             **second_timestamps,
         },
         {
-            "schema_version": 2,
+            "schema_version": 3,
             "event": "finish",
             "request_id": "request-2",
             **second_timestamps,
@@ -701,11 +752,101 @@ def test_validate_and_compute_timing_records(tmp_path):
         assert set(phase_metrics["forward_duration_ms"]) == distribution_fields
 
 
+def test_validate_and_compute_mooncake_timing_records(tmp_path):
+    pid_dir = tmp_path / "123"
+    pid_dir.mkdir()
+    send_common = {
+        "schema_version": 3,
+        "event": "kv_send",
+        "pid": 123,
+        "role": "prefill",
+        "scope": "producer_batch_transfer",
+        "clock_domain": "local-monotonic",
+        "cross_node_comparable": False,
+        "batch_transfer_sync_write_started_at_ns": 200,
+        "batch_transfer_sync_write_completed_at_ns": 300,
+        "batch_size": 2,
+        "batch_id": "kv-send-123-1",
+        "batch_request_count": 2,
+        "batch_block_count": 3,
+        "batch_bytes": 300,
+        "block_count": 3,
+        "bytes": 300,
+        "mooncake_kv_transfer_bypassed": False,
+        "outcome": "success",
+    }
+    records = [
+        {
+            **send_common,
+            "request_id": "request-1",
+            "kv_cache_send_ready_at_ns": 100,
+            "request_block_count": 1,
+        },
+        {
+            **send_common,
+            "request_id": "request-2",
+            "kv_cache_send_ready_at_ns": 150,
+            "request_block_count": 2,
+        },
+        {
+            "schema_version": 3,
+            "event": "kv_receive",
+            "pid": 123,
+            "request_id": "request-1",
+            "role": "decode",
+            "scope": "decode_local_kv_readiness",
+            "clock_domain": "local-monotonic",
+            "cross_node_comparable": False,
+            "kv_cache_pull_started_at_ns": 350,
+            "kv_cache_pull_confirmed_at_ns": 500,
+            "block_count": 1,
+            "bytes": 100,
+            "mooncake_kv_transfer_bypassed": False,
+            "outcome": "success",
+        },
+        {
+            "schema_version": 3,
+            "event": "batch",
+            "pid": 123,
+            "request_ids": ["request-1"],
+            "phase": "decode",
+            "batch_size": 1,
+            "batch_id": "decode",
+            "forward_started_at_ns": 600,
+            "forward_completed_at_ns": 700,
+        },
+    ]
+    (pid_dir / "timing.jsonl").write_text(
+        "".join(json.dumps(record) + "\n" for record in records)
+    )
+
+    validation = validate_timing_root(tmp_path)
+    assert validation["valid"] is True
+
+    metrics = compute_timing_metrics(tmp_path)
+    mooncake = metrics["mooncake"]
+    assert mooncake["kv_send"]["unique_batch_count"] == 1
+    assert mooncake["kv_send"]["request_event_count"] == 2
+    assert mooncake["kv_send"]["batch_transfer_sync_write_batch_weighted_ms"] == {
+        "count": 1,
+        "avg_ms": pytest.approx(0.0001),
+        "min_ms": pytest.approx(0.0001),
+        "max_ms": pytest.approx(0.0001),
+        "p50_ms": pytest.approx(0.0001),
+        "p95_ms": pytest.approx(0.0001),
+        "p99_ms": pytest.approx(0.0001),
+    }
+    assert mooncake["kv_receive"]["kv_cache_pull_readiness_ms"]["count"] == 1
+    assert mooncake["kv_receive"]["decode_start_after_kv_cache_pull_confirmed_ms"][
+        "avg_ms"
+    ] == pytest.approx(0.0001)
+
+
 def test_validate_rejects_timestamp_order(tmp_path):
     pid_dir = tmp_path / "123"
     pid_dir.mkdir()
     record = {
-        "schema_version": 2,
+        "schema_version": 3,
         "event": "token",
         "request_id": "request",
         "service_entered_at_ns": 200,
