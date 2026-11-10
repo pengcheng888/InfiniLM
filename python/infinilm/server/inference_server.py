@@ -19,6 +19,7 @@ from infinilm.base_config import BaseConfig
 from infinilm.config import KVTransferConfig
 from infinilm.llm import AsyncLLMEngine, FinishReason, SamplingParams
 from infinilm.moe_config import configure_moe_ep_backend
+from infinilm.timing.timestamps import RequestTiming
 
 logger = logging.getLogger(__name__)
 
@@ -260,6 +261,9 @@ class InferenceServer:
         @app.post("/chat/completions")
         @app.post("/v1/chat/completions")
         async def chat_completions(request: Request):
+            service_entered_at_ns = (
+                time.monotonic_ns() if self.engine.timing_enabled else None
+            )
             try:
                 data = await request.json()
                 # logger.debug(f"Received request data: {data}")
@@ -281,9 +285,27 @@ class InferenceServer:
             stream = data.get("stream", False)
             request_id = f"cmpl-{uuid.uuid4().hex}"
 
+            if not stream and self.engine.timing_enabled:
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "error": {
+                            "message": "Non-stream requests are unsupported when INFINILM_TIMING is enabled",
+                            "type": "invalid_request_error",
+                        }
+                    },
+                )
+
             if stream:
+                request_timing = (
+                    RequestTiming(service_entered_at_ns=service_entered_at_ns)
+                    if service_entered_at_ns is not None
+                    else None
+                )
                 return StreamingResponse(
-                    self._stream_chat(request_id, data, request),
+                    self._stream_chat(
+                        request_id, data, request, request_timing=request_timing
+                    ),
                     media_type="text/event-stream",
                 )
             else:
@@ -358,6 +380,49 @@ class InferenceServer:
 
         return normalized
 
+    @staticmethod
+    def _mark_route_token_start(request, token_output):
+        timing = token_output.timing
+        if timing is None or timing.route_token_received_at_ns is not None:
+            return
+
+        timestamp_ns = time.monotonic_ns()
+        timing.route_token_received_at_ns = timestamp_ns
+        request_timing = request.timing
+        if request_timing is not None:
+            if (
+                timing.loop_submit_started_at_ns is not None
+                and request_timing.first_loop_submit_started_at_ns is None
+            ):
+                request_timing.first_loop_submit_started_at_ns = (
+                    timing.loop_submit_started_at_ns
+                )
+            if request_timing.first_batch_put_started_at_ns is None:
+                request_timing.first_batch_put_started_at_ns = (
+                    timing.batch_put_started_at_ns
+                )
+            if request_timing.first_batch_put_completed_at_ns is None:
+                request_timing.first_batch_put_completed_at_ns = (
+                    timing.batch_put_completed_at_ns
+                )
+            if request_timing.first_route_token_received_at_ns is None:
+                request_timing.first_route_token_received_at_ns = timestamp_ns
+
+    def _finish_route_token_timing(self, request, token_output):
+        timing = token_output.timing
+        if timing is None or timing.route_token_end_at_ns is not None:
+            return
+
+        timestamp_ns = time.monotonic_ns()
+        timing.route_token_end_at_ns = timestamp_ns
+        request_timing = request.timing
+        if (
+            request_timing is not None
+            and request_timing.first_route_token_end_at_ns is None
+        ):
+            request_timing.first_route_token_end_at_ns = timestamp_ns
+        self.engine.record_timing_token(request, token_output)
+
     def _build_sampling_params(self, data: dict) -> SamplingParams:
         """Build SamplingParams from request data."""
         # Support both:
@@ -394,7 +459,13 @@ class InferenceServer:
             ignore_eos=self.ignore_eos,
         )
 
-    async def _stream_chat(self, request_id: str, data: dict, http_request: Request):
+    async def _stream_chat(
+        self,
+        request_id: str,
+        data: dict,
+        http_request: Request,
+        request_timing: Optional[RequestTiming] = None,
+    ):
         """Handle streaming chat request."""
         req = None
         _abort_reason = FinishReason.CANCELED
@@ -408,6 +479,7 @@ class InferenceServer:
                 sampling_params=sampling_params,
                 request_id=request_id,
                 request_data=data,
+                request_timing=request_timing,
                 add_generation_prompt=bool(data.get("add_generation_prompt", True)),
                 chat_template_kwargs=data.get("chat_template_kwargs") or {},
             )
@@ -417,9 +489,11 @@ class InferenceServer:
                 timeout=DEFAULT_STREAM_TIMEOUT,
                 request_timeout=DEFAULT_REQUEST_TIMEOUT,
             ):
+                self._mark_route_token_start(req, token_output)
                 # Check client disconnect
                 if await http_request.is_disconnected():
                     logger.info(f"Client disconnected for request {request_id}")
+                    self._finish_route_token_timing(req, token_output)
                     break
 
                 if token_output.finish_reason == FinishReason.TIMEOUT:
@@ -435,6 +509,7 @@ class InferenceServer:
                         ),
                         ensure_ascii=False,
                     )
+                    self._finish_route_token_timing(req, token_output)
                     yield f"data: {error_chunk}\n\n"
                     break
 
@@ -447,6 +522,7 @@ class InferenceServer:
                     and token_output.token_id in eos_token_ids
                 )
 
+                response_chunks = []
                 if not is_eos_token and token_output.token_text:
                     # Send token
                     chunk = json.dumps(
@@ -457,7 +533,7 @@ class InferenceServer:
                         ),
                         ensure_ascii=False,
                     )
-                    yield f"data: {chunk}\n\n"
+                    response_chunks.append(f"data: {chunk}\n\n")
 
                 if token_output.finished:
                     finish_reason = self._convert_finish_reason(
@@ -469,7 +545,15 @@ class InferenceServer:
                         ),
                         ensure_ascii=False,
                     )
-                    yield f"data: {chunk}\n\n"
+                    response_chunks.append(f"data: {chunk}\n\n")
+
+                # Timing is independent of whether this token produces an SSE
+                # body. Empty tokens still represent one route-level token.
+                self._finish_route_token_timing(req, token_output)
+                for chunk in response_chunks:
+                    yield chunk
+
+                if token_output.finished:
                     break
 
         except asyncio.CancelledError:
@@ -497,10 +581,17 @@ class InferenceServer:
             # req.close() is handled by stream_request.finally.
             if req and not req.is_finished():
                 self.engine.add_aborted_req(req, _abort_reason)
+            if req is not None:
+                self.engine.record_timing_finish(req)
         yield "data: [DONE]\n\n"
 
     async def _chat(self, request_id: str, data: dict, http_request: Request):
         """Handle non-streaming chat request."""
+        if self.engine.timing_enabled:
+            raise RuntimeError(
+                "Non-stream chat is unsupported when INFINILM_TIMING is enabled"
+            )
+
         req = None
         _abort_reason = FinishReason.CANCELED
 

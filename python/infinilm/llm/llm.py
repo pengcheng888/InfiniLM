@@ -30,6 +30,8 @@ from infinilm.llm.sampling_params import SamplingParams
 from infinilm.llm.scheduler import Scheduler
 from infinilm.llm.static_scheduler import StaticScheduler
 from infinilm.multimodal.multimodal import resolve_multimodal_inputs
+from infinilm.timing.recorder import create_timing_recorder
+from infinilm.timing.timestamps import ForwardTiming, RequestTiming, TokenTiming
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +41,7 @@ class LLMEngine:
 
     def __init__(self, config: EngineConfig):
         self.config = config
+        self.timing_recorder = create_timing_recorder(cache_type=config.cache_type)
         hf_config = read_hf_config(config.model_path)
         has_mamba_cache = model_uses_mamba_cache(hf_config)
         if has_mamba_cache and config.enable_prefix_caching:
@@ -137,7 +140,12 @@ class LLMEngine:
         self.scheduler.add_request(request)
 
     def close(self):
+        self.timing_recorder.close()
         self.model_runner.close()
+
+    @property
+    def timing_enabled(self) -> bool:
+        return self.timing_recorder.enabled
 
     def step(self) -> tuple[bool, list[tuple]]:
         """Run one inference step.
@@ -153,12 +161,66 @@ class LLMEngine:
         if scheduler_output is None:
             return False, []
 
+        if self.timing_recorder.enabled and any(
+            request.timing is None
+            for request in scheduler_output.scheduled_requests
+        ):
+            raise RuntimeError(
+                "Timing-enabled engine scheduled a request without RequestTiming"
+            )
+
         runner_output = self.model_runner.execute_model(scheduler_output)
         sampled_token_ids = runner_output.sampled_token_ids
         self.scheduler.update_from_output(runner_output)
+
+        forward_timing = runner_output.forward_timing
+        phase = "prefill" if scheduler_output.is_prefill else "decode"
+
+        if forward_timing is not None:
+            batch_size = scheduler_output.num_requests
+            request_ids = [
+                request.request_id
+                for request in scheduler_output.scheduled_requests
+            ]
+            if self.timing_recorder.enabled:
+                self.timing_recorder.record_batch(
+                    {
+                        "request_ids": request_ids,
+                        "phase": phase,
+                        "batch_size": batch_size,
+                        "batch_id": forward_timing.batch_id,
+                        "forward_started_at_ns": (
+                            forward_timing.forward_started_at_ns
+                        ),
+                        "forward_completed_at_ns": (
+                            forward_timing.forward_completed_at_ns
+                        ),
+                    }
+                )
+            for request in scheduler_output.scheduled_requests:
+                timing = request.timing
+                if timing is None:
+                    continue
+                if timing.first_forward_started_at_ns is None:
+                    timing.first_forward_started_at_ns = (
+                        forward_timing.forward_started_at_ns
+                    )
+                    timing.first_forward_completed_at_ns = (
+                        forward_timing.forward_completed_at_ns
+                    )
+                if scheduler_output.is_prefill:
+                    timing.prefill_batch_size = batch_size
+                else:
+                    timing.decode_step_count += 1
+                    timing.decode_batch_size_counts[batch_size] = (
+                        timing.decode_batch_size_counts.get(batch_size, 0) + 1
+                    )
+
         pending = self._update_requests(
             scheduler_output.scheduled_requests,
             sampled_token_ids,
+            forward_timing,
+            phase,
         )
 
         # Return False (no immediate work) only when no requests were scheduled
@@ -178,6 +240,8 @@ class LLMEngine:
         self,
         requests: List[InferenceRequest],
         sampled_token_ids: list[int | list[int]],
+        forward_timing: ForwardTiming | None = None,
+        timing_phase: str = "decode",
     ) -> List[tuple]:
         """Apply sampled tokens and publish their target-model KV boundary."""
         if len(requests) != len(sampled_token_ids):
@@ -226,6 +290,14 @@ class LLMEngine:
                                 generated_text="",
                             ),
                         )
+                    )
+                    pending_output = pending[-1][1]
+                    pending_output.timing = self._make_token_timing(
+                        req,
+                        token_index=max(req.get_num_generated_tokens() - 1, 0),
+                        forward_timing=forward_timing,
+                        phase=timing_phase,
+                        finished=True,
                     )
                 continue
 
@@ -285,6 +357,13 @@ class LLMEngine:
                         finish_reason=req.finish_reason if is_finished else None,
                         generated_text=req.generated_text,
                     )
+                    output.timing = self._make_token_timing(
+                        req,
+                        token_index=req.get_num_generated_tokens() - 1,
+                        forward_timing=forward_timing,
+                        phase=timing_phase,
+                        finished=is_finished,
+                    )
                     if req.is_aborted():
                         logger.info(
                             f"Request {req.request_id} aborted before putting token"
@@ -301,6 +380,32 @@ class LLMEngine:
 
         self.scheduler.complete_requests(requests)
         return pending
+
+    def _make_token_timing(
+        self,
+        req: InferenceRequest,
+        *,
+        token_index: int,
+        forward_timing: ForwardTiming | None,
+        phase: str,
+        finished: bool,
+    ) -> TokenTiming | None:
+        if req.timing is None or not self.timing_recorder.enabled:
+            return None
+        if not self.timing_recorder.should_record_token(token_index, finished):
+            return None
+
+        return TokenTiming(
+            token_index=token_index,
+            batch_id=forward_timing.batch_id if forward_timing else None,
+            phase=phase,
+            forward_started_at_ns=(
+                forward_timing.forward_started_at_ns if forward_timing else None
+            ),
+            forward_completed_at_ns=(
+                forward_timing.forward_completed_at_ns if forward_timing else None
+            ),
+        )
 
     def _check_request_finished(self, req: InferenceRequest, token_id: int) -> bool:
         """Check if request generation is finished."""
@@ -703,6 +808,10 @@ class AsyncLLMEngine:
     def is_healthy(self) -> bool:
         return bool(self._healthy)
 
+    @property
+    def timing_enabled(self) -> bool:
+        return self.engine.timing_enabled
+
     # TODO: Mooncake connector completion events should also notify the step
     # thread here; that integration is not wired yet.
     def _notify_step_thread(self):
@@ -736,6 +845,95 @@ class AsyncLLMEngine:
             self._step_thread.join(timeout=5)
         self.engine.close()
         logger.info("AsyncLLMEngine stopped")
+
+    def record_timing_token(self, request: InferenceRequest, output: TokenOutput):
+        if not self.timing_enabled or request.timing is None or output.timing is None:
+            return
+        if not self.engine.timing_recorder.should_record_token(
+            output.timing.token_index, output.finished
+        ):
+            return
+
+        request_timing = request.timing
+        token_timing = output.timing
+        if token_timing.loop_submit_started_at_ns is not None:
+            if request_timing.first_loop_submit_started_at_ns is None:
+                request_timing.first_loop_submit_started_at_ns = (
+                    token_timing.loop_submit_started_at_ns
+                )
+        if token_timing.batch_put_started_at_ns is not None:
+            if request_timing.first_batch_put_started_at_ns is None:
+                request_timing.first_batch_put_started_at_ns = (
+                    token_timing.batch_put_started_at_ns
+                )
+        if token_timing.batch_put_completed_at_ns is not None:
+            if request_timing.first_batch_put_completed_at_ns is None:
+                request_timing.first_batch_put_completed_at_ns = (
+                    token_timing.batch_put_completed_at_ns
+                )
+        self.engine.timing_recorder.record_token(
+            {
+                "request_id": request.request_id,
+                "token_index": token_timing.token_index,
+                "batch_id": token_timing.batch_id,
+                "phase": token_timing.phase,
+                "service_entered_at_ns": request_timing.service_entered_at_ns,
+                "scheduler_enqueue_before_at_ns": (
+                    request_timing.scheduler_enqueue_before_at_ns
+                ),
+                "forward_started_at_ns": token_timing.forward_started_at_ns,
+                "forward_completed_at_ns": token_timing.forward_completed_at_ns,
+                "loop_submit_started_at_ns": (
+                    token_timing.loop_submit_started_at_ns
+                ),
+                "batch_put_started_at_ns": token_timing.batch_put_started_at_ns,
+                "batch_put_completed_at_ns": token_timing.batch_put_completed_at_ns,
+                "route_token_received_at_ns": (
+                    token_timing.route_token_received_at_ns
+                ),
+                "route_token_end_at_ns": token_timing.route_token_end_at_ns,
+                "finished": output.finished,
+            }
+        )
+
+    def record_timing_finish(self, request: InferenceRequest):
+        timing = request.timing
+        if not self.timing_enabled or timing is None or timing.finish_recorded:
+            return
+        timing.finish_recorded = True
+        self.engine.timing_recorder.record_finish(
+            {
+                "request_id": request.request_id,
+                "service_entered_at_ns": timing.service_entered_at_ns,
+                "scheduler_enqueue_before_at_ns": (
+                    timing.scheduler_enqueue_before_at_ns
+                ),
+                "forward_started_at_ns": timing.first_forward_started_at_ns,
+                "forward_completed_at_ns": timing.first_forward_completed_at_ns,
+                "loop_submit_started_at_ns": (
+                    timing.first_loop_submit_started_at_ns
+                ),
+                "batch_put_started_at_ns": timing.first_batch_put_started_at_ns,
+                "batch_put_completed_at_ns": timing.first_batch_put_completed_at_ns,
+                "route_token_received_at_ns": (
+                    timing.first_route_token_received_at_ns
+                ),
+                "route_token_end_at_ns": timing.first_route_token_end_at_ns,
+                "prefill_batch_size": timing.prefill_batch_size,
+                "decode_step_count": timing.decode_step_count,
+                "decode_batch_size_counts": {
+                    str(key): value
+                    for key, value in sorted(timing.decode_batch_size_counts.items())
+                },
+                "prompt_tokens": request.get_prompt_length(),
+                "generated_tokens": request.get_num_generated_tokens(),
+                "finish_reason": (
+                    request.finish_reason.value
+                    if request.finish_reason is not None
+                    else None
+                ),
+            }
+        )
 
     def add_aborted_req(
         self,
@@ -806,6 +1004,14 @@ class AsyncLLMEngine:
                 if not did_work:
                     self._step_wakeup.wait(timeout=0.003)
                 elif pending:
+                    if any(output.timing is not None for _, output in pending):
+                        loop_submit_started_at_ns = time.monotonic_ns()
+                        for _, output in pending:
+                            if output.timing is None:
+                                continue
+                            output.timing.loop_submit_started_at_ns = (
+                                loop_submit_started_at_ns
+                            )
                     self._loop.call_soon_threadsafe(self._batch_put, pending)
             except Exception as e:
                 logger.error(f"Error in step loop: {e}", exc_info=True)
@@ -813,8 +1019,9 @@ class AsyncLLMEngine:
                 self._running = False
                 break
 
-    @staticmethod
-    def _batch_put(pending):
+    def _batch_put(self, pending):
+        record_batch_put = any(output.timing is not None for _, output in pending)
+        batch_put_started_at_ns = time.monotonic_ns() if record_batch_put else None
         for async_q, output in pending:
             try:
                 async_q.put_nowait(output)
@@ -823,6 +1030,12 @@ class AsyncLLMEngine:
                     f"Failed to put token for request {output.request_id}: {e}. "
                     f"Likely due to client disconnecting or request cancelation."
                 )
+        if record_batch_put:
+            batch_put_completed_at_ns = time.monotonic_ns()
+            for _, output in pending:
+                if output.timing is not None:
+                    output.timing.batch_put_started_at_ns = batch_put_started_at_ns
+                    output.timing.batch_put_completed_at_ns = batch_put_completed_at_ns
 
     def add_request(
         self,
@@ -835,6 +1048,7 @@ class AsyncLLMEngine:
         request_id: Optional[str] = None,
         # For server use
         request_data: Optional[dict] = None,
+        request_timing: Optional[RequestTiming] = None,
     ) -> InferenceRequest:
         """Add a request to the engine.
 
@@ -929,6 +1143,7 @@ class AsyncLLMEngine:
             sampling_params=sampling_params,
             eos_token_ids=self.engine.eos_token_ids,
             request_data=request_data,
+            timing=request_timing,
         )
 
         if request_data and "kv_transfer_params" in request_data:
@@ -948,6 +1163,7 @@ class AsyncLLMEngine:
         sampling_params: Optional[SamplingParams] = None,
         request_id: Optional[str] = None,
         request_data: Optional[dict] = None,
+        request_timing: Optional[RequestTiming] = None,
         add_generation_prompt: bool = True,
         **kwargs,
     ) -> InferenceRequest:
@@ -970,6 +1186,7 @@ class AsyncLLMEngine:
             sampling_params=sampling_params,
             request_id=request_id,
             request_data=request_data,
+            request_timing=request_timing,
         )
 
     async def stream_request(
@@ -1008,6 +1225,19 @@ class AsyncLLMEngine:
                         # No await can interleave empty() and get_nowait() on
                         # this request-private queue in the API event loop.
                         token_output = output_queue.get_nowait()
+                    if token_output.timing is not None and (
+                        token_output.timing.route_token_received_at_ns is None
+                    ):
+                        route_token_received_at_ns = time.monotonic_ns()
+                        token_output.timing.route_token_received_at_ns = (
+                            route_token_received_at_ns
+                        )
+                        if request.timing is not None and (
+                            request.timing.first_route_token_received_at_ns is None
+                        ):
+                            request.timing.first_route_token_received_at_ns = (
+                                route_token_received_at_ns
+                            )
 
                     output_queue.task_done()
 

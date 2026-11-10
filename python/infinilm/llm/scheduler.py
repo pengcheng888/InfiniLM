@@ -4,6 +4,7 @@ Scheduler - Request scheduling and batch management with Paged Attention KV Cach
 
 import logging
 import queue
+import time
 from typing import List, Optional
 
 import janus
@@ -112,6 +113,8 @@ class Scheduler:
                 and not request.has_multimodal_inputs,
             )
             request.status = RequestStatus.WAITING
+            if request.timing is not None:
+                request.timing.scheduler_enqueue_before_at_ns = time.monotonic_ns()
             self.waiting_queue.sync_q.put(request)
 
     def _exceeds_token_budget(

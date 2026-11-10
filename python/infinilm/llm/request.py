@@ -18,6 +18,7 @@ from infinilm.llm.prefix_cache import (
     hash_block_tokens,
 )
 from infinilm.llm.sampling_params import SamplingParams
+from infinilm.timing.timestamps import RequestTiming, TokenTiming
 
 logger = logging.getLogger(__name__)
 
@@ -139,6 +140,7 @@ class TokenOutput:
     finished: bool = False
     finish_reason: Optional[FinishReason] = None
     generated_text: str = ""
+    timing: Optional[TokenTiming] = None
 
 
 class InferenceRequest:
@@ -158,6 +160,7 @@ class InferenceRequest:
         request_data: Optional[dict] = None,
         *,
         has_multimodal_inputs: bool = False,
+        timing: Optional[RequestTiming] = None,
     ):
         self.arrival_time: float = arrival_time or time.time()
         self.finished_time: Optional[float] = None
@@ -219,6 +222,7 @@ class InferenceRequest:
 
         # For server use
         self.request_data: Optional[dict] = request_data
+        self.timing = timing
 
         # Async output & streaming
         self._output_queue: Optional[janus.Queue] = None

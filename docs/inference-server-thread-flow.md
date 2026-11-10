@@ -374,6 +374,7 @@ self._step_wakeup.wait(timeout=0.003)
 其中 `_step_wakeup` 是 `threading.Event`。新请求入队、abort 入队和服务 stop 都会立即 `set()` 该事件，使空闲中的 step 线程提前醒来；3ms timeout 仅作为无事件时的 fallback polling。因此空闲 sleep 期间到达的新请求通常只需等待剩余 wait 时间，名义上约为 0～3ms；如果新请求在当前有工作的 `engine.step()` 执行期间到达，则需要等待当前 step 完成。由于该 step 的 `did_work=True`，返回后通常立即进入下一轮调度，不会再额外等待 3ms。
 
 每轮循环会在检查 abort queue 和 scheduler 状态之前先 `clear()` wakeup event。这样，如果事件在 `clear()` 之前已经 set，对应的 request/abort 已进入队列，后续状态检查能够看到；如果事件在状态检查之后、`wait()` 之前 set，`wait()` 会立即返回。
+实际延迟仍可能受 OS 线程调度、Python GIL 和 API event loop 上的同步预处理影响。
 
 ### 客户端断开或取消
 

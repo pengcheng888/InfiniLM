@@ -1,4 +1,6 @@
 import logging
+import os
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Generator
@@ -17,6 +19,8 @@ from infinilm.kv_connector import (
 from infinilm.llm.model_runner.speculative_runner import SpeculativeRunner
 from infinilm.modeling_utils import load_model_state_dict_by_file
 from infinilm.processors import AutoInfinilmProcessor
+from infinilm.timing.config import timing_enabled_for
+from infinilm.timing.timestamps import ForwardTiming
 
 logger = logging.getLogger(__name__)
 
@@ -41,12 +45,15 @@ class ModelRunnerOutput:
     req_ids: list[str] = field(default_factory=list)
     sampled_token_ids: list[int | list[int]] = field(default_factory=list)
     kv_connector_output: KVConnectorOutput | None = None
+    forward_timing: ForwardTiming | None = None
 
 
 class ModelRunner:
     def __init__(self, config: EngineConfig, initialize_processor: bool = True):
         self.config = config
         self._closed = False
+        self._forward_batch_sequence = 0
+        self._forward_timing_enabled = timing_enabled_for(config.cache_type)
         self.kv_transfer_config = config.kv_transfer_config
         logger.info(f"kv_transfer_config: {self.kv_transfer_config}")
         self._is_pd_service = (
@@ -225,15 +232,18 @@ class ModelRunner:
     def execute_model(self, scheduler_output) -> ModelRunnerOutput:
         sampled_tokens_list = []
         kv_connector_output = None
+        forward_timing = None
 
         if self.kv_connector is None:
-            sampled_tokens_list = self._model_forward(scheduler_output)
+            sampled_tokens_list, forward_timing = self._model_forward(scheduler_output)
         else:
             with self.maybe_get_kv_connector_output(
                 scheduler_output,
             ) as kv_connector_output:
                 if scheduler_output.num_requests > 0:
-                    sampled_tokens_list = self._model_forward(scheduler_output)
+                    sampled_tokens_list, forward_timing = self._model_forward(
+                        scheduler_output
+                    )
 
         #  model_runner_output
         req_ids = []
@@ -244,6 +254,7 @@ class ModelRunner:
             req_ids=req_ids,
             sampled_token_ids=sampled_tokens_list,
             kv_connector_output=kv_connector_output,
+            forward_timing=forward_timing,
         )
 
     def _model_forward(self, scheduler_output):
@@ -258,13 +269,20 @@ class ModelRunner:
             model_input["skip_sampling"] = True
 
         if self.speculative_runner is not None:
-            return self._model_forward_with_speculative(scheduler_output, model_input)
+            sampled_tokens_list = self._model_forward_with_speculative(
+                scheduler_output, model_input
+            )
+            # Speculative decoding can execute multiple internal forwards; the
+            # current summary schema does not define timing for that path.
+            return sampled_tokens_list, None
 
         # Wake every stage before stage 0 enters forward. Each worker receives
         # the same metadata and then blocks in its model on the activation from
         # the preceding stage. Stage 0 waits for all acknowledgements afterward.
         if self.pipeline_control is not None:
             self.pipeline_control.dispatch_forward(model_input)
+        record_forward_timing = self._should_record_forward_timing(scheduler_output)
+        forward_started_at_ns = time.monotonic_ns() if record_forward_timing else 0
         try:
             sampled_tokens = self.model_engine.forward(**model_input)
         except BaseException:
@@ -274,11 +292,40 @@ class ModelRunner:
                 # acknowledgement here would deadlock the coordinator.
                 self.pipeline_control.abort()
             raise
+        forward_completed_at_ns = (
+            time.monotonic_ns() if record_forward_timing else 0
+        )
         if self.pipeline_control is not None:
             self.pipeline_control.wait_forward()
         sampled_tokens_list = sampled_tokens.to_numpy().tolist()
 
-        return sampled_tokens_list
+        return (
+            sampled_tokens_list,
+            self._make_forward_timing(
+                forward_started_at_ns, forward_completed_at_ns
+            )
+            if record_forward_timing
+            else None,
+        )
+
+    def _make_forward_timing(
+        self, started_at_ns: int, completed_at_ns: int
+    ) -> ForwardTiming:
+        self._forward_batch_sequence += 1
+        return ForwardTiming(
+            batch_id=f"forward-{os.getpid()}-{self._forward_batch_sequence}",
+            forward_started_at_ns=started_at_ns,
+            forward_completed_at_ns=completed_at_ns,
+        )
+
+    def _should_record_forward_timing(self, scheduler_output) -> bool:
+        requests = scheduler_output.scheduled_requests
+        return (
+            getattr(self, "_forward_timing_enabled", False)
+            and getattr(self, "pipeline_control", None) is None
+            and bool(requests)
+            and all(request.timing is not None for request in requests)
+        )
 
     def _should_skip_prefill_sampling(self, scheduler_output) -> bool:
         if not scheduler_output.is_prefill:
