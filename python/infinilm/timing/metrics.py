@@ -237,6 +237,11 @@ def compute_timing_metrics(root: Path | str) -> dict[str, Any]:
     tokens = [record for record in records if record.get("event") == "token"]
     batches = [record for record in records if record.get("event") == "batch"]
     finishes = [record for record in records if record.get("event") == "finish"]
+    batches_by_id = {
+        batch.get("batch_id"): batch
+        for batch in batches
+        if isinstance(batch.get("batch_id"), str)
+    }
 
     token_metric_edges = (
         ("service_to_enqueue_ms", "service_entered_at_ns", "scheduler_enqueue_before_at_ns"),
@@ -305,6 +310,56 @@ def compute_timing_metrics(root: Path | str) -> dict[str, Any]:
         for name, selected_records, start, end in request_metric_edges
     }
 
+    tokens_with_finalize = []
+    for token in tokens:
+        batch = batches_by_id.get(token.get("batch_id"))
+        if batch is None:
+            continue
+        if (
+            batch.get("kv_connector_finalize_started_at_ns") is None
+            or batch.get("kv_connector_finalize_completed_at_ns") is None
+        ):
+            continue
+        tokens_with_finalize.append(
+            {
+                **token,
+                "kv_connector_finalize_started_at_ns": batch[
+                    "kv_connector_finalize_started_at_ns"
+                ],
+                "kv_connector_finalize_completed_at_ns": batch[
+                    "kv_connector_finalize_completed_at_ns"
+                ],
+            }
+        )
+
+    post_forward_metric_edges = (
+        (
+            "forward_to_kv_connector_finalize_start_ms",
+            "forward_completed_at_ns",
+            "kv_connector_finalize_started_at_ns",
+        ),
+        (
+            "kv_connector_finalize_ms",
+            "kv_connector_finalize_started_at_ns",
+            "kv_connector_finalize_completed_at_ns",
+        ),
+        (
+            "kv_connector_finalize_to_loop_submit_ms",
+            "kv_connector_finalize_completed_at_ns",
+            "loop_submit_started_at_ns",
+        ),
+    )
+    post_forward_metrics = {
+        name: _distribution(
+            [
+                value
+                for record in tokens_with_finalize
+                if (value := _elapsed_ms(record, start, end)) is not None
+            ]
+        )
+        for name, start, end in post_forward_metric_edges
+    }
+
     batch_by_phase: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for batch in batches:
         batch_by_phase[str(batch.get("phase"))].append(batch)
@@ -343,9 +398,24 @@ def compute_timing_metrics(root: Path | str) -> dict[str, Any]:
                         is not None
                     ]
                 ),
+                "kv_connector_finalize_ms": _distribution(
+                    [
+                        value
+                        for batch in phase_batches
+                        if (
+                            value := _elapsed_ms(
+                                batch,
+                                "kv_connector_finalize_started_at_ns",
+                                "kv_connector_finalize_completed_at_ns",
+                            )
+                        )
+                        is not None
+                    ]
+                ),
             }
             for phase, phase_batches in batch_by_phase.items()
         },
+        "post_forward_metrics_ms": post_forward_metrics,
         "mooncake": _mooncake_metrics(records),
     }
 

@@ -21,6 +21,7 @@ from infinilm.timing.metrics import compute_timing_metrics
 from infinilm.timing.recorder import (
     MAX_PENDING_RECORDS,
     MAX_WRITE_BATCH_RECORDS,
+    SCHEMA_VERSION,
     TimingRecorder,
 )
 from infinilm.timing.validate import validate_timing_root
@@ -604,7 +605,7 @@ def test_recorder_writes_generic_timing_event(tmp_path):
 
     assert records[0]["event"] == "kv_receive"
     assert records[0]["request_id"] == "request"
-    assert records[0]["schema_version"] == 3
+    assert records[0]["schema_version"] == SCHEMA_VERSION
 
 
 def test_recorder_writes_pending_records_in_batches(tmp_path):

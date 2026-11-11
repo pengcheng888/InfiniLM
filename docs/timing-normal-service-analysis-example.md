@@ -2,7 +2,7 @@
 
 测试时间：2026-11-10 14:05-14:10（Asia/Shanghai）
 
-本文基于一次普通 InferenceServer 的 100 请求实测数据，展示 timing 数据完整性检查、请求级阶段耗时、prefill/decode batch 分布和瓶颈分析方法。文中数值属于该次测试的实测结果。
+本文基于一次普通 InferenceServer 的 100 请求实测数据，展示 timing 数据完整性检查、请求级阶段耗时、prefill/decode batch 分布、GPU forward 空泡和瓶颈分析方法。文中数值属于该次测试的实测结果。
 
 ## 1. 测试配置
 
@@ -83,6 +83,10 @@ error_count: 0
 warning_count: 0
 valid: true
 ```
+
+当前 schema v4 的 batch event 可以携带 `kv_connector_finalize_started_at_ns`
+和 `kv_connector_finalize_completed_at_ns`。普通服务没有 KV connector，这两个字段为
+`null` 或缺省；`kv_connector_finalize_ms` 不参与普通服务统计，也不应与 PD 服务比较。
 
 数量对齐关系：
 
@@ -218,7 +222,133 @@ batch=4: 4 / 14.86 ms = 269.2 tokens/s
 
 客户端 mean ITL 为 17.13 ms，采样 decode forward 平均为 16.04 ms，差值约 1.09 ms。整体看，API event loop 输出路径不是当前主要瓶颈。
 
-## 7. 结论
+## 7. GPU Forward 空泡时间
+
+本节分析物理 batch step 之间的 GPU forward 空泡。数据仍使用本次 100 个正式请求的
+13,325 个物理 batch event，不包含 warmup。
+
+### 7.1 统计口径
+
+物理 batch event 按 `forward_started_at_ns` 排序：
+
+```text
+forward duration(i) =
+    forward_completed_at_ns(i) - forward_started_at_ns(i)
+
+gap(i) =
+    forward_started_at_ns(i + 1) - forward_completed_at_ns(i)
+```
+
+其中：
+
+- `forward duration(i)` 是第 i 个 batch step 的纯 GPU forward 耗时。
+- `gap(i)` 是第 i 个 forward 结束到下一个 forward 开始之间的空泡。
+- 普通服务只有一个 StepThread 串行调度物理 batch，因此相邻 forward 之间没有 GPU 计算重叠。
+
+三个总量指标定义为：
+
+```text
+观测窗口时长 =
+    last forward_completed_at_ns - first forward_started_at_ns
+
+纯 forward 计算时间 =
+    sum(forward_completed_at_ns - forward_started_at_ns)
+
+纯 prefill forward 计算时间 =
+    sum(forward_completed_at_ns - forward_started_at_ns)
+    where phase == "prefill"
+
+纯 decode forward 计算时间 =
+    sum(forward_completed_at_ns - forward_started_at_ns)
+    where phase == "decode"
+
+forward 空泡时间 =
+    观测窗口时长 - 纯 forward 计算时间
+```
+
+如果把“第一次 forward 开始”到“最后一次 forward 结束”称为本次 batch step 的 GPU forward
+总时间，则该值对应上面的“观测窗口时长”；本节同时给出其中真正用于 forward 计算的时间和
+空泡时间，避免混淆。
+
+### 7.2 总体结果
+
+| 指标 | 结果 |
+|---|---:|
+| 物理 batch forward 次数 | 13325 |
+| 相邻 forward interval 数量 | 13324 |
+| 第一次 forward 开始 -> 最后一次 forward 结束 | 237288.997 ms |
+| 纯 forward 计算时间 | 223795.031 ms |
+| 纯 prefill forward 计算时间 | 11183.546 ms |
+| 纯 decode forward 计算时间 | 212611.485 ms |
+| forward 空泡时间 | 13493.965 ms |
+| 纯 forward 计算占比 | 94.31% |
+| forward 空泡占比 | 5.69% |
+
+按 phase 拆分纯 forward 计算时间：
+
+| 指标 | forward 次数 | 纯 forward 计算时间 | 占观测窗口比例 |
+|---|---:|---:|---:|
+| 纯 prefill forward 计算时间 | 26 | 11183.546 ms | 4.71% |
+| 纯 decode forward 计算时间 | 13299 | 212611.485 ms | 89.60% |
+| 纯 forward 计算时间合计 | 13325 | 223795.031 ms | 94.31% |
+
+相邻 forward 空泡分布：
+
+| 指标 | count | sum | avg | min | p50 | p95 | p99 | max |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| All intervals | 13324 | 13493.965 ms | 1.013 ms | 0.300 ms | 0.979 ms | 1.319 ms | 2.275 ms | 17.277 ms |
+
+空泡不是由少数超长间隔贡献的。按阈值统计：
+
+| Gap 阈值 | 数量 | 累计耗时 | 占总空泡比例 |
+|---:|---:|---:|---:|
+| >= 0.5 ms | 12855 | 13295.198 ms | 98.53% |
+| >= 1 ms | 6019 | 7360.775 ms | 54.55% |
+| >= 2 ms | 201 | 661.206 ms | 4.90% |
+| >= 5 ms | 17 | 208.079 ms | 1.54% |
+| >= 10 ms | 12 | 176.985 ms | 1.31% |
+| >= 17 ms | 1 | 17.277 ms | 0.13% |
+
+解释：
+
+- 大部分空泡是每个 decode step 后约 `1 ms` 的常规调度间隔。
+- `>= 2 ms` 的间隔只占空泡总量 `4.90%`，说明不存在明显的长时间 GPU 空闲段。
+- 观测窗口与 benchmark duration `237.30 s` 基本一致，说明本次压测的 GPU 序列几乎覆盖正式测试全过程。
+
+### 7.3 按前后 phase 转移拆分
+
+| 前一个 forward | 下一个 forward | 数量 | 空泡总量 | avg | min | p50 | p95 | p99 | max |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| decode | decode | 13286 | 13239.060 ms | 0.996 ms | 0.300 ms | 0.978 ms | 1.311 ms | 2.206 ms | 7.316 ms |
+| decode | prefill | 12 | 176.985 ms | 14.749 ms | 12.046 ms | 14.601 ms | 17.068 ms | 17.235 ms | 17.277 ms |
+| prefill | prefill | 13 | 54.823 ms | 4.217 ms | 2.778 ms | 4.327 ms | 4.925 ms | 5.189 ms | 5.256 ms |
+| prefill | decode | 13 | 23.097 ms | 1.777 ms | 1.267 ms | 1.785 ms | 1.992 ms | 2.003 ms | 2.006 ms |
+
+各转移类型对总空泡的贡献：
+
+| 转移类型 | 空泡总量 | 占总空泡比例 |
+|---|---:|---:|
+| decode -> decode | 13239.060 ms | 98.11% |
+| decode -> prefill | 176.985 ms | 1.31% |
+| prefill -> prefill | 54.823 ms | 0.41% |
+| prefill -> decode | 23.097 ms | 0.17% |
+
+`decode -> prefill` 的 12 个间隔对应前一个 wave 结束后，下一批请求开始 prefill 的调度边界；
+其平均空泡约 `14.75 ms`，是所有转移类型中最大的，但合计只有 `176.985 ms`，占空泡总量
+`1.31%`。
+
+真正主导空泡总量的是 `decode -> decode`：13286 个连续 decode step 各自带约 `1 ms` 间隔，
+累计 `13.239 s`，占空泡总量 `98.11%`。
+
+### 7.4 空泡分析结论
+
+1. 本次普通服务 100 请求测试中，GPU forward 序列的计算占比为 `94.31%`，空泡占比为 `5.69%`；其中纯 prefill forward 计算时间为 `11.184 s`，纯 decode forward 计算时间为 `212.611 s`。
+2. 空泡主要来自高频、小间隔的 decode step 调度，而不是长时间 GPU 空闲。
+3. 连续 decode forward 的平均空泡为 `0.996 ms`，p99 为 `2.206 ms`。
+4. 最明显的调度边界是 `decode -> prefill`，平均 `14.749 ms`，但只出现 12 次，对整体 GPU 空泡影响很小。
+5. 若要提升 GPU 利用率，优先减少每个 decode step 后约 `1 ms` 的固定间隔；等待下一个 wave 的 prefill 调度边界不是主要空泡来源。
+
+## 8. 结论
 
 1. **数据完整性良好**：100 个正式请求全部有 finish、首 token、按 32-token 间隔采样的 token 记录和 final token；validator 无错误。
 2. **吞吐受尾部 wave 影响**：100 个请求在并发 8 下形成 12 个完整 wave 和 1 个 batch=4 的尾部 wave；尾部 wave decode 单步更快，但 GPU 利用率和吞吐更低。
@@ -226,9 +356,10 @@ batch=4: 4 / 14.86 ms = 269.2 tokens/s
 4. **TTFT 呈明显调度双峰/三峰**：每个 wave 先有 `batch_size=1` prefill，再有余下请求的合并 prefill，导致少数请求 TTFT 约 132 ms，多数请求 TTFT 约 890-913 ms。
 5. **Decode 稳定且批量摊销明显**：batch=8 decode forward 平均 16.08 ms，p99 16.62 ms；请求级 decode forward 总耗时平均 16400.88 ms；客户端 ITL 平均 17.13 ms，与采样 decode forward 平均值差约 1.09 ms。
 6. **API event loop 开销较小**：decode token 的 batch put 平均 0.15 ms，route token 构造平均 1.15 ms，不是主要瓶颈。
-7. **普通服务无 Mooncake 事件**：`kv_send` / `kv_receive` 数量为 0，符合无 PD 分离服务的预期。
+7. **GPU forward 空泡较低**：从第一次 forward 开始到最后一次 forward 结束共 237.289 s，其中纯 forward 223.795 s，空泡 13.494 s，空泡占比 5.69%；空泡主要来自连续 decode step 间约 1 ms 的固定间隔。
+8. **普通服务无 Mooncake 事件**：`kv_send` / `kv_receive` 数量为 0，`kv_connector_finalize` 指标不适用，符合无 PD 分离服务的预期。
 
-## 8. 复现分析命令
+## 9. 复现分析命令
 
 ```bash
 cd /workspace_v0.2.9/InfiniLM-v0.2.9

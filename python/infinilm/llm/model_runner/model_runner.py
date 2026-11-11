@@ -36,6 +36,8 @@ class KVConnectorOutput:
     # IDs of externally computed KV blocks that failed to load.
     # Requests referencing these blocks should be rescheduled to recompute them
     invalid_block_ids: set[int] = field(default_factory=set)  # not used
+    kv_connector_finalize_started_at_ns: int | None = None
+    kv_connector_finalize_completed_at_ns: int | None = None
     kv_connector_stats: dict = field(default_factory=dict)
 
 
@@ -362,13 +364,25 @@ class ModelRunner:
         try:
             yield output
         finally:
-            output.finished_sending, output.failed_recving, output.finished_recving = (
-                self.kv_connector.get_finished("finished_req_ids")
+            finalize_started_at_ns = (
+                time.monotonic_ns() if self._forward_timing_enabled else None
             )
-            output.invalid_block_ids = (
-                self.kv_connector.get_block_ids_with_load_errors()
-            )
-            output.kv_connector_stats = self.kv_connector.get_kv_connector_stats()
+            if finalize_started_at_ns is not None:
+                output.kv_connector_finalize_started_at_ns = finalize_started_at_ns
+
+            try:
+                output.finished_sending, output.failed_recving, output.finished_recving = (
+                    self.kv_connector.get_finished("finished_req_ids")
+                )
+                output.invalid_block_ids = (
+                    self.kv_connector.get_block_ids_with_load_errors()
+                )
+                output.kv_connector_stats = self.kv_connector.get_kv_connector_stats()
+            finally:
+                if finalize_started_at_ns is not None:
+                    output.kv_connector_finalize_completed_at_ns = (
+                        time.monotonic_ns()
+                    )
 
     def close(self) -> None:
         """Release resources held by the KV connector."""

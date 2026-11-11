@@ -35,4 +35,5 @@ __pycache__/
 
 *.nsys-rep
 
-timing/
+/timing/
+/analysis_reports/

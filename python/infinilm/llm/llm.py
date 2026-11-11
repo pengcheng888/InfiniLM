@@ -187,6 +187,7 @@ class LLMEngine:
                 request.request_id
                 for request in scheduler_output.scheduled_requests
             ]
+            connector_output = runner_output.kv_connector_output
             if self.timing_recorder.enabled:
                 self.timing_recorder.record_batch(
                     {
@@ -199,6 +200,16 @@ class LLMEngine:
                         ),
                         "forward_completed_at_ns": (
                             forward_timing.forward_completed_at_ns
+                        ),
+                        "kv_connector_finalize_started_at_ns": getattr(
+                            connector_output,
+                            "kv_connector_finalize_started_at_ns",
+                            None,
+                        ),
+                        "kv_connector_finalize_completed_at_ns": getattr(
+                            connector_output,
+                            "kv_connector_finalize_completed_at_ns",
+                            None,
                         ),
                     }
                 )

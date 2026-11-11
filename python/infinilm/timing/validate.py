@@ -19,6 +19,7 @@ TIMESTAMP_FIELDS = (
     "route_token_received_at_ns",
     "route_token_end_at_ns",
 )
+SUPPORTED_SCHEMA_VERSIONS = {3, 4}
 
 
 def _valid_timestamp(value: Any) -> bool:
@@ -193,7 +194,7 @@ def validate_timing_root(root: Path | str) -> dict[str, Any]:
                 errors.append(f"{location}: unknown event {event!r}")
                 continue
 
-            if record.get("schema_version") != 3:
+            if record.get("schema_version") not in SUPPORTED_SCHEMA_VERSIONS:
                 errors.append(f"{location}: invalid schema_version")
 
             if event == "batch":
@@ -214,6 +215,30 @@ def validate_timing_root(root: Path | str) -> dict[str, Any]:
                     ]
                 ):
                     errors.append(f"{location}: invalid forward timestamps")
+                finalize_fields = (
+                    "kv_connector_finalize_started_at_ns",
+                    "kv_connector_finalize_completed_at_ns",
+                )
+                if any(record.get(field) is not None for field in finalize_fields):
+                    if not all(
+                        _valid_timestamp(record.get(field))
+                        for field in finalize_fields
+                    ):
+                        errors.append(
+                            f"{location}: invalid kv_connector_finalize timestamps"
+                        )
+                    elif not _ordered(
+                        [
+                            record.get("forward_completed_at_ns"),
+                            *(
+                                record.get(field)
+                                for field in finalize_fields
+                            ),
+                        ]
+                    ):
+                        errors.append(
+                            f"{location}: invalid kv_connector_finalize order"
+                        )
                 continue
 
             if event in {"kv_send", "kv_receive"}:

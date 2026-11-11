@@ -16,7 +16,7 @@ from infinilm.timing.config import (
     timing_enabled_for,
 )
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 MAX_PENDING_RECORDS = 1024
 MAX_WRITE_BATCH_RECORDS = 128
 

@@ -45,10 +45,11 @@ JSONL 中包含五类事件：
 - `kv_send`：P 侧 Mooncake producer batch timing。
 - `kv_receive`：D 侧 KV pull readiness timing。
 
-当前 timing schema version 为 `3`。v2 将 loop 提交时间点改为调用
+当前 timing schema version 为 `4`。v2 将 loop 提交时间点改为调用
 `call_soon_threadsafe()` 之前，并把字段重命名为
 `loop_submit_started_at_ns`。
 v3 增加 Mooncake timing event。
+v4 在 batch event 中增加 KV connector finalize 阶段时间戳。
 
 记录的 9 个时间戳为：
 
@@ -63,6 +64,24 @@ batch_put_completed_at_ns
 route_token_received_at_ns
 route_token_end_at_ns
 ```
+
+PD 服务中，物理 batch event 另外记录：
+
+```text
+kv_connector_finalize_started_at_ns
+kv_connector_finalize_completed_at_ns
+```
+
+这两个时间点包住 ModelRunner connector context manager 的 `finally` 收尾阶段，覆盖：
+
+```text
+get_finished()
+get_block_ids_with_load_errors()
+get_kv_connector_stats()
+```
+
+因此 `kv_connector_finalize_ms` 表示上述三个调用的整体耗时，不包含后续
+`Scheduler.update_from_output()`、request token update 或 API loop callback。
 
 Mooncake P 侧记录：
 
