@@ -72,9 +72,7 @@ class LLMEngine:
             self.scheduler = StaticScheduler(
                 max_cache_len=config.max_cache_len,
                 max_num_batched_tokens=(
-                    config.max_num_batched_tokens
-                    if config.enable_workspace
-                    else None
+                    config.max_num_batched_tokens if config.enable_workspace else None
                 ),
                 enable_prefix_caching=config.enable_prefix_caching,
             )
@@ -162,8 +160,7 @@ class LLMEngine:
             return False, []
 
         if self.timing_recorder.enabled and any(
-            request.timing is None
-            for request in scheduler_output.scheduled_requests
+            request.timing is None for request in scheduler_output.scheduled_requests
         ):
             raise RuntimeError(
                 "Timing-enabled engine scheduled a request without RequestTiming"
@@ -174,9 +171,7 @@ class LLMEngine:
         self.scheduler.update_from_output(runner_output)
         if self.timing_recorder.enabled:
             for timing_event in self.scheduler.pop_timing_events():
-                self.timing_recorder.record_event(
-                    timing_event["event"], timing_event
-                )
+                self.timing_recorder.record_event(timing_event["event"], timing_event)
 
         forward_timing = runner_output.forward_timing
         phase = "prefill" if scheduler_output.is_prefill else "decode"
@@ -184,8 +179,7 @@ class LLMEngine:
         if forward_timing is not None:
             batch_size = scheduler_output.num_requests
             request_ids = [
-                request.request_id
-                for request in scheduler_output.scheduled_requests
+                request.request_id for request in scheduler_output.scheduled_requests
             ]
             connector_output = runner_output.kv_connector_output
             if self.timing_recorder.enabled:
@@ -195,9 +189,7 @@ class LLMEngine:
                         "phase": phase,
                         "batch_size": batch_size,
                         "batch_id": forward_timing.batch_id,
-                        "forward_started_at_ns": (
-                            forward_timing.forward_started_at_ns
-                        ),
+                        "forward_started_at_ns": (forward_timing.forward_started_at_ns),
                         "forward_completed_at_ns": (
                             forward_timing.forward_completed_at_ns
                         ),
@@ -209,6 +201,16 @@ class LLMEngine:
                         "kv_connector_finalize_completed_at_ns": getattr(
                             connector_output,
                             "kv_connector_finalize_completed_at_ns",
+                            None,
+                        ),
+                        "kv_connector_get_finished_started_at_ns": getattr(
+                            connector_output,
+                            "kv_connector_get_finished_started_at_ns",
+                            None,
+                        ),
+                        "kv_connector_get_finished_completed_at_ns": getattr(
+                            connector_output,
+                            "kv_connector_get_finished_completed_at_ns",
                             None,
                         ),
                     }
@@ -288,7 +290,7 @@ class LLMEngine:
                 #     token_ids,
                 #     req.request_id,
                 # )
-                
+
                 # P 侧 prefill 响应只由 PD proxy 内部消费；这里的 LENGTH 仅是终止哨兵，
                 # 不表示真实生成长度。
                 req.finish_reason = FinishReason.LENGTH
@@ -899,14 +901,10 @@ class AsyncLLMEngine:
                 ),
                 "forward_started_at_ns": token_timing.forward_started_at_ns,
                 "forward_completed_at_ns": token_timing.forward_completed_at_ns,
-                "loop_submit_started_at_ns": (
-                    token_timing.loop_submit_started_at_ns
-                ),
+                "loop_submit_started_at_ns": (token_timing.loop_submit_started_at_ns),
                 "batch_put_started_at_ns": token_timing.batch_put_started_at_ns,
                 "batch_put_completed_at_ns": token_timing.batch_put_completed_at_ns,
-                "route_token_received_at_ns": (
-                    token_timing.route_token_received_at_ns
-                ),
+                "route_token_received_at_ns": (token_timing.route_token_received_at_ns),
                 "route_token_end_at_ns": token_timing.route_token_end_at_ns,
                 "finished": output.finished,
             }
@@ -926,14 +924,10 @@ class AsyncLLMEngine:
                 ),
                 "forward_started_at_ns": timing.first_forward_started_at_ns,
                 "forward_completed_at_ns": timing.first_forward_completed_at_ns,
-                "loop_submit_started_at_ns": (
-                    timing.first_loop_submit_started_at_ns
-                ),
+                "loop_submit_started_at_ns": (timing.first_loop_submit_started_at_ns),
                 "batch_put_started_at_ns": timing.first_batch_put_started_at_ns,
                 "batch_put_completed_at_ns": timing.first_batch_put_completed_at_ns,
-                "route_token_received_at_ns": (
-                    timing.first_route_token_received_at_ns
-                ),
+                "route_token_received_at_ns": (timing.first_route_token_received_at_ns),
                 "route_token_end_at_ns": timing.first_route_token_end_at_ns,
                 "prefill_batch_size": timing.prefill_batch_size,
                 "decode_step_count": timing.decode_step_count,
@@ -1110,13 +1104,13 @@ class AsyncLLMEngine:
         elif prompt is not None:
             prompt_token_ids = self.engine.tokenize(prompt)
         else:
-            assert messages is not None, (
-                "Either messages or prompt/prompt_token_ids must be provided"
-            )
+            assert (
+                messages is not None
+            ), "Either messages or prompt/prompt_token_ids must be provided"
 
-            assert apply_chat_template, (
-                "apply_chat_template needs to be true for multi-role conversation"
-            )
+            assert (
+                apply_chat_template
+            ), "apply_chat_template needs to be true for multi-role conversation"
 
             prompt = self.engine.apply_chat_template(
                 messages, add_generation_prompt=add_generation_prompt

@@ -224,14 +224,17 @@ batch_size=1 的 full prompt prefill 约 123-126 ms
 
 ## 7. KV Connector Finalize
 
-当前 timing schema v4 在物理 batch event 中增加：
+当前 timing schema v5 在物理 batch event 中增加：
 
 ```text
 kv_connector_finalize_started_at_ns
+kv_connector_get_finished_started_at_ns
+kv_connector_get_finished_completed_at_ns
 kv_connector_finalize_completed_at_ns
 ```
 
-本节数值来自当前 schema v4 PD 服务示例数据；旧 schema v3 数据集中没有这两个字段。
+本节主表数值来自 schema v4 PD 服务示例数据；schema v5 额外拆出 `get_finished()`
+耗时，文末补充了 v5 复测结果。
 
 这两个字段包住 `ModelRunner.maybe_get_kv_connector_output()` 的 `finally`
 收尾阶段，覆盖：
@@ -282,6 +285,21 @@ kv_connector_finalize_ms =
 
 不同 batch size 下该耗时基本稳定，说明它主要来自固定调用开销，而不是随 batch 内
 request 数线性增长。
+
+### Schema v5：`get_finished()` 拆分
+
+2026-11-11 的 schema v5 复测剔除 warmup 后，D 侧共有 13,852 个 decode 物理 batch。
+物理 batch 分布如下：
+
+| 阶段 | avg | min | p50 | p95 | p99 | max |
+|---|---:|---:|---:|---:|---:|---:|
+| `kv_connector_finalize` | 0.352 ms | 0.174 ms | 0.353 ms | 0.417 ms | 0.509 ms | 1.912 ms |
+| `kv_connector_get_finished` | 0.344 ms | 0.171 ms | 0.345 ms | 0.408 ms | 0.501 ms | 1.901 ms |
+| finalize 剩余部分 | 0.008 ms | 0.003 ms | 0.008 ms | 0.010 ms | 0.014 ms | 0.048 ms |
+
+`get_finished()` 占 `kv_connector_finalize` 的约 `97.7%`。这说明 finalize 中的固定
+控制面开销主要来自 `MooncakeConnectorWorker.get_finished()` 的跨线程 future 调度；
+错误块查询和 stats 收集合计不到 `0.01 ms/step`。
 
 ## 8. Mooncake KV Transfer
 
@@ -548,6 +566,6 @@ Decode forward 间隔分布：
 6. **E2E 主体是 decode forward**：每请求 1024 次 decode forward 总耗时平均 `16380.55 ms`。
 7. **Decode 稳态批量较好**：batch=8 覆盖 `93.16%` request-step，batch=8 forward 平均 `16.05 ms`。
 8. **输出路径开销小**：客户端 ITL 与采样 decode forward 差值约 `1.25 ms`。
-9. **KV connector finalize 是稳定控制面开销**：D 侧平均 `0.343 ms`，p95 `0.406 ms`，约占采样 post-forward 区间的三分之一；该指标只覆盖 `get_finished()`、错误块查询和 stats 收集三个调用。
+9. **KV connector finalize 是稳定控制面开销**：schema v4 示例中 D 侧平均约 `0.343 ms`；schema v5 进一步确认其中约 `97.7%` 来自 `get_finished()`，错误块查询和 stats 收集合计约 `0.008 ms/step`。
 10. **GPU 空泡形态分离明显**：Decode GPU forward 占比 `92.74%`，空泡来自高频约 `1.25 ms` 的 step 间隔；Prefill GPU forward 占比 `5.48%`，空泡主要来自 wave 间请求到达等待。
 11. **PD 优化优先级**：优先减少 D 侧 KV readiness 等待与 P 侧 prefill batch 碎片化；随后再拆分 finalize 后续的 Scheduler/request 更新路径。输出路径和 Mooncake 数据面写调用不是第一优先级瓶颈。

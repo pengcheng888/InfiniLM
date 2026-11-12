@@ -84,9 +84,9 @@ warning_count: 0
 valid: true
 ```
 
-当前 schema v4 的 batch event 可以携带 `kv_connector_finalize_started_at_ns`
-和 `kv_connector_finalize_completed_at_ns`。普通服务没有 KV connector，这两个字段为
-`null` 或缺省；`kv_connector_finalize_ms` 不参与普通服务统计，也不应与 PD 服务比较。
+当前 schema v5 的 PD batch event 可以携带 KV connector finalize 和
+`get_finished()` 时间戳。普通服务没有 KV connector，这些字段为 `null` 或缺省；
+connector 相关指标不参与普通服务统计，也不应与 PD 服务比较。
 
 数量对齐关系：
 

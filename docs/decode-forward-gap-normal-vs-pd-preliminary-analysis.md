@@ -308,9 +308,18 @@ Scheduler.update_from_output() 的 connector output 分支
 
 这些主要是空集合检查、锁交换或少量 dict/list 处理，预计成本低于两次跨线程 future 调度。
 
-需要注意：现有 timing 只能定位到 `forward_completed_at_ns -> loop_submit_started_at_ns`
-这一整段，不能直接给出 `get_finished()` 的精确耗时。上述结论是代码路径、调用频率和量级
-共同得到的初步定位；最终确认需要在 `get_finished()` 前后增加 timestamp。
+2026-11-11 的 schema v5 复测已直接确认该定位。在剔除 warmup 后的 13,852 个
+Decode 物理 batch 中：
+
+| 阶段 | avg | min | p50 | p95 | p99 | max |
+|---|---:|---:|---:|---:|---:|---:|
+| `kv_connector_finalize` | 0.352 ms | 0.174 ms | 0.353 ms | 0.417 ms | 0.509 ms | 1.912 ms |
+| `get_finished()` | 0.344 ms | 0.171 ms | 0.345 ms | 0.408 ms | 0.501 ms | 1.901 ms |
+| finalize 剩余两个调用 | 0.008 ms | 0.003 ms | 0.008 ms | 0.010 ms | 0.014 ms | 0.048 ms |
+
+`get_finished()` 占 finalize 总耗时的约 `97.7%`。因此，此前对两个跨线程 future
+调度成本的推断成立；`get_block_ids_with_load_errors()` 与 `get_kv_connector_stats()`
+合计只贡献约 `0.008 ms/step`。
 
 ### 5.5 batch 碎片化是次要但真实的因素
 
@@ -403,9 +412,10 @@ PD mean ITL = 17.17 ms
    差约 `0.194 ms`。
 2. 严格按连续 decode interval 对比后，差异约 `0.210 ms`。
 3. 在相同 `decode batch=8 -> batch=8` 形态下，差异仍约 `0.199 ms`，说明这是系统性差异。
-4. `forward complete -> loop submit` 中最可疑的耗时环节是 Decode 侧每步执行的
-   `MooncakeConnectorWorker.get_finished()`：它向 receiver event loop 提交两个 future
-   并阻塞等待结果。其余 connector stats、scheduler update 和 timing event 处理预计是次要开销。
+4. `forward complete -> loop submit` 中的主要 PD-only 耗时环节已由 schema v5 确认：
+   Decode 侧每步执行的 `MooncakeConnectorWorker.get_finished()` 平均 `0.344 ms`，
+   占 `kv_connector_finalize` 的约 `97.7%`。它向 receiver event loop 提交两个 future
+   并阻塞等待结果；错误块查询和 stats 收集合计仅约 `0.008 ms`。
 5. batch 碎片化会增加 interval 数量，贡献约 `0.42 s` 总空泡增加，但不是单个 interval
    变大的主导原因。
 6. 该差异对稳态 ITL 的净影响约 `0.05 ms/token`，不是当前 PD TTFT 的主要瓶颈。
@@ -416,7 +426,8 @@ PD mean ITL = 17.17 ms
 
 如果要确认因果链，可以增加以下观测或实验：
 
-1. 在 StepThread 中增加更细的分段时间戳：
+1. 在 StepThread 中增加更细的分段时间戳。其中 `get_finished()` 前后时间戳已在
+   schema v5 中完成，剩余优先级如下：
 
 ```text
 forward_returned_at_ns
@@ -427,11 +438,7 @@ model_input_built_at_ns
 next_forward_started_at_ns
 ```
 
-其中优先增加：
-
 ```text
-get_finished_started_at_ns
-get_finished_completed_at_ns
 get_load_errors_completed_at_ns
 get_connector_stats_completed_at_ns
 scheduler_update_completed_at_ns

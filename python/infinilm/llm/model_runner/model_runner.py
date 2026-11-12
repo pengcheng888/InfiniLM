@@ -38,6 +38,8 @@ class KVConnectorOutput:
     invalid_block_ids: set[int] = field(default_factory=set)  # not used
     kv_connector_finalize_started_at_ns: int | None = None
     kv_connector_finalize_completed_at_ns: int | None = None
+    kv_connector_get_finished_started_at_ns: int | None = None
+    kv_connector_get_finished_completed_at_ns: int | None = None
     kv_connector_stats: dict = field(default_factory=dict)
 
 
@@ -58,9 +60,8 @@ class ModelRunner:
         self._forward_timing_enabled = timing_enabled_for(config.cache_type)
         self.kv_transfer_config = config.kv_transfer_config
         logger.info(f"kv_transfer_config: {self.kv_transfer_config}")
-        self._is_pd_service = (
-            self.kv_transfer_config is not None
-            and bool(self.kv_transfer_config.kv_connector)
+        self._is_pd_service = self.kv_transfer_config is not None and bool(
+            self.kv_transfer_config.kv_connector
         )
         if config.pipeline_parallel_size > 1 and self._is_pd_service:
             raise NotImplementedError(
@@ -294,20 +295,20 @@ class ModelRunner:
                 # acknowledgement here would deadlock the coordinator.
                 self.pipeline_control.abort()
             raise
-        forward_completed_at_ns = (
-            time.monotonic_ns() if record_forward_timing else 0
-        )
+        forward_completed_at_ns = time.monotonic_ns() if record_forward_timing else 0
         if self.pipeline_control is not None:
             self.pipeline_control.wait_forward()
         sampled_tokens_list = sampled_tokens.to_numpy().tolist()
 
         return (
             sampled_tokens_list,
-            self._make_forward_timing(
-                forward_started_at_ns, forward_completed_at_ns
-            )
-            if record_forward_timing
-            else None,
+            (
+                self._make_forward_timing(
+                    forward_started_at_ns, forward_completed_at_ns
+                )
+                if record_forward_timing
+                else None
+            ),
         )
 
     def _make_forward_timing(
@@ -338,8 +339,7 @@ class ModelRunner:
             return False
 
         return all(
-            req.kv_transfer_params
-            and req.kv_transfer_params.get("do_remote_decode")
+            req.kv_transfer_params and req.kv_transfer_params.get("do_remote_decode")
             for req in scheduler_output.scheduled_requests
         )
 
@@ -371,18 +371,31 @@ class ModelRunner:
                 output.kv_connector_finalize_started_at_ns = finalize_started_at_ns
 
             try:
-                output.finished_sending, output.failed_recving, output.finished_recving = (
-                    self.kv_connector.get_finished("finished_req_ids")
+                get_finished_started_at_ns = (
+                    time.monotonic_ns() if self._forward_timing_enabled else None
                 )
+                if get_finished_started_at_ns is not None:
+                    output.kv_connector_get_finished_started_at_ns = (
+                        get_finished_started_at_ns
+                    )
+                try:
+                    (
+                        output.finished_sending,
+                        output.failed_recving,
+                        output.finished_recving,
+                    ) = self.kv_connector.get_finished("finished_req_ids")
+                finally:
+                    if get_finished_started_at_ns is not None:
+                        output.kv_connector_get_finished_completed_at_ns = (
+                            time.monotonic_ns()
+                        )
                 output.invalid_block_ids = (
                     self.kv_connector.get_block_ids_with_load_errors()
                 )
                 output.kv_connector_stats = self.kv_connector.get_kv_connector_stats()
             finally:
                 if finalize_started_at_ns is not None:
-                    output.kv_connector_finalize_completed_at_ns = (
-                        time.monotonic_ns()
-                    )
+                    output.kv_connector_finalize_completed_at_ns = time.monotonic_ns()
 
     def close(self) -> None:
         """Release resources held by the KV connector."""

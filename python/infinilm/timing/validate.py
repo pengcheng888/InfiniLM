@@ -19,7 +19,7 @@ TIMESTAMP_FIELDS = (
     "route_token_received_at_ns",
     "route_token_end_at_ns",
 )
-SUPPORTED_SCHEMA_VERSIONS = {3, 4}
+SUPPORTED_SCHEMA_VERSIONS = {3, 4, 5}
 
 
 def _valid_timestamp(value: Any) -> bool:
@@ -44,9 +44,7 @@ def _validate_common_kv_fields(
     errors: list[str] = []
     expected_role = "prefill" if event == "kv_send" else "decode"
     expected_scope = (
-        "producer_batch_transfer"
-        if event == "kv_send"
-        else "decode_local_kv_readiness"
+        "producer_batch_transfer" if event == "kv_send" else "decode_local_kv_readiness"
     )
     if record.get("role") != expected_role:
         errors.append(f"{location}: invalid {event} role")
@@ -217,12 +215,13 @@ def validate_timing_root(root: Path | str) -> dict[str, Any]:
                     errors.append(f"{location}: invalid forward timestamps")
                 finalize_fields = (
                     "kv_connector_finalize_started_at_ns",
+                    "kv_connector_get_finished_started_at_ns",
+                    "kv_connector_get_finished_completed_at_ns",
                     "kv_connector_finalize_completed_at_ns",
                 )
                 if any(record.get(field) is not None for field in finalize_fields):
                     if not all(
-                        _valid_timestamp(record.get(field))
-                        for field in finalize_fields
+                        _valid_timestamp(record.get(field)) for field in finalize_fields
                     ):
                         errors.append(
                             f"{location}: invalid kv_connector_finalize timestamps"
@@ -230,10 +229,7 @@ def validate_timing_root(root: Path | str) -> dict[str, Any]:
                     elif not _ordered(
                         [
                             record.get("forward_completed_at_ns"),
-                            *(
-                                record.get(field)
-                                for field in finalize_fields
-                            ),
+                            *(record.get(field) for field in finalize_fields),
                         ]
                     ):
                         errors.append(

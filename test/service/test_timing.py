@@ -130,11 +130,8 @@ def test_speculative_and_pipeline_forward_do_not_return_timing():
         forward=lambda scheduler_output, model_input: [7]
     )
 
-    scheduler_output = SimpleNamespace(
-        scheduled_requests=[], is_prefill=True
-    )
+    scheduler_output = SimpleNamespace(scheduled_requests=[], is_prefill=True)
     assert runner._model_forward(scheduler_output)[1] is None
-
 
     runner.speculative_runner = None
     runner.pipeline_control = SimpleNamespace(
@@ -173,6 +170,40 @@ def test_forward_timing_is_disabled_when_requests_do_not_participate():
     assert runner._model_forward(scheduler_output)[1] is None
 
 
+def test_kv_connector_output_records_get_finished_boundaries(monkeypatch):
+    from infinilm.llm.model_runner import model_runner as model_runner_module
+    from infinilm.llm.model_runner.model_runner import ModelRunner
+
+    timestamps = iter(range(100, 200))
+    monkeypatch.setattr(
+        model_runner_module.time,
+        "monotonic_ns",
+        lambda: next(timestamps),
+    )
+    runner = object.__new__(ModelRunner)
+    runner._forward_timing_enabled = True
+    runner.kv_connector = SimpleNamespace(
+        bind_connector_metadata=lambda metadata: None,
+        start_load_kv=lambda: None,
+        get_finished=lambda name: ({"sent"}, {"failed"}, {"received"}),
+        get_block_ids_with_load_errors=lambda: set(),
+        get_kv_connector_stats=lambda: {},
+    )
+
+    with runner.maybe_get_kv_connector_output(
+        SimpleNamespace(kv_connector_metadata={})
+    ) as output:
+        pass
+
+    assert output.kv_connector_finalize_started_at_ns == 100
+    assert output.kv_connector_get_finished_started_at_ns == 101
+    assert output.kv_connector_get_finished_completed_at_ns == 102
+    assert output.kv_connector_finalize_completed_at_ns == 103
+    assert output.finished_sending == {"sent"}
+    assert output.failed_recving == {"failed"}
+    assert output.finished_recving == {"received"}
+
+
 def test_batch_put_records_api_loop_boundaries():
     engine = object.__new__(AsyncLLMEngine)
     output_queue = SimpleNamespace(put_nowait=lambda item: None)
@@ -183,8 +214,7 @@ def test_batch_put_records_api_loop_boundaries():
 
     assert token_timing.batch_put_started_at_ns is not None
     assert (
-        token_timing.batch_put_completed_at_ns
-        >= token_timing.batch_put_started_at_ns
+        token_timing.batch_put_completed_at_ns >= token_timing.batch_put_started_at_ns
     )
 
 
@@ -220,22 +250,46 @@ def test_token_timing_is_created_only_for_sampled_tokens():
         forward_completed_at_ns=200,
     )
 
-    assert engine._make_token_timing(
-        request, token_index=0, forward_timing=forward_timing,
-        phase="prefill", finished=False,
-    ) is not None
-    assert engine._make_token_timing(
-        request, token_index=1, forward_timing=forward_timing,
-        phase="decode", finished=False,
-    ) is None
-    assert engine._make_token_timing(
-        request, token_index=31, forward_timing=forward_timing,
-        phase="decode", finished=False,
-    ) is not None
-    assert engine._make_token_timing(
-        request, token_index=5, forward_timing=forward_timing,
-        phase="decode", finished=True,
-    ) is not None
+    assert (
+        engine._make_token_timing(
+            request,
+            token_index=0,
+            forward_timing=forward_timing,
+            phase="prefill",
+            finished=False,
+        )
+        is not None
+    )
+    assert (
+        engine._make_token_timing(
+            request,
+            token_index=1,
+            forward_timing=forward_timing,
+            phase="decode",
+            finished=False,
+        )
+        is None
+    )
+    assert (
+        engine._make_token_timing(
+            request,
+            token_index=31,
+            forward_timing=forward_timing,
+            phase="decode",
+            finished=False,
+        )
+        is not None
+    )
+    assert (
+        engine._make_token_timing(
+            request,
+            token_index=5,
+            forward_timing=forward_timing,
+            phase="decode",
+            finished=True,
+        )
+        is not None
+    )
 
 
 def test_step_loop_records_submit_timestamp_before_call_soon_threadsafe():
@@ -441,9 +495,7 @@ def test_connector_only_step_records_pending_timing_events():
     event = {"event": "kv_receive", "request_id": "request"}
     engine.timing_recorder = SimpleNamespace(
         enabled=True,
-        record_event=lambda event_name, payload: recorded.append(
-            (event_name, payload)
-        ),
+        record_event=lambda event_name, payload: recorded.append((event_name, payload)),
     )
     engine.scheduler = SimpleNamespace(
         schedule=lambda: SimpleNamespace(
@@ -584,7 +636,7 @@ def test_recorder_writes_batch_token_and_finish_records(tmp_path):
     records = [json.loads(line) for line in files[0].read_text().splitlines()]
     assert [record["event"] for record in records] == ["batch", "token", "finish"]
     assert records[1] == {
-        "schema_version": 3,
+        "schema_version": SCHEMA_VERSION,
         "event": "token",
         "pid": records[0]["pid"],
         "request_id": "request",
@@ -700,41 +752,47 @@ def test_validate_and_compute_timing_records(tmp_path):
     assert metrics["record_count"] == 5
     assert metrics["batch"]["prefill"]["batch_size_counts"] == {"2": 1}
     assert metrics["token_metrics_ms"]["service_to_enqueue_ms"]["count"] == 2
-    assert metrics["token_metrics_ms"]["forward_ms"] == pytest.approx({
-        "count": 2,
-        "avg_ms": 0.000015,
-        "min_ms": 0.000010,
-        "max_ms": 0.000020,
-        "p50_ms": 0.000015,
-        "p95_ms": 0.0000195,
-        "p99_ms": 0.0000199,
-    })
-    assert metrics["request_metrics_ms"]["request_first_token_e2e_ms"] == pytest.approx({
-        "count": 2,
-        "avg_ms": 0.000070,
-        "min_ms": 0.000060,
-        "max_ms": 0.000080,
-        "p50_ms": 0.000070,
-        "p95_ms": 0.000079,
-        "p99_ms": 0.0000798,
-    })
-    assert metrics["request_metrics_ms"]["request_e2e_to_final_route_ms"] == pytest.approx({
-        "count": 2,
-        "avg_ms": 0.000095,
-        "min_ms": 0.000070,
-        "max_ms": 0.000120,
-        "p50_ms": 0.000095,
-        "p95_ms": 0.0001175,
-        "p99_ms": 0.0001195,
-    })
-    assert (
-        metrics["request_metrics_ms"]["request_prefill_forward_ms"]["p99_ms"]
-        == pytest.approx(0.0000199)
+    assert metrics["token_metrics_ms"]["forward_ms"] == pytest.approx(
+        {
+            "count": 2,
+            "avg_ms": 0.000015,
+            "min_ms": 0.000010,
+            "max_ms": 0.000020,
+            "p50_ms": 0.000015,
+            "p95_ms": 0.0000195,
+            "p99_ms": 0.0000199,
+        }
     )
-    assert (
-        metrics["request_metrics_ms"]["request_enqueue_to_prefill_start_ms"]["p99_ms"]
-        == pytest.approx(0.000010)
+    assert metrics["request_metrics_ms"]["request_first_token_e2e_ms"] == pytest.approx(
+        {
+            "count": 2,
+            "avg_ms": 0.000070,
+            "min_ms": 0.000060,
+            "max_ms": 0.000080,
+            "p50_ms": 0.000070,
+            "p95_ms": 0.000079,
+            "p99_ms": 0.0000798,
+        }
     )
+    assert metrics["request_metrics_ms"][
+        "request_e2e_to_final_route_ms"
+    ] == pytest.approx(
+        {
+            "count": 2,
+            "avg_ms": 0.000095,
+            "min_ms": 0.000070,
+            "max_ms": 0.000120,
+            "p50_ms": 0.000095,
+            "p95_ms": 0.0001175,
+            "p99_ms": 0.0001195,
+        }
+    )
+    assert metrics["request_metrics_ms"]["request_prefill_forward_ms"][
+        "p99_ms"
+    ] == pytest.approx(0.0000199)
+    assert metrics["request_metrics_ms"]["request_enqueue_to_prefill_start_ms"][
+        "p99_ms"
+    ] == pytest.approx(0.000010)
 
     distribution_fields = {
         "count",
@@ -751,6 +809,72 @@ def test_validate_and_compute_timing_records(tmp_path):
         assert set(distribution) == distribution_fields
     for phase_metrics in metrics["batch"].values():
         assert set(phase_metrics["forward_duration_ms"]) == distribution_fields
+
+
+def test_validate_and_compute_kv_connector_get_finished_timing(tmp_path):
+    pid_dir = tmp_path / "123"
+    pid_dir.mkdir()
+    token_timestamps = {
+        "service_entered_at_ns": 100,
+        "scheduler_enqueue_before_at_ns": 110,
+        "forward_started_at_ns": 500,
+        "forward_completed_at_ns": 600,
+        "loop_submit_started_at_ns": 700,
+        "batch_put_started_at_ns": 710,
+        "batch_put_completed_at_ns": 711,
+        "route_token_received_at_ns": 720,
+        "route_token_end_at_ns": 730,
+    }
+    records = [
+        {
+            "schema_version": 5,
+            "event": "batch",
+            "pid": 123,
+            "request_ids": ["request"],
+            "phase": "decode",
+            "batch_size": 1,
+            "batch_id": "batch",
+            "forward_started_at_ns": 500,
+            "forward_completed_at_ns": 600,
+            "kv_connector_finalize_started_at_ns": 610,
+            "kv_connector_get_finished_started_at_ns": 611,
+            "kv_connector_get_finished_completed_at_ns": 620,
+            "kv_connector_finalize_completed_at_ns": 650,
+        },
+        {
+            "schema_version": 5,
+            "event": "token",
+            "pid": 123,
+            "request_id": "request",
+            "token_index": 0,
+            "finished": False,
+            "batch_id": "batch",
+            **token_timestamps,
+        },
+    ]
+    (pid_dir / "timing.jsonl").write_text(
+        "".join(json.dumps(record) + "\n" for record in records)
+    )
+
+    validation = validate_timing_root(tmp_path)
+    assert validation["valid"] is True
+
+    metrics = compute_timing_metrics(tmp_path)
+    post_forward = metrics["post_forward_metrics_ms"]
+    assert post_forward["kv_connector_finalize_ms"]["avg_ms"] == pytest.approx(0.00004)
+    assert post_forward["kv_connector_get_finished_ms"]["avg_ms"] == pytest.approx(
+        0.000009
+    )
+    assert post_forward["kv_connector_finalize_remaining_ms"][
+        "avg_ms"
+    ] == pytest.approx(0.000031)
+    decode_batch = metrics["batch"]["decode"]
+    assert decode_batch["kv_connector_get_finished_ms"]["avg_ms"] == pytest.approx(
+        0.000009
+    )
+    assert decode_batch["kv_connector_finalize_remaining_ms"][
+        "avg_ms"
+    ] == pytest.approx(0.000031)
 
 
 def test_validate_and_compute_mooncake_timing_records(tmp_path):

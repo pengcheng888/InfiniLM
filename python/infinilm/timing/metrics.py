@@ -52,6 +52,60 @@ def _percentile(values: list[float], quantile: float) -> float:
     return ordered[lower] + (ordered[upper] - ordered[lower]) * (rank - lower)
 
 
+def _kv_connector_batch_metrics(
+    phase_batches: list[dict[str, Any]],
+) -> dict[str, dict[str, float | int | None]]:
+    finalize_values = [
+        value
+        for batch in phase_batches
+        if (
+            value := _elapsed_ms(
+                batch,
+                "kv_connector_finalize_started_at_ns",
+                "kv_connector_finalize_completed_at_ns",
+            )
+        )
+        is not None
+    ]
+    get_finished_values = [
+        value
+        for batch in phase_batches
+        if (
+            value := _elapsed_ms(
+                batch,
+                "kv_connector_get_finished_started_at_ns",
+                "kv_connector_get_finished_completed_at_ns",
+            )
+        )
+        is not None
+    ]
+    remaining_values = [
+        finalize_value - get_finished_value
+        for batch in phase_batches
+        if (
+            finalize_value := _elapsed_ms(
+                batch,
+                "kv_connector_finalize_started_at_ns",
+                "kv_connector_finalize_completed_at_ns",
+            )
+        )
+        is not None
+        and (
+            get_finished_value := _elapsed_ms(
+                batch,
+                "kv_connector_get_finished_started_at_ns",
+                "kv_connector_get_finished_completed_at_ns",
+            )
+        )
+        is not None
+    ]
+    return {
+        "kv_connector_finalize_ms": _distribution(finalize_values),
+        "kv_connector_get_finished_ms": _distribution(get_finished_values),
+        "kv_connector_finalize_remaining_ms": _distribution(remaining_values),
+    }
+
+
 def _load_records(root: Path) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     for path in root.glob("*/timing.jsonl"):
@@ -84,17 +138,15 @@ def _merged_interval_union_ms(
                 merged.append([started, completed])
             else:
                 merged[-1][1] = max(merged[-1][1], completed)
-        total_ms += sum(
-            completed - started for started, completed in merged
-        ) / 1_000_000
+        total_ms += (
+            sum(completed - started for started, completed in merged) / 1_000_000
+        )
     return total_ms
 
 
 def _mooncake_metrics(records: list[dict[str, Any]]) -> dict[str, Any]:
     sends = [record for record in records if record.get("event") == "kv_send"]
-    receives = [
-        record for record in records if record.get("event") == "kv_receive"
-    ]
+    receives = [record for record in records if record.get("event") == "kv_receive"]
     unique_sends: dict[tuple[Any, str], dict[str, Any]] = {}
     for record in sends:
         batch_id = record.get("batch_id")
@@ -244,8 +296,16 @@ def compute_timing_metrics(root: Path | str) -> dict[str, Any]:
     }
 
     token_metric_edges = (
-        ("service_to_enqueue_ms", "service_entered_at_ns", "scheduler_enqueue_before_at_ns"),
-        ("enqueue_to_forward_start_ms", "scheduler_enqueue_before_at_ns", "forward_started_at_ns"),
+        (
+            "service_to_enqueue_ms",
+            "service_entered_at_ns",
+            "scheduler_enqueue_before_at_ns",
+        ),
+        (
+            "enqueue_to_forward_start_ms",
+            "scheduler_enqueue_before_at_ns",
+            "forward_started_at_ns",
+        ),
         ("forward_ms", "forward_started_at_ns", "forward_completed_at_ns"),
         (
             "forward_to_loop_submit_started_ms",
@@ -253,7 +313,11 @@ def compute_timing_metrics(root: Path | str) -> dict[str, Any]:
             "loop_submit_started_at_ns",
         ),
         ("batch_put_ms", "batch_put_started_at_ns", "batch_put_completed_at_ns"),
-        ("batch_put_to_route_received_ms", "batch_put_completed_at_ns", "route_token_received_at_ns"),
+        (
+            "batch_put_to_route_received_ms",
+            "batch_put_completed_at_ns",
+            "route_token_received_at_ns",
+        ),
         ("route_token_ms", "route_token_received_at_ns", "route_token_end_at_ns"),
         ("first_token_e2e_ms", "service_entered_at_ns", "route_token_received_at_ns"),
     )
@@ -270,9 +334,7 @@ def compute_timing_metrics(root: Path | str) -> dict[str, Any]:
     }
 
     first_tokens = [record for record in tokens if record.get("token_index") == 0]
-    finished_tokens = [
-        record for record in tokens if record.get("finished") is True
-    ]
+    finished_tokens = [record for record in tokens if record.get("finished") is True]
     request_metric_edges = (
         (
             "request_first_token_e2e_ms",
@@ -311,6 +373,12 @@ def compute_timing_metrics(root: Path | str) -> dict[str, Any]:
     }
 
     tokens_with_finalize = []
+    finalize_timing_fields = (
+        "kv_connector_finalize_started_at_ns",
+        "kv_connector_get_finished_started_at_ns",
+        "kv_connector_get_finished_completed_at_ns",
+        "kv_connector_finalize_completed_at_ns",
+    )
     for token in tokens:
         batch = batches_by_id.get(token.get("batch_id"))
         if batch is None:
@@ -323,14 +391,29 @@ def compute_timing_metrics(root: Path | str) -> dict[str, Any]:
         tokens_with_finalize.append(
             {
                 **token,
-                "kv_connector_finalize_started_at_ns": batch[
-                    "kv_connector_finalize_started_at_ns"
-                ],
-                "kv_connector_finalize_completed_at_ns": batch[
-                    "kv_connector_finalize_completed_at_ns"
-                ],
+                **{
+                    field: batch[field]
+                    for field in finalize_timing_fields
+                    if batch.get(field) is not None
+                },
             }
         )
+        if all(
+            isinstance(tokens_with_finalize[-1].get(field), int)
+            for field in finalize_timing_fields
+        ):
+            token_with_finalize = tokens_with_finalize[-1]
+            token_with_finalize["kv_connector_finalize_remaining_ns"] = (
+                token_with_finalize["kv_connector_finalize_started_at_ns"]
+                + (
+                    token_with_finalize["kv_connector_finalize_completed_at_ns"]
+                    - token_with_finalize["kv_connector_get_finished_completed_at_ns"]
+                )
+                + (
+                    token_with_finalize["kv_connector_get_finished_started_at_ns"]
+                    - token_with_finalize["kv_connector_finalize_started_at_ns"]
+                )
+            )
 
     post_forward_metric_edges = (
         (
@@ -342,6 +425,16 @@ def compute_timing_metrics(root: Path | str) -> dict[str, Any]:
             "kv_connector_finalize_ms",
             "kv_connector_finalize_started_at_ns",
             "kv_connector_finalize_completed_at_ns",
+        ),
+        (
+            "kv_connector_get_finished_ms",
+            "kv_connector_get_finished_started_at_ns",
+            "kv_connector_get_finished_completed_at_ns",
+        ),
+        (
+            "kv_connector_finalize_remaining_ms",
+            "kv_connector_finalize_started_at_ns",
+            "kv_connector_finalize_remaining_ns",
         ),
         (
             "kv_connector_finalize_to_loop_submit_ms",
@@ -398,20 +491,7 @@ def compute_timing_metrics(root: Path | str) -> dict[str, Any]:
                         is not None
                     ]
                 ),
-                "kv_connector_finalize_ms": _distribution(
-                    [
-                        value
-                        for batch in phase_batches
-                        if (
-                            value := _elapsed_ms(
-                                batch,
-                                "kv_connector_finalize_started_at_ns",
-                                "kv_connector_finalize_completed_at_ns",
-                            )
-                        )
-                        is not None
-                    ]
-                ),
+                **_kv_connector_batch_metrics(phase_batches),
             }
             for phase, phase_batches in batch_by_phase.items()
         },
