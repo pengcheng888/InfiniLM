@@ -98,6 +98,9 @@ class BaseConfig:
         self.temperature = self.args.temperature
 
         self.warmup = self.args.warmup
+        self.benchmark_mode = self.args.benchmark_mode
+        self.benchmark_repeats = self.args.benchmark_repeats
+        self.benchmark_output = self.args.benchmark_output
         self.verbose = self.args.verbose
         self.log_level = self.args.log_level
 
@@ -324,7 +327,12 @@ class BaseConfig:
         )
 
         # --- Length and infer parameters ---
-        self.parser.add_argument("--batch-size", type=int, default=1)
+        self.parser.add_argument(
+            "--batch-size",
+            type=parse_list,
+            default=1,
+            help="batch size or comma-separated batch size list",
+        )
         self.parser.add_argument(
             "--max-batch-size",
             type=int,
@@ -352,6 +360,32 @@ class BaseConfig:
 
         # --- debug ---
         self.parser.add_argument("--warmup", action="store_true")
+        self.parser.add_argument(
+            "--benchmark-mode",
+            type=str,
+            default="generate",
+            choices=[
+                "generate",
+                "prefill-direct",
+                "decode-direct",
+            ],
+            help=(
+                "benchmark path: generate keeps the legacy autoregressive path; "
+                "direct modes call InferEngine.forward() without tokenization"
+            ),
+        )
+        self.parser.add_argument(
+            "--benchmark-repeats",
+            type=int,
+            default=1,
+            help="number of measured direct benchmark repetitions per shape",
+        )
+        self.parser.add_argument(
+            "--benchmark-output",
+            type=str,
+            default=None,
+            help="write raw samples and aggregate summaries as JSON Lines",
+        )
         self.parser.add_argument("--verbose", action="store_false")
         self.parser.add_argument(
             "--log-level",

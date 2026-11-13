@@ -185,3 +185,6 @@
       ```bash
       python examples/bench.py --device nvidia --model=<model-path> --enable-paged-attn [--attn=default | --attn=flash-attn]
       ```
+    - Direct prefill/decode performance reports
+      See [direct benchmark documentation](docs/performance-reports/direct-benchmark.md) and
+      [performance report conventions](docs/performance-reports/README.md).

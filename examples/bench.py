@@ -1,6 +1,8 @@
 import json
 import logging
 import os
+import random
+import statistics
 import sys
 import time
 from collections import OrderedDict
@@ -29,6 +31,9 @@ DATA_TYPE_BYTES = {
 
 _PAGED_KV_BLOCK_SIZE = 256
 _WARMUP_DECODE_LEN = 5
+_DIRECT_WARMUP_REPEATS = 3
+_DIRECT_BENCHMARK_RANDOM_SEED = 2026
+_DIRECT_DECODE_STEPS = 4
 
 # Maps model_type to its specific config key normalization rules.
 # Each rule maps a standard key (e.g., "head_dim") to either:
@@ -292,6 +297,131 @@ def resize_benchmark_prompt(
     return prefix_ids + repeat_prompt(content_ids, content_length) + suffix_ids
 
 
+def direct_input_layout(
+    phase: str,
+    batch_size: int,
+    input_len: int,
+    past_kv_length: int,
+    block_size: int,
+    token_id: int = 10,
+    decode_step: int = 0,
+    blocks_per_request: int | None = None,
+):
+    """Build packed prefill/decode inputs without requiring valid model output."""
+    if phase not in {"prefill", "decode"}:
+        raise ValueError(f"unsupported direct benchmark phase: {phase}")
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive")
+    if input_len <= 0 or past_kv_length < 0 or block_size <= 0:
+        raise ValueError("input_len, past_kv_length, and block_size must be valid")
+    if decode_step < 0:
+        raise ValueError("decode_step must be non-negative")
+    if phase == "prefill" and decode_step != 0:
+        raise ValueError("prefill does not support decode_step")
+    if blocks_per_request is not None and blocks_per_request <= 0:
+        raise ValueError("blocks_per_request must be positive")
+
+    if phase == "prefill":
+        past_len = 0
+        current_len = input_len
+        total_len = input_len
+    else:
+        past_len = past_kv_length + decode_step
+        current_len = 1
+        total_len = past_len + 1
+
+    if blocks_per_request is None:
+        blocks_per_request = (total_len + block_size - 1) // block_size
+    tokens: list[int] = []
+    positions: list[int] = []
+    past_lengths: list[int] = []
+    total_lengths: list[int] = []
+    input_offsets = [0]
+    cu_seqlens = [0]
+    block_tables: list[list[int]] = []
+    slot_mapping: list[int] = []
+
+    for request_idx in range(batch_size):
+        tokens.extend([token_id] * current_len)
+        positions.extend(range(past_len, past_len + current_len))
+        past_lengths.append(past_len)
+        total_lengths.append(total_len)
+        input_offsets.append(input_offsets[-1] + current_len)
+        cu_seqlens.append(cu_seqlens[-1] + total_len)
+
+        request_start_block = request_idx * blocks_per_request
+        block_tables.append(
+            list(range(request_start_block, request_start_block + blocks_per_request))
+        )
+        request_start_slot = request_start_block * block_size
+        slot_mapping.extend(
+            request_start_slot + past_len + offset for offset in range(current_len)
+        )
+
+    return {
+        "input_ids": [tokens],
+        "position_ids": positions,
+        "past_kv_lengths": past_lengths,
+        "total_kv_lengths": total_lengths,
+        "input_offsets": input_offsets,
+        "cu_seqlens": cu_seqlens,
+        "block_tables": block_tables,
+        "slot_mapping": slot_mapping,
+        "blocks_per_request": blocks_per_request,
+        "token_count": current_len * batch_size,
+        "total_tokens": total_len * batch_size,
+    }
+
+
+def build_direct_forward_inputs(layout: dict):
+    dtypes = {
+        "input_ids": infinicore.int64,
+        "position_ids": infinicore.int64,
+        "past_kv_lengths": infinicore.int32,
+        "total_kv_lengths": infinicore.int32,
+        "input_offsets": infinicore.int32,
+        "cu_seqlens": infinicore.int32,
+        "block_tables": infinicore.int32,
+        "slot_mapping": infinicore.int64,
+    }
+    tensor_keys = set(dtypes)
+    return {
+        key: infinicore.from_list(value, dtype=dtypes[key])
+        for key, value in layout.items()
+        if key in tensor_keys
+    }
+
+
+def percentile(values: list[float], fraction: float) -> float:
+    if not values:
+        raise ValueError("percentile requires at least one sample")
+    ordered = sorted(values)
+    position = fraction * (len(ordered) - 1)
+    lower = int(position)
+    upper = min(lower + 1, len(ordered) - 1)
+    weight = position - lower
+    return ordered[lower] * (1 - weight) + ordered[upper] * weight
+
+
+def summarize_durations(
+    durations_ms: list[float], token_count: int
+) -> dict[str, float]:
+    if not durations_ms:
+        raise ValueError("summary requires at least one sample")
+    duration_s = [value / 1000 for value in durations_ms]
+    return {
+        "count": len(durations_ms),
+        "duration_ms_mean": statistics.mean(durations_ms),
+        "duration_ms_std": statistics.pstdev(durations_ms),
+        "duration_ms_p50": percentile(durations_ms, 0.50),
+        "duration_ms_p95": percentile(durations_ms, 0.95),
+        "duration_ms_p99": percentile(durations_ms, 0.99),
+        "duration_ms_min": min(durations_ms),
+        "duration_ms_max": max(durations_ms),
+        "throughput_tok_s_mean": token_count / statistics.mean(duration_s),
+    }
+
+
 def convert_multimodal_inputs(model, processor, processed_inputs):
     """Convert one image into reusable low-level input tensors."""
     if processed_inputs is None:
@@ -445,11 +575,14 @@ class TestModel:
         top_k=1,
         use_legacy_moe=False,
         enable_prefix_caching=False,
+        enable_workspace=True,
+        max_num_batched_tokens=18432,
         processor=None,
         tokenizer=None,
         prompt_token_segments=None,
         processed_multimodal_inputs=None,
         prompt_text=None,
+        direct_mode=False,
     ) -> None:
         model_path = os.path.expanduser(model_path)
         self.draft_model_path = draft_model_path
@@ -470,6 +603,12 @@ class TestModel:
         self.processed_multimodal_inputs = processed_multimodal_inputs
         self.multimodal_inputs = {}
         self.pp = pp
+        self.direct_mode = direct_mode
+
+        if direct_mode and (pp > 1 or draft_model_path is not None):
+            raise ValueError(
+                "direct benchmarks require pipeline parallelism to be disabled and no draft model"
+            )
 
         if pp > 1 and draft_model_path is not None:
             raise ValueError("pipeline-parallel speculative decoding is not supported")
@@ -547,9 +686,15 @@ class TestModel:
             use_mla=use_mla,
             weight_load_mode=weight_load_mode,
             pre_transpose=pre_transpose,
+            enable_workspace_manager=enable_workspace,
+            max_num_batched_tokens=max_num_batched_tokens,
         )
-        self.multimodal_inputs = convert_multimodal_inputs(
-            model, self.processor, processed_multimodal_inputs
+        self.multimodal_inputs = (
+            {}
+            if direct_mode
+            else convert_multimodal_inputs(
+                model, self.processor, processed_multimodal_inputs
+            )
         )
 
         # ---------------------------------------------------------------------------- #
@@ -561,20 +706,23 @@ class TestModel:
         # ---------------------------------------------------------------------------- #
         #                        创建 tokenizer
         # ---------------------------------------------------------------------------- #
-        if self.processor is None:
-            self.processor = AutoInfinilmProcessor.from_pretrained(model_path)
-            self.tokenizer = self.processor.get_tokenizer()
+        if direct_mode:
+            self.processor = None
+            self.tokenizer = None
+            self.prompt_token_segments = None
+            input_ids_list = []
+        else:
+            if self.processor is None:
+                self.processor = AutoInfinilmProcessor.from_pretrained(model_path)
+                self.tokenizer = self.processor.get_tokenizer()
 
-        # ---------------------------------------------------------------------------- #
-        #                        token编码
-        # ---------------------------------------------------------------------------- #
-        if self.prompt_token_segments is None:
-            self.prompt_token_segments = build_benchmark_prompt_ids(
-                self.processor,
-                self.tokenizer,
-                prompt if prompt_text is None else prompt_text,
-            )
-        input_ids_list = [sum(self.prompt_token_segments, [])]
+            if self.prompt_token_segments is None:
+                self.prompt_token_segments = build_benchmark_prompt_ids(
+                    self.processor,
+                    self.tokenizer,
+                    prompt if prompt_text is None else prompt_text,
+                )
+            input_ids_list = [sum(self.prompt_token_segments, [])]
 
         self.model = model
         self.input_ids_list = input_ids_list
@@ -751,6 +899,283 @@ class TestModel:
         )
 
 
+def timed_engine_forward(engine, inputs, temperature, top_p, top_k):
+    infinicore.sync_device()
+    start = time.perf_counter()
+    sampled_tokens = engine.forward(
+        **inputs,
+        temperature=temperature,
+        top_p=top_p,
+        top_k=top_k,
+    )
+    infinicore.sync_device()
+    return (time.perf_counter() - start) * 1000, sampled_tokens
+
+
+def run_direct_decode_warmup(
+    engine,
+    step_inputs: list[dict],
+    batch_size: int,
+    temperature: float,
+    top_p: float,
+    top_k: int,
+):
+    next_input_ids = None
+    for inputs in step_inputs:
+        forward_inputs = dict(inputs)
+        if next_input_ids is not None:
+            forward_inputs["input_ids"] = next_input_ids
+
+        sampled_tokens = engine.forward(
+            **forward_inputs,
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
+        )
+        next_input_ids = sampled_tokens.view([1, batch_size])
+        infinicore.sync_device()
+    return next_input_ids
+
+
+def run_direct_benchmark(
+    test: TestModel,
+    cfg: BaseConfig,
+    batch_sizes: list[int],
+    input_len: int,
+    metadata: dict,
+):
+    engine = test.model
+    if not engine.enable_paged_attn:
+        raise ValueError("direct benchmarks require --enable-paged-attn")
+    if engine.forward_bypass_delay_ms is not None:
+        raise RuntimeError(
+            "INFINILM_FORWARD_BYPASS_DELAY_MS is set; direct benchmark results "
+            "would measure sleep instead of real inference"
+        )
+    if engine.position_id_axes != 1:
+        raise ValueError("direct benchmarks do not support multi-axis position IDs")
+    if engine.has_mamba_cache:
+        raise ValueError("direct benchmarks do not support Mamba cache models")
+    if cfg.benchmark_repeats <= 0:
+        raise ValueError("--benchmark-repeats must be positive")
+
+    phase = "prefill" if cfg.benchmark_mode == "prefill-direct" else "decode"
+    expected_execution_mode = (
+        "graph" if cfg.enable_graph and phase == "decode" else "eager"
+    )
+    warmup_repeats = _DIRECT_WARMUP_REPEATS if cfg.warmup else 0
+    shapes = list(batch_sizes)
+    random.Random(_DIRECT_BENCHMARK_RANDOM_SEED).shuffle(shapes)
+
+    output_file = None
+    if cfg.benchmark_output:
+        output_file = open(cfg.benchmark_output, "w", encoding="utf-8")
+
+    def write_record(record: dict):
+        record["event"] = record.pop("event", "sample")
+        line = json.dumps(record, ensure_ascii=False, sort_keys=True)
+        if output_file is not None:
+            print(line, file=output_file, flush=True)
+
+    try:
+        write_record(
+            {
+                "event": "config",
+                "benchmark_mode": cfg.benchmark_mode,
+                "phase": phase,
+                "timing_scope": "engine_forward_including_sampling",
+                "expected_execution_mode": expected_execution_mode,
+                "warmup_repeats": warmup_repeats,
+                "measured_repeats": cfg.benchmark_repeats,
+                "random_seed": _DIRECT_BENCHMARK_RANDOM_SEED,
+                **metadata,
+            }
+        )
+
+        case_summaries = []
+        for max_batch_size in shapes:
+            if phase == "prefill":
+                layout = direct_input_layout(
+                    phase=phase,
+                    batch_size=max_batch_size,
+                    input_len=input_len,
+                    past_kv_length=input_len,
+                    block_size=cfg.block_size,
+                )
+                inputs = build_direct_forward_inputs(layout)
+
+                for _ in range(warmup_repeats):
+                    engine.forward(
+                        **inputs,
+                        temperature=cfg.temperature,
+                        top_p=cfg.top_p,
+                        top_k=cfg.top_k,
+                    )
+                    infinicore.sync_device()
+
+                durations = []
+                token_count = max_batch_size * input_len
+                for repeat in range(cfg.benchmark_repeats):
+                    duration, _ = timed_engine_forward(
+                        engine, inputs, cfg.temperature, cfg.top_p, cfg.top_k
+                    )
+                    durations.append(duration)
+                    write_record(
+                        {
+                            "event": "sample",
+                            "phase": phase,
+                            "batch_size": max_batch_size,
+                            "repeat": repeat,
+                            "input_len": input_len,
+                            "past_kv_length": 0,
+                            "token_count": token_count,
+                            "duration_ms": duration,
+                        }
+                    )
+                summary = summarize_durations(durations, token_count)
+            else:
+                cache_len = input_len + _DIRECT_DECODE_STEPS
+                blocks_per_request = (cache_len + cfg.block_size - 1) // cfg.block_size
+                step_inputs = [
+                    build_direct_forward_inputs(
+                        direct_input_layout(
+                            phase=phase,
+                            batch_size=max_batch_size,
+                            input_len=input_len,
+                            past_kv_length=input_len,
+                            block_size=cfg.block_size,
+                            decode_step=decode_step,
+                            blocks_per_request=blocks_per_request,
+                        )
+                    )
+                    for decode_step in range(_DIRECT_DECODE_STEPS)
+                ]
+
+                for _ in range(warmup_repeats):
+                    run_direct_decode_warmup(
+                        engine,
+                        step_inputs,
+                        max_batch_size,
+                        cfg.temperature,
+                        cfg.top_p,
+                        cfg.top_k,
+                    )
+
+                step_durations = [[] for _ in range(_DIRECT_DECODE_STEPS)]
+                repeat_durations = []
+                for repeat in range(cfg.benchmark_repeats):
+                    next_input_ids = None
+                    repeat_duration = 0.0
+
+                    for decode_step, inputs in enumerate(step_inputs):
+                        forward_inputs = dict(inputs)
+                        if next_input_ids is not None:
+                            forward_inputs["input_ids"] = next_input_ids
+
+                        duration, sampled_tokens = timed_engine_forward(
+                            engine,
+                            forward_inputs,
+                            cfg.temperature,
+                            cfg.top_p,
+                            cfg.top_k,
+                        )
+                        next_input_ids = sampled_tokens.view([1, max_batch_size])
+                        repeat_duration += duration
+                        step_durations[decode_step].append(duration)
+                        write_record(
+                            {
+                                "event": "sample",
+                                "phase": phase,
+                                "batch_size": max_batch_size,
+                                "repeat": repeat,
+                                "decode_step": decode_step,
+                                "input_len": input_len,
+                                "past_kv_length": input_len + decode_step,
+                                "token_count": max_batch_size,
+                                "duration_ms": duration,
+                            }
+                        )
+                    repeat_durations.append(repeat_duration)
+
+                for decode_step, durations in enumerate(step_durations):
+                    step_summary = summarize_durations(durations, max_batch_size)
+                    step_summary.update(
+                        {
+                            "event": "summary",
+                            "benchmark_mode": cfg.benchmark_mode,
+                            "phase": phase,
+                            "max_batch_size": max_batch_size,
+                            "decode_step": decode_step,
+                            "past_kv_length": input_len + decode_step,
+                            "input_len": input_len,
+                            "enable_graph": cfg.enable_graph,
+                            "expected_execution_mode": expected_execution_mode,
+                        }
+                    )
+                    write_record(step_summary)
+                    printable = {
+                        key: round(value, 3)
+                        for key, value in step_summary.items()
+                        if isinstance(value, (int, float))
+                    }
+                    print(f"[direct-step-summary] {printable}")
+
+                summary = summarize_durations(
+                    repeat_durations,
+                    max_batch_size * _DIRECT_DECODE_STEPS,
+                )
+                summary["decode_step_count"] = _DIRECT_DECODE_STEPS
+                summary["step_sample_count"] = len(step_durations[0]) * len(
+                    step_durations
+                )
+
+            summary.update(
+                {
+                    "event": "summary",
+                    "benchmark_mode": cfg.benchmark_mode,
+                    "phase": phase,
+                    "max_batch_size": max_batch_size,
+                    "input_len": input_len,
+                    "enable_graph": cfg.enable_graph,
+                    "expected_execution_mode": expected_execution_mode,
+                }
+            )
+            write_record(summary)
+            case_summaries.append(summary)
+            printable = {
+                key: round(value, 3)
+                for key, value in summary.items()
+                if isinstance(value, (int, float))
+            }
+            print(f"[direct-summary] {printable}")
+
+        baseline = next(
+            (
+                item["throughput_tok_s_mean"]
+                for item in case_summaries
+                if item["max_batch_size"] == 1
+            ),
+            None,
+        )
+        if baseline:
+            for item in case_summaries:
+                write_record(
+                    {
+                        "event": "scaling",
+                        "phase": phase,
+                        "benchmark_mode": cfg.benchmark_mode,
+                        "max_batch_size": item["max_batch_size"],
+                        "throughput_tok_s_mean": item["throughput_tok_s_mean"],
+                        "throughput_scaling_vs_batch1": (
+                            item["throughput_tok_s_mean"] / baseline
+                        ),
+                    }
+                )
+    finally:
+        if output_file is not None:
+            output_file.close()
+
+
 if __name__ == "__main__":
     cfg = BaseConfig()
     logging.basicConfig(
@@ -798,6 +1223,78 @@ if __name__ == "__main__":
 
     if isinstance(output_len, int):
         output_len = [output_len]
+
+    if cfg.benchmark_mode != "generate":
+        if not enable_paged_attn:
+            raise ValueError("direct benchmarks require --enable-paged-attn")
+        if attn_backend == "default":
+            attn_backend = "flash-attn"
+        if attn_backend != "flash-attn":
+            raise ValueError("direct benchmarks require --attn flash-attn")
+        if cfg.pp > 1 or cfg.draft_model is not None or cfg.image is not None:
+            raise ValueError(
+                "direct benchmarks do not support pipeline parallelism, draft models, or multimodal inputs"
+            )
+        if len(input_len) != 1:
+            raise ValueError("direct benchmarks require exactly one --input-len value")
+        if not batch_size:
+            raise ValueError("direct benchmarks require at least one batch size")
+
+        direct_input_len = input_len[0]
+        total_cache_len = (
+            direct_input_len
+            if cfg.benchmark_mode == "prefill-direct"
+            else direct_input_len + _DIRECT_DECODE_STEPS
+        )
+        blocks_per_request = (total_cache_len + cfg.block_size - 1) // cfg.block_size
+        cache_config = PagedKVCacheConfig(
+            max(batch_size) * blocks_per_request,
+            cfg.block_size,
+            max_batch_size=max(batch_size),
+        )
+        direct_current_tokens = (
+            max(batch_size) * direct_input_len
+            if cfg.benchmark_mode == "prefill-direct"
+            else max(batch_size)
+        )
+        max_num_batched_tokens = max(cfg.max_num_batched_tokens, direct_current_tokens)
+
+        direct_test = TestModel(
+            model_path,
+            infini_device=infini_device,
+            tp=tp,
+            skip_load=skip_load,
+            cache_config=cache_config,
+            enable_graph=enable_graph,
+            attn_backend=attn_backend,
+            use_mla=cfg.use_mla,
+            weight_load_mode=cfg.weight_load_mode,
+            pre_transpose=cfg.pre_transpose,
+            moe_ep_backend=moe_ep_backend,
+            moe_ep_size=ep,
+            enable_workspace=cfg.enable_workspace,
+            max_num_batched_tokens=max_num_batched_tokens,
+            direct_mode=True,
+        )
+        run_direct_benchmark(
+            direct_test,
+            cfg,
+            batch_size,
+            direct_input_len,
+            metadata={
+                "model_path": model_path,
+                "device": device_str,
+                "tensor_parallel_size": tp,
+                "attention_backend": attn_backend,
+                "block_size": cfg.block_size,
+                "num_blocks": cache_config.num_blocks(),
+                "max_num_batched_tokens": max_num_batched_tokens,
+                "cache_type": "paged",
+                "weight_loaded": not skip_load,
+            },
+        )
+        direct_test.close()
+        raise SystemExit(0)
 
     processor = AutoInfinilmProcessor.from_pretrained(model_path)
     tokenizer = processor.get_tokenizer()
