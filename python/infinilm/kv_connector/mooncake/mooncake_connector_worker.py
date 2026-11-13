@@ -33,7 +33,11 @@ from infinilm.kv_connector.mooncake.mooncake_utils import (
     RegisterWorkerPayload,
     should_launch_bootstrap_server,
 )
-from infinilm.infinilm_environment import get_mooncake_kv_transfer_bypass_delay_ms
+from infinilm.infinilm_environment import (
+    MOONCAKE_GET_FINISHED_LEGACY_MODE,
+    get_mooncake_get_finished_mode,
+    get_mooncake_kv_transfer_bypass_delay_ms,
+)
 from infinilm.timing.config import timing_enabled_for
 from enum import IntEnum
 from typing import Any
@@ -131,6 +135,8 @@ class MooncakeConnectorWorker:
         self.is_kv_producer: bool = kv_transfer_config.kv_role == "kv_producer"
         self.is_kv_consumer: bool = kv_transfer_config.kv_role == "kv_consumer"
         self._timing_enabled = timing_enabled_for("paged")
+        self.get_finished_mode = get_mooncake_get_finished_mode()
+        logger.info("Mooncake get_finished mode: %s", self.get_finished_mode)
         self.mooncake_kv_transfer_bypass_delay_ms = (
             get_mooncake_kv_transfer_bypass_delay_ms()
         )
@@ -237,6 +243,7 @@ class MooncakeConnectorWorker:
         if self.is_kv_consumer:
             self.finished_recving_reqs: set[ReqId] = set()
             self._tp_size: dict[EngineId, int] = {self.engine_id: self.tp_size}
+            self._receiver_finished_lock = threading.Lock()
 
             # collect timeout reqs to recv
             self.timeout_reqs_to_recv: dict[EngineId, dict[ReqId, PullReqMeta]] = {}
@@ -927,15 +934,27 @@ class MooncakeConnectorWorker:
         )
         ready_event.wait()  # Wait for listener ZMQ socket to be ready.
 
+    def _publish_receiver_finished_state(
+        self,
+        finished_req_ids: set[ReqId],
+        failed_req_ids: set[ReqId],
+    ) -> None:
+        """Publish finished and failed states as one receiver snapshot."""
+        with self._receiver_finished_lock:
+            self.finished_recving_reqs.update(finished_req_ids)
+            self.xfer_failed_recving_reqs_ids.update(failed_req_ids)
+
     async def fetch_finished_recving_reqs(self) -> set[ReqId]:
-        finished_recving_reqs = self.finished_recving_reqs
-        self.finished_recving_reqs = set()
-        return finished_recving_reqs
+        with self._receiver_finished_lock:
+            finished_recving_reqs = self.finished_recving_reqs
+            self.finished_recving_reqs = set()
+            return finished_recving_reqs
 
     async def fetch_xfer_failed_recving_reqs(self) -> set[ReqId]:
-        xfer_failed_recving_reqs_ids = self.xfer_failed_recving_reqs_ids
-        self.xfer_failed_recving_reqs_ids = set()
-        return xfer_failed_recving_reqs_ids
+        with self._receiver_finished_lock:
+            xfer_failed_recving_reqs_ids = self.xfer_failed_recving_reqs_ids
+            self.xfer_failed_recving_reqs_ids = set()
+            return xfer_failed_recving_reqs_ids
 
     async def fetch_finished_sending_reqs(self) -> set[ReqId]:
         finished_sending_reqs = self.finished_sending_reqs
@@ -970,24 +989,38 @@ class MooncakeConnectorWorker:
         Get requests that are done sending or recving on this specific worker.
         The scheduler process will use this output to track which workers are done.
         """
+        finished_recving_reqs: set[ReqId] = set()
+        failed_recving_reqs: set[ReqId] = set()
+        send_fut = None
+
         recv_fut = None
         failed_recv_fut = None
-        send_fut = None
-        if not self.is_kv_producer:
+        if (
+            self.is_kv_consumer
+            and self.get_finished_mode == MOONCAKE_GET_FINISHED_LEGACY_MODE
+        ):
             recv_fut = asyncio.run_coroutine_threadsafe(
                 self.fetch_finished_recving_reqs(), self.receiver_loop
             )
             failed_recv_fut = asyncio.run_coroutine_threadsafe(
                 self.fetch_xfer_failed_recving_reqs(), self.receiver_loop
             )
+        elif self.is_kv_consumer:
+            with self._receiver_finished_lock:
+                finished_recving_reqs = self.finished_recving_reqs
+                failed_recving_reqs = self.xfer_failed_recving_reqs_ids
+                self.finished_recving_reqs = set()
+                self.xfer_failed_recving_reqs_ids = set()
 
         if not self.is_kv_consumer:
             send_fut = asyncio.run_coroutine_threadsafe(
                 self.fetch_finished_sending_reqs(), self.sender_loop
             )
 
-        finished_recving_reqs = recv_fut.result() if recv_fut else set()
-        failed_recving_reqs = failed_recv_fut.result() if failed_recv_fut else set()
+        if recv_fut is not None:
+            finished_recving_reqs = recv_fut.result()
+        if failed_recv_fut is not None:
+            failed_recving_reqs = failed_recv_fut.result()
         finished_sending_reqs = send_fut.result() if send_fut else set()
 
         if finished_sending_reqs or finished_recving_reqs:
@@ -1076,13 +1109,20 @@ class MooncakeConnectorWorker:
                 processed_reqs_count = 0
                 success_block_ids = []
                 finished_recving_reqs = set()
+                failed_recving_reqs = set()
                 for response in response_list:
-                    reqs_count, finished_reqs, block_ids = self.process_pulling_result(
+                    (
+                        reqs_count,
+                        finished_reqs,
+                        failed_reqs,
+                        block_ids,
+                    ) = self.process_pulling_result(
                         remote_engine_id, response, pull_metas
                     )
                     processed_reqs_count += reqs_count
                     success_block_ids.extend(block_ids)
                     finished_recving_reqs.update(finished_reqs)
+                    failed_recving_reqs.update(failed_reqs)
 
                 # TODO:check if all reqs are processed
                 assert processed_reqs_count == len(pull_metas), (
@@ -1094,7 +1134,7 @@ class MooncakeConnectorWorker:
 
                 if self._timing_enabled:
                     kv_cache_pull_confirmed_at_ns = time.monotonic_ns()
-                    failed_req_ids = set(self.xfer_failed_recving_reqs_ids)
+                    failed_req_ids = set(failed_recving_reqs)
                     for req_id in finished_recving_reqs:
                         pull_meta = pull_metas[req_id]
                         self._record_kv_receive_stats(
@@ -1112,7 +1152,10 @@ class MooncakeConnectorWorker:
                             if req_id in failed_req_ids
                             else "success",
                         )
-                self.finished_recving_reqs.update(finished_recving_reqs)
+                self._publish_receiver_finished_state(
+                    finished_recving_reqs,
+                    failed_recving_reqs,
+                )
 
         except zmq.ContextTerminated:
             logger.debug("ZMQ context terminated, exiting Mooncake receiver thread.")
@@ -1191,11 +1234,17 @@ class MooncakeConnectorWorker:
                 xfer_failed_reqs_ids,
                 response.msg,
             )
-            self.xfer_failed_recving_reqs_ids.update(xfer_failed_reqs_ids)
-
+            if self.get_finished_mode == MOONCAKE_GET_FINISHED_LEGACY_MODE:
+                with self._receiver_finished_lock:
+                    self.xfer_failed_recving_reqs_ids.update(xfer_failed_reqs_ids)
         finished_recving_reqs = set(success_reqs_ids) | set(xfer_failed_reqs_ids)
 
-        return reqs_count_of_response, finished_recving_reqs, success_block_ids
+        return (
+            reqs_count_of_response,
+            finished_recving_reqs,
+            set(xfer_failed_reqs_ids),
+            success_block_ids,
+        )
 
     async def _connect_to_prefiller_bootstrap(self, remote_bootstrap_addr: str):
         url = remote_bootstrap_addr + "/query"

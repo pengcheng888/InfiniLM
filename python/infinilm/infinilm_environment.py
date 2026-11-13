@@ -2,12 +2,15 @@
 
 import os
 
-
 MOONCAKE_KV_TRANSFER_BYPASS_DELAY_MS_ENV = (
     "INFINILM_MONONCAKE_KV_TRANSFER_BYPASS_DELAY_MS"
 )
 
 FORWARD_BYPASS_DELAY_MS_ENV = "INFINILM_FORWARD_BYPASS_DELAY_MS"
+
+MOONCAKE_GET_FINISHED_MODE_ENV = "INFINILM_MOONCAKE_GET_FINISHED_MODE"
+MOONCAKE_GET_FINISHED_LEGACY_MODE = "legacy"
+MOONCAKE_GET_FINISHED_LOCK_SNAPSHOT_MODE = "lock_snapshot"
 
 
 def get_mooncake_kv_transfer_bypass_delay_ms() -> int | None:
@@ -62,3 +65,23 @@ def get_forward_bypass_delay_ms() -> int | None:
         )
 
     return delay_ms
+
+
+def get_mooncake_get_finished_mode() -> str:
+    """Select the D-side Mooncake get_finished implementation."""
+    raw_value = os.environ.get(MOONCAKE_GET_FINISHED_MODE_ENV)
+    if raw_value is None or not raw_value.strip():
+        return MOONCAKE_GET_FINISHED_LOCK_SNAPSHOT_MODE
+
+    mode = raw_value.strip().lower()
+    supported_modes = {
+        MOONCAKE_GET_FINISHED_LEGACY_MODE,
+        MOONCAKE_GET_FINISHED_LOCK_SNAPSHOT_MODE,
+    }
+    if mode not in supported_modes:
+        raise RuntimeError(
+            f"{MOONCAKE_GET_FINISHED_MODE_ENV} must be one of "
+            f"{sorted(supported_modes)}, got {raw_value!r}"
+        )
+
+    return mode
