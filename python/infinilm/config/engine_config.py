@@ -64,7 +64,7 @@ class EngineConfig:
     top_k: int = 1
     enable_graph: bool = False
     enable_workspace: bool = True
-    max_num_batched_tokens: int = 9216
+    max_num_batched_tokens: int = 18432
     attn_backend: str = "default"
     use_mla: bool = False
     pre_transpose: bool = False

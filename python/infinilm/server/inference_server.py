@@ -118,7 +118,7 @@ class InferenceServer:
         port: int = 8000,
         enable_graph: bool = False,
         enable_workspace: bool = True,
-        max_num_batched_tokens: int = 9216,
+        max_num_batched_tokens: int = 18432,
         attn_backend: str = "default",
         use_mla: bool = False,
         skip_load: bool = False,

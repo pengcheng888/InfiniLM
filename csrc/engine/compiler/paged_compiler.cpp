@@ -43,15 +43,15 @@ PagedCompiler::PagedCompiler(const std::shared_ptr<InfinilmModel> &model, RankBa
         }
     };
 
-    for (size_t b = 1; b < 64; ++b) {
+    for (size_t b = 1; b < 256; ++b) {
         append_batch_size(b);
     }
-    for (size_t b = 64; b < 128; b += 16) {
-        append_batch_size(b);
-    }
-    for (size_t b = 128; b < 256; b += 32) {
-        append_batch_size(b);
-    }
+    // for (size_t b = 64; b < 128; b += 16) {
+    //     append_batch_size(b);
+    // }
+    // for (size_t b = 128; b < 256; b += 32) {
+    //     append_batch_size(b);
+    // }
     for (size_t b = 256; b <= 512; b += 64) {
         append_batch_size(b);
     }

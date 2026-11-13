@@ -167,7 +167,7 @@ class InferEngine(_infinilm.InferEngine):
         use_legacy_moe=False,
         pre_transpose=False,
         enable_workspace_manager=True,
-        max_num_batched_tokens=9216,
+        max_num_batched_tokens=18432,
     ):
         self.hf_config = read_hf_config(model_path)
         self.hf_generation_config = read_hf_generation_config(model_path)
