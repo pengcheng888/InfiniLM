@@ -335,6 +335,9 @@ infinicore::Tensor RankWorker::skip_sample_output_ids(size_t num_outputs) {
     //     "[{}] skip_sample_output_ids: generating {} invalid token IDs",
     //     info(),
     //     num_outputs);
+    // The forward graph may still be executing asynchronously. KV transfer must
+    // not observe the cache until this stream synchronization completes.
+    infinicore::context::syncStream();
 
     auto output_ids = infinicore::Tensor::empty(
         {num_outputs},
@@ -344,10 +347,6 @@ infinicore::Tensor RankWorker::skip_sample_output_ids(size_t num_outputs) {
     for (size_t i{0}; i < num_outputs; ++i) {
         output_data[i] = -1;
     }
-    // The forward graph may still be executing asynchronously. KV transfer must
-    // not observe the cache until this stream synchronization completes.
-    infinicore::context::syncStream();
-
     return output_ids;
 }
 
