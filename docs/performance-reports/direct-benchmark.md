@@ -243,5 +243,5 @@ execution mode 相同的结果。
 不同平台和参数组合下的正式报告应按
 [performance report convention](README.md) 生成。可参考：
 
-- [prefill-direct input 1024 示例报告](nvidia-a100/prefill-direct-nvidia-a100-qwen3-8b-input1024-batch1-8-eager-20261111.md)
-- [decode-direct input 1024 graph 1..256 示例报告](nvidia-a100/decode-direct-nvidia-a100-qwen3-8b-input1024-batch1-256-graph-20261111.md)
+- [prefill-direct input 1024 示例报告](nvidia-a100-tp1/prefill-direct-nvidia-a100-qwen3-8b-input1024-batch1-8-eager-20261111.md)
+- [decode-direct input 1024 graph 1..256 示例报告](nvidia-a100-tp1/decode-direct-nvidia-a100-qwen3-8b-input1024-batch1-256-graph-20261111.md)

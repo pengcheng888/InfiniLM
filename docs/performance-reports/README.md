@@ -5,7 +5,10 @@
 
 ## 当前示例
 
-- 当前平台示例：[NVIDIA A100 性能报告索引](nvidia-a100/README.md)
+- 当前平台示例：
+  [NVIDIA A100 TP=1](nvidia-a100-tp1/README.md)、
+  [NVIDIA A100 TP=2](nvidia-a100-tp2/README.md)、
+  [NVIDIA A100 TP=4](nvidia-a100-tp4/README.md)
 
 以上示例是已填充完成的参考报告。新测试请使用以下模板：
 
@@ -16,7 +19,7 @@
 
 ## 文件命名
 
-新生成的报告存放在对应平台目录中，例如 `nvidia-a100/`。趋势图存放在
+新生成的报告存放在对应平台目录中，例如 `nvidia-a100-tp1/`。趋势图存放在
 对应平台目录下的 `assets/` 中。
 
 文件名使用以下格式：
