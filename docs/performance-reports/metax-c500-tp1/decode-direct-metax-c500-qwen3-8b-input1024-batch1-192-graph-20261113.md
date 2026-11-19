@@ -51,6 +51,8 @@ BENCHMARK_OUTPUT=benchmark-decode-direct-metax-c500-qwen3-8b-input1024-batch1-19
 ./run_bench.sh
 ```
 
+脚本说明：上述命令中的 `run_bench.sh` 是 2026-11-13 测试时的本地脚本名；该脚本未随仓库提交，当前源码树中也没有该文件。复现时应使用等效的 MetaX benchmark 入口，并确认参数为 `--tp 1`、`BENCHMARK_GPU=5` 以及上述环境变量。
+
 ### OOM 降范围说明
 
 首先按 A100 的 batch `1..256` 尝试：

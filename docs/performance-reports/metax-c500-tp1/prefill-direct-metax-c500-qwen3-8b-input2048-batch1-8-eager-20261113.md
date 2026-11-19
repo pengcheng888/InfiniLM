@@ -50,6 +50,9 @@ BENCHMARK_OUTPUT=benchmark-prefill-direct-metax-c500-qwen3-8b-input2048-batch1-8
 ./run_bench.sh
 ```
 
+
+脚本说明：上述命令中的 `run_bench.sh` 是 2026-11-13 测试时的本地脚本名；该脚本未随仓库提交，当前源码树中也没有该文件。复现时应使用等效的 MetaX benchmark 入口，并确认参数为 `--tp 1`、`BENCHMARK_GPU=5` 以及上述环境变量。
+
 ## 执行模式与 Graph 覆盖
 
 `run_bench.sh` 请求开启 graph compiling，但当前 paged graph compiler 的 graph key 只匹配 decode-only 形状。packed prefill 形状不匹配该 key，因此本轮 expected execution mode 为 `eager`。

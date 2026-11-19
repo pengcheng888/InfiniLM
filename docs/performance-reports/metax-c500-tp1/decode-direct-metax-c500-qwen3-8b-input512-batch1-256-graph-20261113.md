@@ -51,6 +51,9 @@ BENCHMARK_OUTPUT=benchmark-decode-direct-metax-c500-qwen3-8b-input512-batch1-256
 ./run_bench.sh
 ```
 
+
+脚本说明：上述命令中的 `run_bench.sh` 是 2026-11-13 测试时的本地脚本名；该脚本未随仓库提交，当前源码树中也没有该文件。复现时应使用等效的 MetaX benchmark 入口，并确认参数为 `--tp 1`、`BENCHMARK_GPU=5` 以及上述环境变量。
+
 ## 执行模式与 Graph 覆盖
 
 当前 paged graph compiler 对 decode batch `1..256` 全部生成对应 graph；原始 JSONL 中所有 overall summary 的 `expected_execution_mode` 均为 `graph`，无 eager fallback 混入。

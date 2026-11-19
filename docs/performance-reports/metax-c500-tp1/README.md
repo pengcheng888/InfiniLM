@@ -1,6 +1,6 @@
-# MetaX C500 direct benchmark 报告索引
+# MetaX C500 TP=1 direct benchmark 报告索引
 
-本目录收录 MetaX C500 上 `prefill-direct` 和 `decode-direct` 的无干扰重测报告。全部报告使用 Qwen3-8B、flash-attn、paged KV cache 和物理 GPU 5。
+本目录收录 MetaX C500、TP=1 上 `prefill-direct` 和 `decode-direct` 的无干扰重测报告。全部报告使用 Qwen3-8B、flash-attn、paged KV cache 和物理 GPU 5。
 
 ## 测试环境
 
@@ -14,6 +14,10 @@
 | Warmup / 正式 repeat | 每形状 3 次 / 30 次 |
 | Decode step | 每 repeat 4 step |
 | 干扰控制 | 物理专用 GPU 5；每 10 秒采样 `mx-smi` |
+
+## 测试脚本说明
+
+TP=1 历史报告在本地 `run_bench.sh` 下产生；该脚本未纳入版本控制，当前仓库也不包含该文件。各单项报告中的命令是当时运行方式的记录，不是 checkout 后可直接执行的脚本入口。复现时应使用等效 MetaX benchmark 入口，并确认 `--tp 1`、`BENCHMARK_GPU=5` 以及单项报告中的环境变量。
 
 ## 报告索引
 
@@ -55,6 +59,28 @@ GPU 0-3 曾出现其他用户进程，但没有使用专用 GPU 5。测试结束
 | 1024 | `decode-direct` | 192 | 3,418.89 tok/s |
 | 2048 | `decode-direct` | 104 | 2,394.80 tok/s |
 | 4096 | `decode-direct` | 64 | 1,339.42 tok/s |
+
+## 与 A100 TP=1 对比
+
+下表比较本目录 MetaX C500 TP=1 与 `nvidia-a100-tp1/` 目录 NVIDIA A100 TP=1
+报告的各自峰值吞吐。两组报告均使用 Qwen3-8B、flash-attn、paged KV cache、
+TP=1、warmup 3 次、正式测量 30 次 repeat。
+
+| Input | 模式 | MetaX C500 TP=1 | A100 TP=1 | MetaX / A100 |
+| ---: | --- | ---: | ---: | ---: |
+| 512 | prefill | batch 7，9,310.41 tok/s | batch 5，12,489.58 tok/s | 0.745x |
+| 1024 | prefill | batch 7，9,298.77 tok/s | batch 5，12,514.29 tok/s | 0.743x |
+| 2048 | prefill | batch 8，9,135.67 tok/s | batch 7，12,322.39 tok/s | 0.741x |
+| 4096 | prefill | batch 4，8,681.30 tok/s | batch 4，11,842.50 tok/s | 0.733x |
+| 512 | decode | batch 256，4,552.35 tok/s | batch 256，6,409.31 tok/s | 0.710x |
+| 1024 | decode | batch 192，3,418.89 tok/s | batch 256，5,044.65 tok/s | 0.678x |
+| 2048 | decode | batch 104，2,394.80 tok/s | batch 128，3,240.36 tok/s | 0.739x |
+| 4096 | decode | batch 64，1,339.42 tok/s | batch 64，1,713.84 tok/s | 0.782x |
+
+两个平台使用不同硬件、驱动、runtime 和显存容量，该表只作为同 TP 配置下的
+峰值吞吐量级参考，不是严格控制变量实验。Input 1024 两组报告均使用
+`max_num_batched_tokens=9216`，但 MetaX C500 的 decode 有效 batch 范围为
+`1..192`，A100 为 `1..256`；因此该组合的峰值对比还包含 batch 范围差异。
 
 ## OOM 说明
 
