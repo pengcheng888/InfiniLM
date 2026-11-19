@@ -45,12 +45,13 @@ JSONL 中包含五类事件：
 - `kv_send`：P 侧 Mooncake producer batch timing。
 - `kv_receive`：D 侧 KV pull readiness timing。
 
-当前 timing schema version 为 `5`。v2 将 loop 提交时间点改为调用
+当前 timing schema version 为 `6`。v2 将 loop 提交时间点改为调用
 `call_soon_threadsafe()` 之前，并把字段重命名为
 `loop_submit_started_at_ns`。
 v3 增加 Mooncake timing event。
 v4 在 batch event 中增加 KV connector finalize 阶段时间戳。
 v5 在 batch event 中增加 `get_finished()` 阶段时间戳。
+v6 在 batch event 中增加 StepThread idle wait cumulative counter。
 
 记录的 9 个时间戳为：
 
@@ -88,6 +89,21 @@ get_kv_connector_stats()
 `kv_connector_get_finished_ms` 只表示 `get_finished()` 的调用耗时；
 `kv_connector_finalize_remaining_ms` 表示 finalize 总耗时扣除
 `get_finished()` 后的剩余部分。
+
+Timing 开启时，所有物理 batch event 另外记录：
+
+```text
+step_idle_wait_count_cumulative_at_forward_start
+```
+
+该值是本进程 StepThread 在当前 forward 开始前进入 no-work idle wait 的累计
+次数，不区分等待满 3ms 和被事件提前唤醒。对按时间排序的第一个和最后一个
+batch 求差，即可得到 forward 观测窗口内的 idle wait 次数：
+
+```text
+last.step_idle_wait_count_cumulative_at_forward_start
+- first.step_idle_wait_count_cumulative_at_forward_start
+```
 
 Mooncake P 侧记录：
 
@@ -169,3 +185,5 @@ request_enqueue_to_prefill_start_ms
 `route_token_received_at_ns` 在 `stream_request()` 把 token 返回给 HTTP route
 generator 时记录。`route_token_end_at_ns` 在 route 消费完该 token 后记录；
 流式路径包含 SSE JSON 构造。
+finish event 中的 route 字段保存首 token 时间；计算真实 final route 时，应使用
+`event=token && finished=true` 的 `route_token_end_at_ns`。

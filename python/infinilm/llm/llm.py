@@ -145,7 +145,9 @@ class LLMEngine:
     def timing_enabled(self) -> bool:
         return self.timing_recorder.enabled
 
-    def step(self) -> tuple[bool, list[tuple]]:
+    def step(
+        self, step_idle_wait_count: int | None = None
+    ) -> tuple[bool, list[tuple]]:
         """Run one inference step.
 
         Returns:
@@ -176,8 +178,16 @@ class LLMEngine:
         forward_timing = runner_output.forward_timing
         phase = "prefill" if scheduler_output.is_prefill else "decode"
 
+        if forward_timing is not None and step_idle_wait_count is not None:
+            forward_timing.step_idle_wait_count_cumulative_at_forward_start = (
+                step_idle_wait_count
+            )
+
         if forward_timing is not None:
             batch_size = scheduler_output.num_requests
+            step_idle_wait_count_at_forward_start = (
+                forward_timing.step_idle_wait_count_cumulative_at_forward_start
+            )
             request_ids = [
                 request.request_id for request in scheduler_output.scheduled_requests
             ]
@@ -192,6 +202,9 @@ class LLMEngine:
                         "forward_started_at_ns": (forward_timing.forward_started_at_ns),
                         "forward_completed_at_ns": (
                             forward_timing.forward_completed_at_ns
+                        ),
+                        "step_idle_wait_count_cumulative_at_forward_start": (
+                            step_idle_wait_count_at_forward_start
                         ),
                         "kv_connector_finalize_started_at_ns": getattr(
                             connector_output,
@@ -822,6 +835,7 @@ class AsyncLLMEngine:
         self._healthy = True
         self._abort_queue: Optional[janus.Queue] = None
         self._step_wakeup = threading.Event()
+        self._step_idle_wait_count = 0
 
     def is_healthy(self) -> bool:
         return bool(self._healthy)
@@ -1010,8 +1024,15 @@ class AsyncLLMEngine:
 
             try:
                 self._drain_abort_queue()
-                did_work, pending = self.engine.step()
+                step_idle_wait_count = (
+                    self._step_idle_wait_count if self.timing_enabled else None
+                )
+                did_work, pending = self.engine.step(
+                    step_idle_wait_count=step_idle_wait_count
+                )
                 if not did_work:
+                    if self.timing_enabled:
+                        self._step_idle_wait_count += 1
                     self._step_wakeup.wait(timeout=0.003)
                 elif pending:
                     if any(output.timing is not None for _, output in pending):

@@ -2,7 +2,7 @@
 
 测试时间：2026-11-10 14:05-14:10（Asia/Shanghai）
 
-本文基于一次普通 InferenceServer 的 100 请求实测数据，展示 timing 数据完整性检查、请求级阶段耗时、prefill/decode batch 分布、GPU forward 空泡和瓶颈分析方法。文中数值属于该次测试的实测结果。
+本文基于一次普通 InferenceServer 的 100 请求实测数据，展示 timing 数据完整性检查、请求级阶段耗时、prefill/decode batch 分布、GPU forward 空泡和瓶颈分析方法。文中数值均来自同一个服务 PID 和同一批正式请求；后续报告不要从其他实验中逐项混用数值。
 
 ## 1. 测试配置
 
@@ -20,6 +20,7 @@
 | 输出长度 | 1024 tokens |
 | Warmup | 8 个请求，每请求输出 4 tokens |
 | 采样间隔 | 32 tokens |
+| StepThread 空闲策略 | `Event.wait(timeout=0.003)`，有请求到达时通过 event notify 提前唤醒 |
 
 压测命令：
 
@@ -64,6 +65,17 @@ timing/3399225/timing.jsonl
 | Mean ITL | 17.13 ms/token |
 | P99 ITL | 18.59 ms/token |
 
+客户端请求级分布如下。后续实验报告应优先保留该表，避免只比较均值而忽略长尾：
+
+| 指标 | avg | min | p50 | p95 | p99 | max |
+|---|---:|---:|---:|---:|---:|---:|
+| TTFT ms | 796.44 | 136.53 | 908.53 | 915.01 | 916.60 | 917.51 |
+| E2EL ms | 18322.46 | 16523.40 | 18371.63 | 18696.04 | 18698.77 | 18702.28 |
+| Mean ITL ms | 17.13 | 15.68 | 17.23 | 17.99 | 18.08 | 18.14 |
+
+其中 `Mean ITL ms` 的分布按“每个请求自身的 mean ITL”重新计算；benchmark 输出中的
+`P99 ITL` 是全部 token interval 的分位数，两者口径不同，不应直接比较。
+
 ## 3. Timing 数据完整性
 
 正式请求过滤后的 schema v3 JSONL 记录：
@@ -84,9 +96,14 @@ warning_count: 0
 valid: true
 ```
 
-当前 schema v5 的 PD batch event 可以携带 KV connector finalize 和
+当前 schema v6 的 PD batch event 可以携带 KV connector finalize 和
 `get_finished()` 时间戳。普通服务没有 KV connector，这些字段为 `null` 或缺省；
 connector 相关指标不参与普通服务统计，也不应与 PD 服务比较。
+
+当前 schema v6 的普通服务 batch event 还可以携带
+`step_idle_wait_count_cumulative_at_forward_start`。本示例数据采集于 schema v3，
+因此没有该字段；分析新版数据时应同时报告 forward gap 和 StepThread idle wait
+计数，二者不能互相替代。
 
 数量对齐关系：
 
@@ -110,7 +127,9 @@ decode batch:
 
 ## 4. 请求级阶段耗时
 
-单位均为 ms，由 request finish event 计算。
+单位均为 ms。除 `service enter -> final route token end` 外，本表由 request
+finish event 中的首阶段字段计算；`service enter -> final route token end`
+来自 `finished=true` 的 token event。
 
 | 阶段 | avg | min | p50 | p95 | p99 | max |
 |---|---:|---:|---:|---:|---:|---:|
@@ -146,11 +165,12 @@ decode batch:
 
 物理 prefill batch 分布：
 
-| batch size | 次数 | forward avg | forward min | forward max |
-|---:|---:|---:|---:|---:|
-| 1 | 13 | 123.46 | 122.50 | 124.66 |
-| 3 | 1 | 340.92 | 340.92 | 340.92 |
-| 7 | 12 | 769.80 | 767.58 | 771.76 |
+| batch size | 次数 | forward avg | forward min | forward p50 | forward p95 | forward p99 | forward max |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 13 | 123.46 | 122.50 | 123.01 | 124.66 | 124.66 | 124.66 |
+| 3 | 1 | 340.92 | 340.92 | 340.92 | 340.92 | 340.92 | 340.92 |
+| 7 | 12 | 769.80 | 767.58 | 770.02 | 771.76 | 771.76 | 771.76 |
+| All | 26 | 430.14 | 122.50 | 232.79 | 770.52 | 771.76 | 771.76 |
 
 全部物理 prefill batch 的平均 forward duration 为 430.14 ms；按 request 加权后为 672.91 ms。
 
@@ -190,11 +210,11 @@ TTFT 分布呈明显三峰：
 
 Decode 物理 batch：
 
-| batch size | 次数 | forward avg | forward p50 | forward p95 | forward p99 | forward max |
-|---:|---:|---:|---:|---:|---:|---:|
-| 8 | 12276 | 16.08 | 16.07 | 16.53 | 16.62 | 20.89 |
-| 4 | 1023 | 14.86 | 14.86 | 15.06 | 15.10 | 16.24 |
-| All | 13299 | 15.99 | 16.04 | 16.53 | 16.62 | 20.89 |
+| batch size | 次数 | forward avg | forward min | forward p50 | forward p95 | forward p99 | forward max |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 8 | 12276 | 16.08 | 15.36 | 16.07 | 16.53 | 16.62 | 20.89 |
+| 4 | 1023 | 14.86 | 14.56 | 14.86 | 15.06 | 15.10 | 16.24 |
+| All | 13299 | 15.99 | 14.56 | 16.04 | 16.53 | 16.62 | 20.89 |
 
 不同 decode batch size 下的 forward 解释：
 
@@ -265,6 +285,26 @@ gap(i) =
 forward 空泡时间 =
     观测窗口时长 - 纯 forward 计算时间
 ```
+
+schema v6 的 batch event 还携带
+`step_idle_wait_count_cumulative_at_forward_start`。对同一进程内按时间排序的
+第一个和最后一个物理 batch 求差，可以得到观测窗口内 StepThread 进入 no-work
+idle wait 的次数。历史 schema v3 示例数据没有该字段，因此本节不填充示例数值。
+
+需要注意，forward gap 与 StepThread idle wait 是两个不同口径：
+
+```text
+forward gap =
+    下一次 forward 开始 - 当前 forward 完成
+
+StepThread idle wait count =
+    StepThread 调用 engine.step() 后无工作，进入 no-work wait 的次数
+```
+
+forward gap 包含 request update、scheduler 下一轮调度、input build、API loop
+提交等路径；idle wait count 只说明 StepThread 是否真正进入 no-work 等待。不能用
+`idle wait count = 0` 推断 forward gap 为 0，也不能把 forward gap 全部解释为
+`Event.wait(timeout=0.003)`。
 
 如果把“第一次 forward 开始”到“最后一次 forward 结束”称为本次 batch step 的 GPU forward
 总时间，则该值对应上面的“观测窗口时长”；本节同时给出其中真正用于 forward 计算的时间和
@@ -340,6 +380,23 @@ forward 空泡时间 =
 真正主导空泡总量的是 `decode -> decode`：13286 个连续 decode step 各自带约 `1 ms` 间隔，
 累计 `13.239 s`，占空泡总量 `98.11%`。
 
+#### 按 batch size 转移拆分
+
+phase 级转移可以进一步拆成 batch-size 级转移，便于区分完整 wave 和尾部 wave：
+
+| 前一个 forward | 下一个 forward | 数量 | 空泡总量 | avg | min | p50 | p95 | p99 | max |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| decode=8 | decode=8 | 12,264 | 12,395.956 ms | 1.011 ms | 0.348 ms | 0.993 ms | 1.314 ms | 2.234 ms | 7.316 ms |
+| decode=4 | decode=4 | 1,022 | 843.104 ms | 0.825 ms | 0.300 ms | 0.807 ms | 0.966 ms | 1.615 ms | 2.156 ms |
+| decode=8 | prefill=1 | 12 | 176.985 ms | 14.749 ms | 12.046 ms | 14.601 ms | 17.277 ms | 17.277 ms | 17.277 ms |
+| prefill=1 | prefill=7 | 12 | 52.045 ms | 4.337 ms | 3.628 ms | 4.339 ms | 5.256 ms | 5.256 ms | 5.256 ms |
+| prefill=7 | decode=8 | 12 | 21.830 ms | 1.819 ms | 1.591 ms | 1.785 ms | 2.006 ms | 2.006 ms | 2.006 ms |
+| prefill=1 | prefill=3 | 1 | 2.778 ms | 2.778 ms | 2.778 ms | 2.778 ms | 2.778 ms | 2.778 ms | 2.778 ms |
+| prefill=3 | decode=4 | 1 | 1.267 ms | 1.267 ms | 1.267 ms | 1.267 ms | 1.267 ms | 1.267 ms | 1.267 ms |
+
+完整 wave 的 `decode=8 -> decode=8` 和尾部 wave 的 `decode=4 -> decode=4` 都在
+毫秒级；真正单次较大的边界仍是 `decode=8 -> prefill=1`，但次数很少。
+
 ### 7.4 空泡分析结论
 
 1. 本次普通服务 100 请求测试中，GPU forward 序列的计算占比为 `94.31%`，空泡占比为 `5.69%`；其中纯 prefill forward 计算时间为 `11.184 s`，纯 decode forward 计算时间为 `212.611 s`。
@@ -359,7 +416,37 @@ forward 空泡时间 =
 7. **GPU forward 空泡较低**：从第一次 forward 开始到最后一次 forward 结束共 237.289 s，其中纯 forward 223.795 s，空泡 13.494 s，空泡占比 5.69%；空泡主要来自连续 decode step 间约 1 ms 的固定间隔。
 8. **普通服务无 Mooncake 事件**：`kv_send` / `kv_receive` 数量为 0，`kv_connector_finalize` 指标不适用，符合无 PD 分离服务的预期。
 
-## 9. 复现分析命令
+## 9. 后续报告生成检查项
+
+后续普通服务实验报告可按本示例生成，并在完成分析前逐项检查：
+
+1. **实验条件完整**：记录服务 PID、模型、请求量、并发、输入/输出长度、warmup、
+   timing schema、StepThread 空闲策略和服务启动脚本。
+2. **过滤口径一致**：先按本次服务 PID 过滤，再按 `service_entered_at_ns` 排序
+   finish event，剔除 benchmark 自带 warmup；不要把历史 PID 或 warmup 混入统计。
+3. **数据完整性对齐**：
+   - finish 数量等于正式请求数；
+   - token 采样数量符合首 token、固定间隔采样和 finished token 规则；
+   - prefill batch request occurrence 总和等于请求数；
+   - decode request-step 等于 `请求数 * (输出长度 - 1)`；
+   - validator 无 parse error、validation error 和 warning。
+4. **分布指标完整**：客户端 TTFT/E2EL/ITL、请求阶段耗时、prefill/decode forward、
+   forward gap 均给出 `avg/min/p50/p95/p99/max`；如果样本数很小，也保留完整列。
+5. **不混合不同数据集**：报告中的所有数值必须来自同一次服务 PID 和同一批正式请求。
+   不要为了更新模板而把另一次实验的表格数值逐项替换进来。
+6. **区分 forward duration 与 forward gap**：forward duration 只包含 GPU forward；
+   forward gap 包含 forward 后处理、下一轮调度、input build 和其他 StepThread 路径。
+7. **区分 forward gap 与 idle wait**：schema v6 以后报告
+   `step_idle_wait_count_cumulative_at_forward_start`；不能把 idle wait 计数当作
+   forward gap，也不能用 gap 推断 idle wait。
+8. **解释 batch 形态**：普通服务应说明完整 wave、尾部 wave、prefill `1+N` 调度
+   形态，以及 decode batch size 对 forward duration 和 token 生产力的影响。
+9. **结论必须对应数据**：每个结论至少能追溯到完整性统计、请求级耗时、batch 分布、
+   输出路径耗时或 forward 空泡中的一类证据。
+10. **单次实验不做过强归因**：吞吐和 TTFT 受运行间波动影响；如需比较优化前后，
+    应重复多轮并报告方差或配对结果。
+
+## 10. 复现分析命令
 
 ```bash
 cd /workspace_v0.2.9/InfiniLM-v0.2.9

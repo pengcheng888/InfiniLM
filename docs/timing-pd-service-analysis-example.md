@@ -4,7 +4,8 @@
 
 本文基于一次 Mooncake PD 分离服务的 100 请求实测数据，展示 PD 场景下 timing
 数据完整性检查、P/D 请求级阶段耗时、prefill/decode batch 分布、Mooncake KV
-传输和瓶颈分析方法。文中数值属于该次测试的实测结果。
+传输和瓶颈分析方法。除明确标注为 schema 版本演进或优化对照的内容外，本文数值
+均来自同一个主示例数据集。
 
 ## 1. 执行摘要
 
@@ -56,6 +57,8 @@
 | Warmup | 8 个请求，每请求输出 4 tokens |
 | 采样间隔 | 32 tokens |
 | 测试时 StepThread 空闲策略 | `time.sleep(0.003)` |
+| 主示例 timing schema | v3 |
+| 测试时 D 侧 `get_finished` 路径 | 旧 event-loop future 路径，对应当前 `legacy` 模式 |
 
 说明：本示例数据采集时，StepThread 空闲分支使用固定的
 `time.sleep(0.003)`。当前代码已改为：
@@ -67,6 +70,18 @@ self._step_wakeup.wait(timeout=0.003)
 `add_request()`、abort 和 stop 会通过 `_notify_step_thread()` set 该 event，
 因此空闲 StepThread 可以被提前唤醒；3ms timeout 仅作为无事件时的 fallback。
 本文数值反映的是测试时的 `time.sleep(0.003)` 行为。
+
+当前 D 侧 `get_finished` 默认模式已经改为 `lock_snapshot`：
+
+```bash
+INFINILM_MOONCAKE_GET_FINISHED_MODE=lock_snapshot  # 默认值
+```
+
+如需复现本文的旧路径，应显式设置：
+
+```bash
+INFINILM_MOONCAKE_GET_FINISHED_MODE=legacy
+```
 
 压测命令：
 
@@ -114,6 +129,17 @@ timing/3752527/timing.jsonl  # Decode
 | Mean TPOT | 17.25 ms/token |
 | Mean ITL | 17.25 ms/token |
 | P99 ITL | 18.78 ms/token |
+
+客户端请求级分布如下：
+
+| 指标 | avg | min | p50 | p95 | p99 | max |
+|---|---:|---:|---:|---:|---:|---:|
+| TTFT ms | 452.03 | 170.33 | 526.69 | 970.37 | 971.26 | 972.19 |
+| E2EL ms | 18103.15 | 16795.33 | 18214.48 | 18615.62 | 18638.81 | 18639.12 |
+| Mean ITL ms | 17.25 | 16.25 | 17.33 | 17.47 | 17.47 | 17.47 |
+
+`Mean ITL ms` 分布按每个请求自身的 mean ITL 重新计算；benchmark 输出中的
+`P99 ITL` 是全部 token interval 的分位数，两者口径不同。
 
 ## 4. Timing 数据完整性
 
@@ -182,6 +208,20 @@ Decode request-step 对齐：
 
 因此每个请求都完整经历了 1024 次 decode step，没有缺失采样或中途掉队请求。
 
+### P/D KV 一致性
+
+```text
+kv_send request id 集合 == kv_receive request id 集合
+request block 总量: P 400 blocks, D 400 blocks
+KV bytes: P unique batch bytes 15,099,494,400
+          D request bytes 15,099,494,400
+success request count: P 100, D 100
+```
+
+P 侧 `kv_send` request event 会复制物理 batch 的 `bytes` / `block_count`。总量统计
+必须按 `(pid, batch_id)` 去重后使用 `batch_bytes` / `batch_block_count`，不能直接
+把每个 request event 中的 batch 数值求和。
+
 ## 5. Prefill 侧请求级耗时
 
 单位均为 ms。
@@ -192,6 +232,10 @@ Decode request-step 对齐：
 | scheduler enqueue -> prefill forward start | 53.03 | 0.57 | 1.73 | 120.63 | 123.85 | 124.02 |
 | prefill forward | 305.25 | 122.89 | 125.55 | 768.73 | 768.73 | 768.73 |
 | prefill complete -> loop submit | 1.03 | 0.47 | 0.99 | 1.37 | 1.39 | 2.68 |
+| loop submit -> first batch put start | 1.03 | 0.19 | 0.62 | 2.66 | 3.23 | 4.03 |
+| first batch put | 0.63 | 0.04 | 0.28 | 1.85 | 2.65 | 2.65 |
+| batch put complete -> route token received | 0.78 | 0.14 | 0.54 | 1.82 | 2.18 | 2.30 |
+| route token received -> route token end | 1.25 | 0.20 | 0.53 | 3.72 | 4.50 | 5.19 |
 | service -> first route token | 370.12 | 131.28 | 138.30 | 896.20 | 896.78 | 910.06 |
 | service -> final route token | 371.37 | 131.64 | 138.78 | 898.85 | 901.44 | 911.20 |
 
@@ -206,14 +250,15 @@ batch_size=1 的 full prompt prefill 约 123-126 ms
 
 ## 6. Prefill Batch 与 Forward
 
-| batch size | 次数 | request occurrence | forward avg | forward min | forward max |
-|---:|---:|---:|---:|---:|---:|
-| 1 | 52 | 52 | 124.56 | 122.89 | 125.70 |
-| 3 | 7 | 21 | 341.00 | 340.02 | 342.16 |
-| 4 | 1 | 4 | 454.08 | 454.08 | 454.08 |
-| 5 | 2 | 10 | 571.02 | 570.06 | 571.98 |
-| 6 | 1 | 6 | 663.19 | 663.19 | 663.19 |
-| 7 | 1 | 7 | 768.73 | 768.73 | 768.73 |
+| batch size | 次数 | request occurrence | forward avg | forward min | forward p50 | forward p95 | forward p99 | forward max |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 52 | 52 | 124.56 | 122.89 | 124.58 | 125.54 | 125.70 | 125.70 |
+| 3 | 7 | 21 | 341.00 | 340.02 | 341.31 | 342.16 | 342.16 | 342.16 |
+| 4 | 1 | 4 | 454.08 | 454.08 | 454.08 | 454.08 | 454.08 | 454.08 |
+| 5 | 2 | 10 | 571.02 | 570.06 | 571.02 | 571.98 | 571.98 | 571.98 |
+| 6 | 1 | 6 | 663.19 | 663.19 | 663.19 | 663.19 | 663.19 | 663.19 |
+| 7 | 1 | 7 | 768.73 | 768.73 | 768.73 | 768.73 | 768.73 | 768.73 |
+| All | 64 | 100 | 185.81 | 122.89 | 124.66 | 570.06 | 768.73 | 768.73 |
 
 解释：
 
@@ -221,10 +266,17 @@ batch_size=1 的 full prompt prefill 约 123-126 ms
 - `batch_size=1` 是主要形态，共 52 次。
 - forward 总耗时随 batch 内请求数近似线性增长：batch=1 约 `124.56 ms`，batch=7 约 `768.73 ms`。
 - 大 batch 提高 GPU 利用率，但同 batch 内所有请求共同承受更长的 prefill forward latency。
+- P 侧大 batch 的收益是少量降低物理 GPU 总耗时；代价是 request-weighted prefill
+  forward、KV readiness 和 TTFT 变大。分析 P batching 时应同时报告物理 batch 平均
+  和 request-weighted 平均，不能只看 P GPU 利用率。
 
 ## 7. KV Connector Finalize
 
-当前 timing schema v5 在物理 batch event 中增加：
+主示例数据为 schema v3，没有 connector finalize 时间戳。本节用于展示后续 schema
+演进和当前 `lock_snapshot` 默认模式的判读方法；其中 schema v4/v5 和 5 轮优化对照
+均为独立补充数据，不参与第 4 章主示例的 record count。
+
+当前 schema v6 的 PD batch event 可以包含：
 
 ```text
 kv_connector_finalize_started_at_ns
@@ -233,10 +285,21 @@ kv_connector_get_finished_completed_at_ns
 kv_connector_finalize_completed_at_ns
 ```
 
-本节主表数值来自 schema v4 PD 服务示例数据；schema v5 额外拆出 `get_finished()`
-耗时，文末补充了 v5 复测结果。
+版本演进如下：
 
-这两个字段包住 `ModelRunner.maybe_get_kv_connector_output()` 的 `finally`
+| Schema | 新增能力 | 本节用途 |
+|---|---|---|
+| v3 | Mooncake event | 主示例数据 |
+| v4 | connector finalize 整体耗时 | 诊断 finalize 是否为稳定开销 |
+| v5 | `get_finished()` 单独耗时 | 定位 finalize 主要来源 |
+| v6 | StepThread idle wait cumulative counter | 区分 forward gap 与真正 no-work idle |
+
+schema v6 batch event 还携带
+`step_idle_wait_count_cumulative_at_forward_start`。forward gap 包含 request 更新、
+下一轮调度、input build 等 StepThread 路径；idle wait count 只统计 StepThread 无工作
+进入 wait 的次数。二者不能互相推导。
+
+四个 connector 时间戳包住 `ModelRunner.maybe_get_kv_connector_output()` 的 `finally`
 收尾阶段，覆盖：
 
 ```text
@@ -256,7 +319,7 @@ kv_connector_finalize_ms =
 该指标表示三个 connector 收尾调用的整体耗时，不包含后续
 `Scheduler.update_from_output()`、request token update 或 API loop callback。
 
-### D 侧采样 decode 分布
+### Schema v4 补充：D 侧采样 decode 分布
 
 | 阶段 | avg | min | p50 | p95 | p99 | max |
 |---|---:|---:|---:|---:|---:|---:|
@@ -271,7 +334,7 @@ kv_connector_finalize_ms =
 - 首 token 与后续 token 的 finalize 平均值接近，说明这是每个 decode step 的稳态控制面开销。
 - finalize 后续处理平均 `0.555 ms`，因此不能把 post-forward 额外耗时全部归因于 connector 收尾调用。
 
-### D 侧物理 batch 分布
+### Schema v4 补充：D 侧物理 batch 分布
 
 | batch size | count | finalize avg | finalize p50 | finalize p95 | finalize p99 |
 |---:|---:|---:|---:|---:|---:|
@@ -286,7 +349,7 @@ kv_connector_finalize_ms =
 不同 batch size 下该耗时基本稳定，说明它主要来自固定调用开销，而不是随 batch 内
 request 数线性增长。
 
-### Schema v5：`get_finished()` 拆分
+### Schema v5 补充：`get_finished()` 拆分
 
 2026-11-11 的 schema v5 复测剔除 warmup 后，D 侧共有 13,852 个 decode 物理 batch。
 物理 batch 分布如下：
@@ -300,6 +363,28 @@ request 数线性增长。
 `get_finished()` 占 `kv_connector_finalize` 的约 `97.7%`。这说明 finalize 中的固定
 控制面开销主要来自 `MooncakeConnectorWorker.get_finished()` 的跨线程 future 调度；
 错误块查询和 stats 收集合计不到 `0.01 ms/step`。
+
+### 当前默认：`lock_snapshot`
+
+当前 `run_decode.sh` 默认导出：
+
+```bash
+INFINILM_MOONCAKE_GET_FINISHED_MODE=lock_snapshot
+```
+
+2026-11-13 的 5 轮 A/B 对照使用了 schema v5 的 connector 指标，结果显示：
+
+| 指标 | legacy | lock_snapshot | 变化 |
+|---|---:|---:|---:|
+| `get_finished` avg | 0.340385 ms | 0.011100 ms | -96.7% |
+| `kv_connector_finalize` avg | 0.348070 ms | 0.017661 ms | -94.9% |
+| decode forward gap avg | 1.216444 ms | 1.064314 ms | -0.152130 ms |
+| output throughput | 432.57 tok/s | 443.45 tok/s | +10.88 tok/s |
+| Mean ITL | 17.234 ms | 16.984 ms | -0.250 ms |
+
+因此，legacy 数值只用于历史解释和回归对照；后续新报告应记录实际
+`INFINILM_MOONCAKE_GET_FINISHED_MODE`，默认情况下通常应看到约 `0.01 ms` 量级的
+`get_finished` 耗时。
 
 ## 8. Mooncake KV Transfer
 
@@ -361,6 +446,9 @@ P/D 属于不同进程和不同 local monotonic clock domain，本报告不做�
 
 ## 9. Decode 侧请求级耗时
 
+除 `service -> final route token` 外，本表由 request finish event 中的首阶段字段
+计算；`service -> final route token` 来自 `finished=true` 的 token event。
+
 | 阶段 | avg | min | p50 | p95 | p99 | max |
 |---|---:|---:|---:|---:|---:|---:|
 | service enter -> scheduler enqueue | 8.29 | 4.31 | 6.30 | 16.49 | 21.70 | 24.07 |
@@ -378,6 +466,21 @@ P/D 属于不同进程和不同 local monotonic clock domain，本报告不做�
 
 客户端 mean E2EL 为 `18103.15 ms`，D 服务内部 final route token 为 `18087.51 ms`，差值约 `15.64 ms`。
 
+客户端 TTFT 分布：
+
+```text
+<200 ms:       44 个请求
+200-400 ms:     0 个请求
+400-600 ms:    28 个请求
+600-800 ms:    15 个请求
+800-1000 ms:   13 个请求
+>=1000 ms:      0 个请求
+```
+
+本数据集中，D 侧 `kv_cache_pull_readiness` 与服务内部 TTFT 的 Pearson 相关性为
+`0.9997`，与 `scheduler enqueue -> first decode forward` 的相关性为 `0.9998`。
+这支持 TTFT 主要由 KV readiness 决定的判断。
+
 ## 10. Decode Forward 与 Batch
 
 请求级 decode forward 总耗时：
@@ -388,16 +491,16 @@ P/D 属于不同进程和不同 local monotonic clock domain，本报告不做�
 
 物理 decode batch 分布：
 
-| batch size | 次数 | request occurrence | forward avg | forward p50 | forward p95 | forward p99 |
-|---:|---:|---:|---:|---:|---:|---:|
-| 1 | 104 | 104 | 13.36 | 13.28 | 13.63 | 14.01 |
-| 2 | 188 | 376 | 14.40 | 14.44 | 14.59 | 14.87 |
-| 3 | 103 | 309 | 14.71 | 14.78 | 14.86 | 15.02 |
-| 4 | 918 | 3672 | 14.98 | 14.97 | 15.19 | 15.32 |
-| 6 | 1 | 6 | 15.82 | 15.82 | 15.82 | 15.82 |
-| 7 | 363 | 2541 | 16.00 | 15.99 | 16.22 | 16.47 |
-| 8 | 11924 | 95392 | 16.05 | 16.06 | 16.39 | 16.55 |
-| All | 13601 | 102400 | 15.92 | 16.02 | 16.38 | 16.55 |
+| batch size | 次数 | request occurrence | forward avg | forward min | forward p50 | forward p95 | forward p99 | forward max |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 104 | 104 | 13.36 | 13.16 | 13.28 | 13.63 | 14.01 | 14.02 |
+| 2 | 188 | 376 | 14.40 | 14.06 | 14.44 | 14.59 | 15.05 | 15.13 |
+| 3 | 103 | 309 | 14.71 | 14.44 | 14.78 | 14.86 | 15.02 | 15.67 |
+| 4 | 918 | 3672 | 14.98 | 14.55 | 14.97 | 15.19 | 15.32 | 15.72 |
+| 6 | 1 | 6 | 15.82 | 15.82 | 15.82 | 15.82 | 15.82 | 15.82 |
+| 7 | 363 | 2541 | 16.00 | 15.64 | 15.99 | 16.22 | 16.48 | 16.61 |
+| 8 | 11924 | 95392 | 16.05 | 15.32 | 16.06 | 16.39 | 16.55 | 20.12 |
+| All | 13601 | 102400 | 15.92 | 13.16 | 16.02 | 16.38 | 16.55 | 20.12 |
 
 Decode batch=8 占比：
 
@@ -566,6 +669,105 @@ Decode forward 间隔分布：
 6. **E2E 主体是 decode forward**：每请求 1024 次 decode forward 总耗时平均 `16380.55 ms`。
 7. **Decode 稳态批量较好**：batch=8 覆盖 `93.16%` request-step，batch=8 forward 平均 `16.05 ms`。
 8. **输出路径开销小**：客户端 ITL 与采样 decode forward 差值约 `1.25 ms`。
-9. **KV connector finalize 是稳定控制面开销**：schema v4 示例中 D 侧平均约 `0.343 ms`；schema v5 进一步确认其中约 `97.7%` 来自 `get_finished()`，错误块查询和 stats 收集合计约 `0.008 ms/step`。
+9. **KV connector finalize 曾是稳定控制面开销**：schema v4 示例中 D 侧平均约 `0.343 ms`；schema v5 进一步确认其中约 `97.7%` 来自 legacy `get_finished()`。当前默认 `lock_snapshot` 已将该均值降至约 `0.011 ms`。
 10. **GPU 空泡形态分离明显**：Decode GPU forward 占比 `92.74%`，空泡来自高频约 `1.25 ms` 的 step 间隔；Prefill GPU forward 占比 `5.48%`，空泡主要来自 wave 间请求到达等待。
 11. **PD 优化优先级**：优先减少 D 侧 KV readiness 等待与 P 侧 prefill batch 碎片化；随后再拆分 finalize 后续的 Scheduler/request 更新路径。输出路径和 Mooncake 数据面写调用不是第一优先级瓶颈。
+
+## 14. 后续报告生成检查项
+
+后续 PD 服务实验报告可按本示例生成，并在完成分析前逐项检查：
+
+1. **实验条件完整**：记录 P/D/Proxy PID、模型、请求量、并发、输入/输出长度、
+   warmup、timing schema、StepThread 空闲策略和 D 侧 `get_finished` mode。
+2. **模式记录正确**：当前默认是 `lock_snapshot`；如做历史对照，需显式记录
+   `INFINILM_MOONCAKE_GET_FINISHED_MODE=legacy`。不要把 legacy 数值当作当前默认。
+3. **P/D 过滤口径一致**：P/D 使用不同 request id 命名空间，必须分别剔除各自前 8 个
+   warmup finish event。P 侧 `kv_send` 使用 D request id，普通 P event 使用 P request id。
+4. **数据完整性对齐**：
+   - P/D finish 数量均等于正式请求数；
+   - P token 数量等于 P 请求数；
+   - D token 采样数量符合采样规则；
+   - P prefill request occurrence 总和等于请求数；
+   - D decode request-step 等于 `请求数 * 输出长度`；
+   - P/D validator 均无 parse error、validation error 和 warning。
+5. **P/D KV 一致性**：校验 `kv_send` / `kv_receive` request id、block、bytes 和 success
+   数量。`kv_send` 总量必须按 `(pid, batch_id)` 去重后使用 batch 字段。
+6. **不跨进程相减**：P/D 时间戳来自各自进程的 local monotonic clock，只能在本进程内计算
+   duration；不得用 P timestamp 减 D timestamp。
+7. **分布指标完整**：客户端 TTFT/E2EL/ITL、请求阶段耗时、P/D batch forward、KV 事件和
+   forward gap 均给出 `avg/min/p50/p95/p99/max`；样本很少时也保留完整列。
+8. **不混合数据集**：主报告所有数值必须来自同一次 P/D 服务和同一批正式请求。schema
+   演进或优化对照应单独标注来源，不能与主数据混淆。
+9. **区分 forward duration / gap / idle wait**：forward duration 只包含 GPU forward；
+   forward gap 包含 forward 后处理、调度和下一轮 input build；schema v6 的 idle wait
+   count 只表示 StepThread 进入 no-work wait 的次数。
+10. **解释 P/D batch 形态**：P 侧应说明请求到达和 batching tradeoff；D 侧应说明 KV
+    readiness 导致的 partial batch 与稳态 batch。
+11. **P 侧空泡按 arrival-dominated 解释**：P idle 主要是请求到达间隔，不应按 D 侧连续
+    decode step 的调度空泡直接优化。
+12. **单次实验不做过强归因**：P batching、KV readiness 和 D partial batch 均有运行间
+    波动；优化结论需要多轮重复或配对实验支持。
+
+## 15. 复现分析命令
+
+以下命令分别在独立 shell 中执行：
+
+```bash
+cd /workspace_v0.2.9/InfiniLM-v0.2.9
+
+INFINILM_TIMING=true \
+INFINILM_MOONCAKE_GET_FINISHED_MODE=lock_snapshot \
+bash run_prefill.sh
+```
+
+```bash
+cd /workspace_v0.2.9/InfiniLM-v0.2.9
+
+INFINILM_TIMING=true \
+INFINILM_MOONCAKE_GET_FINISHED_MODE=lock_snapshot \
+bash run_decode.sh
+```
+
+```bash
+cd /workspace_v0.2.9/InfiniLM-v0.2.9
+bash run_proxy.sh
+```
+
+压测：
+
+```bash
+cd /workspace_v0.2.9/InfiniLM-Test
+
+TOTAL_REQUESTS=100 \
+HEALTH_URL=http://127.0.0.1:9104/health \
+bash run_matrix_reqs.sh
+```
+
+校验和计算指标：
+
+```bash
+cd /workspace_v0.2.9/InfiniLM-v0.2.9
+
+mkdir -p /tmp/infinilm-pd-case/<prefill_pid> /tmp/infinilm-pd-case/<decode_pid>
+cp timing/<prefill_pid>/timing.jsonl /tmp/infinilm-pd-case/<prefill_pid>/
+cp timing/<decode_pid>/timing.jsonl /tmp/infinilm-pd-case/<decode_pid>/
+
+PYTHONPATH=python python scripts/timing/validate_timing.py \
+  --timing-root /tmp/infinilm-pd-case/<prefill_pid>
+
+PYTHONPATH=python python scripts/timing/validate_timing.py \
+  --timing-root /tmp/infinilm-pd-case/<decode_pid>
+
+PYTHONPATH=python python scripts/timing/compute_timing_metrics.py \
+  --timing-root /tmp/infinilm-pd-case/<prefill_pid>
+
+PYTHONPATH=python python scripts/timing/compute_timing_metrics.py \
+  --timing-root /tmp/infinilm-pd-case/<decode_pid>
+```
+
+注意：直接分析 `timing/` 会包含历史 PID 和 warmup 数据。正式报告应先按本次 P/D PID
+过滤，再分别剔除 P/D 各自前 8 个 warmup finish event。
+
+`validate_timing.py` 和 `compute_timing_metrics.py` 都要求 `--timing-root` 下包含
+`<pid>/timing.jsonl`。因此单 PID 校验前，先把该 PID 的 timing 文件放入独立 case 目录；
+不要把 `--timing-root` 直接指向 `timing/<pid>`。

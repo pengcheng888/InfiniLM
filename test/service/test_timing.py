@@ -296,8 +296,12 @@ def test_step_loop_records_submit_timestamp_before_call_soon_threadsafe():
     engine = object.__new__(AsyncLLMEngine)
     engine._running = True
     engine._step_wakeup = threading.Event()
+    engine._step_idle_wait_count = 0
     engine._drain_abort_queue = lambda: None
-    engine.engine = SimpleNamespace(step=lambda: (True, []))
+    engine.engine = SimpleNamespace(
+        timing_enabled=False,
+        step=lambda step_idle_wait_count=None: (True, []),
+    )
 
     token_timing = TokenTiming(token_index=0)
     output = SimpleNamespace(timing=token_timing)
@@ -315,7 +319,7 @@ def test_step_loop_records_submit_timestamp_before_call_soon_threadsafe():
         engine._running = False
 
     engine._loop = SimpleNamespace(call_soon_threadsafe=call_soon_threadsafe)
-    engine.engine.step = lambda: (True, pending)
+    engine.engine.step = lambda step_idle_wait_count=None: (True, pending)
 
     engine._step_loop()
 
@@ -323,6 +327,31 @@ def test_step_loop_records_submit_timestamp_before_call_soon_threadsafe():
     submit_started_at_ns, call_entered_at_ns = observed[0]
     assert submit_started_at_ns is not None
     assert submit_started_at_ns <= call_entered_at_ns
+
+
+def test_step_loop_counts_idle_waits_when_timing_is_enabled():
+    engine = object.__new__(AsyncLLMEngine)
+    engine._running = True
+    engine._step_wakeup = threading.Event()
+    engine._step_idle_wait_count = 0
+    engine._drain_abort_queue = lambda: None
+    snapshots = []
+
+    def step(step_idle_wait_count=None):
+        snapshots.append(step_idle_wait_count)
+        if len(snapshots) == 1:
+            engine._step_wakeup.set()
+            return False, []
+        engine._running = False
+        return True, []
+
+    engine.engine = SimpleNamespace(timing_enabled=True, step=step)
+    engine._loop = SimpleNamespace(call_soon_threadsafe=lambda callback, args: None)
+
+    engine._step_loop()
+
+    assert snapshots == [0, 1]
+    assert engine._step_idle_wait_count == 1
 
 
 def test_record_timing_token_populates_first_api_loop_timestamps():

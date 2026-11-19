@@ -19,7 +19,8 @@ TIMESTAMP_FIELDS = (
     "route_token_received_at_ns",
     "route_token_end_at_ns",
 )
-SUPPORTED_SCHEMA_VERSIONS = {3, 4, 5}
+SUPPORTED_SCHEMA_VERSIONS = {3, 4, 5, 6}
+STEP_IDLE_WAIT_COUNT_FIELD = "step_idle_wait_count_cumulative_at_forward_start"
 
 
 def _valid_timestamp(value: Any) -> bool:
@@ -156,6 +157,34 @@ def _validate_kv_send_batches(records: list[dict[str, Any]]) -> list[str]:
     return errors
 
 
+def _validate_step_idle_wait_counts(records: list[dict[str, Any]]) -> list[str]:
+    errors: list[str] = []
+    batches_by_pid: dict[Any, list[dict[str, Any]]] = defaultdict(list)
+    for record in records:
+        if record.get("event") != "batch":
+            continue
+        value = record.get(STEP_IDLE_WAIT_COUNT_FIELD)
+        if _valid_count(value):
+            batches_by_pid[record.get("pid", "unknown")].append(record)
+
+    for pid, pid_batches in batches_by_pid.items():
+        ordered = sorted(
+            pid_batches,
+            key=lambda record: record["forward_started_at_ns"],
+        )
+        previous_count: int | None = None
+        for record in ordered:
+            count = record[STEP_IDLE_WAIT_COUNT_FIELD]
+            if previous_count is not None and count < previous_count:
+                errors.append(
+                    f"pid {pid} batch {record.get('batch_id')}: "
+                    "step_idle_wait_count_cumulative_at_forward_start went backwards"
+                )
+            previous_count = count
+
+    return errors
+
+
 def validate_timing_root(root: Path | str) -> dict[str, Any]:
     root = Path(root)
     files = sorted(root.glob("*/timing.jsonl"))
@@ -213,6 +242,16 @@ def validate_timing_root(root: Path | str) -> dict[str, Any]:
                     ]
                 ):
                     errors.append(f"{location}: invalid forward timestamps")
+                idle_wait_count = record.get(STEP_IDLE_WAIT_COUNT_FIELD)
+                if record.get("schema_version") == 6:
+                    if not _valid_count(idle_wait_count):
+                        errors.append(
+                            f"{location}: invalid {STEP_IDLE_WAIT_COUNT_FIELD}"
+                        )
+                elif idle_wait_count is not None:
+                    errors.append(
+                        f"{location}: {STEP_IDLE_WAIT_COUNT_FIELD} requires schema v6"
+                    )
                 finalize_fields = (
                     "kv_connector_finalize_started_at_ns",
                     "kv_connector_get_finished_started_at_ns",
@@ -286,6 +325,7 @@ def validate_timing_root(root: Path | str) -> dict[str, Any]:
                 errors.append(f"{location}: invalid API-loop timestamps")
 
     errors.extend(_validate_kv_send_batches(records))
+    errors.extend(_validate_step_idle_wait_counts(records))
 
     duplicated = {
         request_id: count for request_id, count in finish_counts.items() if count > 1

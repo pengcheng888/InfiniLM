@@ -1,18 +1,21 @@
 # 普通服务与 PD Decode Forward 空泡差异初步分析
 
-数据来源：
+数据来源（2026-11-11 历史实验）：
 
 ```text
 analysis_reports/timing-normal-service-analysis-100-20261111.md
-analysis_reports/timing-pd-service-analysis-100-20261111.md
+PD 侧原始报告 timing-pd-service-analysis-100-20261111.md 已删除
 ```
 
-本文记录一次 100 请求实验中观察到的现象，并给出初步结论。它不是最终因果证明；
-更精确的归因需要继续增加 StepThread 内部分段时间戳或做连接器路径消融实验。
+本文记录 2026-11-11 一次 100 请求实验中观察到的现象，并给出当时的初步结论。它基于
+历史 StepThread 空闲策略和旧 timing 执行模型，不是当前代码的性能基线；PD 侧当前
+参考报告为 `analysis_reports/timing-pd-service-v1-100-syncstream-fixed-20261118.md`。
+本文不是最终因果证明；更精确的归因需要继续增加 StepThread 内部分段时间戳或做
+连接器路径消融实验。
 
 ## 1. 现象
 
-两份报告中的 GPU forward 间隔平均值为：
+两组历史数据中的 GPU forward 间隔平均值为：
 
 | 服务 | 统计对象 | interval count | avg |
 |---|---|---:|---:|

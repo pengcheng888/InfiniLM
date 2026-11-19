@@ -16,6 +16,9 @@ INFINILM_MOONCAKE_GET_FINISHED_MODE=legacy|lock_snapshot
 未设置该环境变量或设置为空字符串时，使用 `lock_snapshot`。非法值会在服务启动时
 报错。
 
+`run_decode.sh` 也会在未设置该变量时显式导出 `lock_snapshot`，作为 PD 服务的
+默认启动模式。需要做旧路径对照时，再显式设置为 `legacy`。
+
 ## 启动示例
 
 新版路径：

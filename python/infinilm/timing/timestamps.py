@@ -27,6 +27,7 @@ class ForwardTiming:
     batch_id: str
     forward_started_at_ns: int
     forward_completed_at_ns: int
+    step_idle_wait_count_cumulative_at_forward_start: int | None = None
 
 
 @dataclass

@@ -42,6 +42,121 @@ def _distribution(values: list[float]) -> dict[str, float | int | None]:
     }
 
 
+def _count_distribution(
+    values: list[int],
+) -> dict[str, float | int | None]:
+    if not values:
+        return {
+            "count": 0,
+            "avg": None,
+            "min": None,
+            "p50": None,
+            "p95": None,
+            "p99": None,
+            "max": None,
+        }
+    ordered = sorted(values)
+    return {
+        "count": len(ordered),
+        "avg": mean(ordered),
+        "min": ordered[0],
+        "p50": median(ordered),
+        "p95": _percentile(ordered, 0.95),
+        "p99": _percentile(ordered, 0.99),
+        "max": ordered[-1],
+    }
+
+
+def _forward_window_metrics(
+    batches: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    ordered = sorted(
+        batches,
+        key=lambda record: record["forward_started_at_ns"],
+    )
+    if not ordered:
+        return None
+
+    first_batch = ordered[0]
+    last_batch = ordered[-1]
+    pure_forward_ms = sum(
+        value
+        for batch in ordered
+        if (
+            value := _elapsed_ms(
+                batch,
+                "forward_started_at_ns",
+                "forward_completed_at_ns",
+            )
+        )
+        is not None
+    )
+    forward_window_ms = _elapsed_ms(
+        {
+            "forward_started_at_ns": first_batch.get("forward_started_at_ns"),
+            "forward_completed_at_ns": last_batch.get("forward_completed_at_ns"),
+        },
+        "forward_started_at_ns",
+        "forward_completed_at_ns",
+    )
+
+    first_idle_count = first_batch.get(
+        "step_idle_wait_count_cumulative_at_forward_start"
+    )
+    last_idle_count = last_batch.get(
+        "step_idle_wait_count_cumulative_at_forward_start"
+    )
+    idle_count_in_window = (
+        last_idle_count - first_idle_count
+        if isinstance(first_idle_count, int) and isinstance(last_idle_count, int)
+        else None
+    )
+    interval_idle_counts = [
+        current["step_idle_wait_count_cumulative_at_forward_start"]
+        - previous["step_idle_wait_count_cumulative_at_forward_start"]
+        for previous, current in zip(ordered, ordered[1:])
+        if isinstance(
+            previous.get("step_idle_wait_count_cumulative_at_forward_start"),
+            int,
+        )
+        and isinstance(
+            current.get("step_idle_wait_count_cumulative_at_forward_start"),
+            int,
+        )
+    ]
+
+    return {
+        "first_batch_id": first_batch.get("batch_id"),
+        "last_batch_id": last_batch.get("batch_id"),
+        "forward_window_ms": forward_window_ms,
+        "pure_forward_ms": pure_forward_ms,
+        "non_forward_gap_ms": (
+            forward_window_ms - pure_forward_ms
+            if forward_window_ms is not None
+            else None
+        ),
+        "step_idle_wait_count_in_window": idle_count_in_window,
+        "entered_step_idle_wait": (
+            idle_count_in_window > 0 if idle_count_in_window is not None else None
+        ),
+        "step_idle_wait_count_since_previous_batch": _count_distribution(
+            interval_idle_counts
+        ),
+    }
+
+
+def _forward_windows_by_pid(
+    batches: list[dict[str, Any]],
+) -> dict[str, dict[str, Any] | None]:
+    batches_by_pid: dict[Any, list[dict[str, Any]]] = defaultdict(list)
+    for batch in batches:
+        batches_by_pid[batch.get("pid", "unknown")].append(batch)
+    return {
+        str(pid): _forward_window_metrics(pid_batches)
+        for pid, pid_batches in batches_by_pid.items()
+    }
+
+
 def _percentile(values: list[float], quantile: float) -> float:
     ordered = sorted(values)
     rank = (len(ordered) - 1) * quantile
@@ -462,6 +577,7 @@ def compute_timing_metrics(root: Path | str) -> dict[str, Any]:
         "token_record_count": len(tokens),
         "batch_record_count": len(batches),
         "finish_record_count": len(finishes),
+        "forward_window_by_pid": _forward_windows_by_pid(batches),
         "token_metrics_ms": token_metrics,
         "request_metrics_ms": request_metrics,
         "batch": {
@@ -491,6 +607,7 @@ def compute_timing_metrics(root: Path | str) -> dict[str, Any]:
                         is not None
                     ]
                 ),
+                "forward_window_by_pid": _forward_windows_by_pid(phase_batches),
                 **_kv_connector_batch_metrics(phase_batches),
             }
             for phase, phase_batches in batch_by_phase.items()
