@@ -606,6 +606,45 @@ def test_non_stream_request_returns_400_when_timing_enabled():
     assert response.json()["error"]["type"] == "invalid_request_error"
 
 
+def test_chat_completions_uses_router_request_id():
+    from fastapi.testclient import TestClient
+    from infinilm.server.inference_server import InferenceServer
+
+    server = object.__new__(InferenceServer)
+    server.engine = SimpleNamespace(timing_enabled=False)
+    captured = {}
+
+    async def fake_stream_chat(request_id, data, request, request_timing=None):
+        captured["request_id"] = request_id
+        yield b'data: {"ok":true}\n\n'
+
+    server._stream_chat = fake_stream_chat
+    client = TestClient(server._create_app())
+
+    response = client.post(
+        "/v1/chat/completions",
+        headers={"X-Request-Id": "router-request-id"},
+        json={"messages": [{"role": "user", "content": "hello"}], "stream": True},
+    )
+
+    assert response.status_code == 200
+    assert captured["request_id"] == "router-request-id"
+
+
+def test_resolve_request_id_rejects_blank_and_overlong_header_values():
+    from infinilm.server.inference_server import (
+        MAX_REQUEST_ID_LENGTH,
+        _resolve_request_id,
+    )
+
+    blank_request = SimpleNamespace(headers={"X-Request-Id": "  "})
+    overlong_request = SimpleNamespace(headers={"X-Request-Id": "x" * 129})
+
+    assert _resolve_request_id(blank_request).startswith("cmpl-")
+    assert _resolve_request_id(overlong_request).startswith("cmpl-")
+    assert MAX_REQUEST_ID_LENGTH == 128
+
+
 def test_chat_defensively_rejects_timing_enabled_mode():
     from infinilm.server.inference_server import InferenceServer
 

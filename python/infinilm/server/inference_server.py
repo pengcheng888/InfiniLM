@@ -25,6 +25,20 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_STREAM_TIMEOUT = 100.0
 DEFAULT_REQUEST_TIMEOUT = 1000.0
+MAX_REQUEST_ID_LENGTH = 128
+
+
+def _resolve_request_id(request: Request) -> str:
+    """Use the router-provided ID when present, falling back to a local UUID."""
+    candidate = request.headers.get("X-Request-Id", "").strip()
+    if candidate and len(candidate) <= MAX_REQUEST_ID_LENGTH:
+        return candidate
+    if candidate:
+        logger.warning(
+            "Ignoring X-Request-Id because its length exceeds %d characters",
+            MAX_REQUEST_ID_LENGTH,
+        )
+    return f"cmpl-{uuid.uuid4().hex}"
 
 
 def chunk_json(
@@ -283,7 +297,7 @@ class InferenceServer:
             data["messages"] = data.get("messages", [])
 
             stream = data.get("stream", False)
-            request_id = f"cmpl-{uuid.uuid4().hex}"
+            request_id = _resolve_request_id(request)
 
             if not stream and self.engine.timing_enabled:
                 return JSONResponse(

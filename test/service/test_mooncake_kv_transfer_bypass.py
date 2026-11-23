@@ -10,6 +10,12 @@ from infinilm.infinilm_environment import (
 )
 
 
+def test_bypass_delay_environment_name_is_spelled_mooncake():
+    assert MOONCAKE_KV_TRANSFER_BYPASS_DELAY_MS_ENV == (
+        "INFINILM_MOONCAKE_KV_TRANSFER_BYPASS_DELAY_MS"
+    )
+
+
 @pytest.mark.parametrize("value", [None, "", "none", "NONE", "None"])
 def test_bypass_delay_is_disabled_for_unset_or_none(monkeypatch, value):
     if value is None:
