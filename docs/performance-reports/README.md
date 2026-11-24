@@ -8,7 +8,10 @@
 - 当前平台示例：
   [NVIDIA A100 TP=1](nvidia-a100-tp1/README.md)、
   [NVIDIA A100 TP=2](nvidia-a100-tp2/README.md)、
-  [NVIDIA A100 TP=4](nvidia-a100-tp4/README.md)
+  [NVIDIA A100 TP=4](nvidia-a100-tp4/README.md)、
+  [Hygon BW1000 TP=1](hygon-bw1000-tp1/README.md)、
+  [Hygon BW1000 TP=2](hygon-bw1000-tp2/README.md)、
+  [Hygon BW1000 TP=4](hygon-bw1000-tp4/README.md)
 
 以上示例是已填充完成的参考报告。新测试请使用以下模板：
 
